@@ -1,0 +1,26 @@
+service:
+  name: infer-nexus
+  host: 0.0.0.0
+  port: 8000
+  log_level: INFO
+  api_key_header: X-API-Key
+
+catalog:
+  models_path: config/models.yaml
+
+cluster:
+  accelerator_type: cuda
+  device_pool_boundary: ray_runtime_visible_devices
+  default_platform: cuda
+
+scheduler:
+  enable_admission_control: true
+  scale_up_cooldown_sec: 30
+  scale_down_cooldown_sec: 300
+  queue_length_threshold: 8
+  ttft_threshold_ms: 2500
+  p95_latency_threshold_ms: 10000
+
+runtime:
+  device_env_strategy: ray_managed
+  backend: vllm

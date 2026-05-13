@@ -1,0 +1,52 @@
+[project]
+name = "infer-nexus"
+version = "0.1.0"
+description = "Shared inference service factory built on Ray Serve and vLLM"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115.0",
+  "pydantic>=2.8.0",
+  "pydantic-settings>=2.4.0",
+  "pyyaml>=6.0.2",
+  "uvicorn>=0.30.0",
+]
+
+[project.optional-dependencies]
+serve = [
+  "ray[serve]>=2.30.0",
+]
+vllm = [
+  "vllm>=0.5.0",
+]
+dev = [
+  "httpx>=0.27.0",
+  "pytest>=8.3.0",
+  "ruff>=0.6.0",
+]
+
+[build-system]
+requires = ["hatchling>=1.25.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/infer_nexus"]
+
+[tool.uv]
+default-groups = []
+
+[[tool.uv.index]]
+name = "tsinghua"
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

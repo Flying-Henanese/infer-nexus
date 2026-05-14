@@ -24,3 +24,9 @@ scheduler:
 runtime:
   device_env_strategy: ray_managed
   backend: vllm
+  execution_mode: stub
+  backend_init_mode: stub
+
+model_store:
+  root_dir: models
+  huggingface_endpoint: https://hf-mirror.com

@@ -1,6 +1,9 @@
 from dataclasses import dataclass, field
 from typing import Any
 
+from infer_nexus.backends.base import InferenceBackend
+from infer_nexus.backends.vllm import VLLMBackend
+from infer_nexus.core.schemas import ChatCompletionsRequest, EmbeddingRequest, RerankRequest
 from infer_nexus.catalog.models import ModelConfig
 
 
@@ -19,16 +22,81 @@ class DeploymentSpec:
 
 
 class ModelRuntimeReplica:
-    """Placeholder Ray Serve replica until a real backend runtime is attached."""
+    """Serve replica that dispatches task requests into a backend adapter."""
 
-    def __init__(self, runtime_context: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        runtime_context: dict[str, Any],
+        backend: InferenceBackend | None = None,
+    ) -> None:
         self.runtime_context = runtime_context
+        self.backend = backend or self._build_backend(runtime_context["runtime_spec"]["backend"])
+        self.backend.validate_runtime_spec(
+            self.runtime_context["runtime_spec"],
+            self.runtime_context,
+        )
+        self.backend.startup()
+
+    def _build_backend(self, backend_name: str) -> InferenceBackend:
+        if backend_name == "vllm":
+            return VLLMBackend(self.runtime_context["runtime_spec"])
+        raise ValueError(f"unsupported backend '{backend_name}'")
+
+    async def chat_completion(self, payload: dict[str, Any]) -> dict[str, Any]:
+        request = ChatCompletionsRequest.model_validate(payload)
+        response = await self.backend.chat_completion(
+            self.runtime_context["runtime_spec"],
+            request,
+            self.runtime_context,
+        )
+        return {"status": "ok", **response}
+
+    async def embedding(self, payload: dict[str, Any]) -> dict[str, Any]:
+        request = EmbeddingRequest.model_validate(payload)
+        response = await self.backend.embedding(
+            self.runtime_context["runtime_spec"],
+            request,
+            self.runtime_context,
+        )
+        return {"status": "ok", **response}
+
+    async def rerank(self, payload: dict[str, Any]) -> dict[str, Any]:
+        request = RerankRequest.model_validate(payload)
+        response = await self.backend.rerank(
+            self.runtime_context["runtime_spec"],
+            request,
+            self.runtime_context,
+        )
+        return {"status": "ok", **response}
 
     async def __call__(self, request: Any) -> dict[str, Any]:
         return {
             "status": "not_implemented",
             "message": "runtime request handling is not connected yet",
             "model": self.runtime_context["model_name"],
+            "path": getattr(getattr(request, "url", None), "path", None),
+        }
+
+    def __del__(self) -> None:
+        backend = getattr(self, "backend", None)
+        if backend is not None:
+            try:
+                backend.shutdown()
+            except Exception:
+                pass
+
+
+class RuntimeApplicationRoot:
+    """Synthetic ingress to keep all model deployments inside one Serve application."""
+
+    def __init__(self, **model_deployments: Any) -> None:
+        self.model_deployments = model_deployments
+
+    async def __call__(self, request: Any | None = None) -> dict[str, Any]:
+        return {
+            "status": "ok",
+            "message": "infer-nexus runtime root is active",
+            "models": sorted(self.model_deployments.keys()),
             "path": getattr(getattr(request, "url", None), "path", None),
         }
 

@@ -361,6 +361,57 @@ Recommended initial files:
 - `config/settings.toml` or `config/settings.yaml`
 - `config/models.yaml`
 
+## 9.1 Local Model Store and Offline Registration
+
+Phase 1 should use a local model store for all model weights. Runtime services should load only from local paths and should not download model weights as part of normal request handling or service startup.
+
+### Design rules
+- all model weights live under a configured local model store root
+- runtime loading uses only locally available model files
+- model download is an offline administrative operation, not part of the serving control plane
+- model registration remains declarative and file-based
+- the download workflow must not automatically mutate the main model registry configuration
+
+### Operational workflow
+The intended Phase 1 workflow is:
+1. an administrator runs a standalone download script
+2. the script downloads a model into the local model store
+3. the script prints a suggested model configuration snippet
+4. the administrator reviews that output and manually adds the model entry to `config/models.yaml`
+5. the service starts or reloads using only models already present in configuration and on local disk
+
+This keeps the serving path simple and avoids coupling model artifact acquisition to runtime lifecycle operations.
+
+### Local model store responsibilities
+The local model store concept in Phase 1 is intentionally narrow:
+- define a root directory for model artifacts
+- provide a stable location for runtime model loading
+- support reuse of previously downloaded weights across restarts and replicas
+
+The local model store is not a full artifact-management subsystem in Phase 1. It should not introduce dynamic registration, automatic cleanup policies, or online model acquisition during request handling.
+
+### Download script behavior
+The standalone download script should:
+- download model weights into the configured local model store
+- support Hugging Face downloads through `hf-mirror.com` under mainland China network conditions
+- optionally support additional sources later, such as ModelScope
+- perform lightweight validation that expected model files exist
+- print a suggested configuration block for manual registration
+
+The script should not directly edit `config/models.yaml`. Manual review and registration is preferred to keep configuration changes explicit and auditable.
+
+### Configuration implications
+Platform settings should include a local model store root, for example through `config/settings.yaml`. Model definitions in `config/models.yaml` should resolve to local model paths rather than relying on remote repository identifiers at runtime.
+
+A relative path under the configured model store root is preferred over a machine-specific absolute path. This keeps configuration more portable across environments.
+
+### Runtime implications
+At runtime, `infer-nexus` should:
+- load only models declared in `config/models.yaml`
+- resolve each model to a local filesystem path
+- fail clearly if a configured model is missing from local storage
+- avoid implicit remote downloads when starting deployments or serving requests
+
 Example model declaration:
 
 ```yaml
@@ -639,6 +690,7 @@ The following should remain possible without architectural rework:
 - stronger quota and rate-limit controls
 - admin APIs for model lifecycle operations
 - a thin internal UI built on top of native APIs
+- convergence from the current two-process startup shape toward a single operator-facing startup flow while preserving one external API entrypoint
 
 ## 19. Recommended Next Step
 

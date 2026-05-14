@@ -36,6 +36,13 @@ class SchedulerSettings(BaseModel):
 class RuntimeSettings(BaseModel):
     device_env_strategy: str = "ray_managed"
     backend: str = "vllm"
+    execution_mode: str = "stub"
+    backend_init_mode: str = "stub"
+
+
+class ModelStoreSettings(BaseModel):
+    root_dir: str = "models"
+    huggingface_endpoint: str = "https://hf-mirror.com"
 
 
 class Settings(BaseModel):
@@ -44,6 +51,7 @@ class Settings(BaseModel):
     cluster: ClusterSettings = Field(default_factory=ClusterSettings)
     scheduler: SchedulerSettings = Field(default_factory=SchedulerSettings)
     runtime: RuntimeSettings = Field(default_factory=RuntimeSettings)
+    model_store: ModelStoreSettings = Field(default_factory=ModelStoreSettings)
 
 
 def load_settings(path: str | Path = "config/settings.yaml") -> Settings:

@@ -1,0 +1,59 @@
+from infer_nexus.catalog.models import ModelConfig
+from infer_nexus.catalog.registry import ModelRegistry
+from infer_nexus.core.schemas import (
+    ChatCompletionsRequest,
+    ChatCompletionsResponse,
+    EmbeddingRequest,
+    EmbeddingResponse,
+    RerankRequest,
+    RerankResponse,
+)
+from infer_nexus.runtime.executor import RuntimeExecutor
+from infer_nexus.runtime.serve_app import ServeApplicationBuilder
+from infer_nexus.runtime.types import RuntimeTarget
+
+
+class RuntimeDispatcher:
+    def __init__(
+        self,
+        registry: ModelRegistry,
+        serve_builder: ServeApplicationBuilder,
+        executor: RuntimeExecutor,
+    ) -> None:
+        self.registry = registry
+        self.serve_builder = serve_builder
+        self.executor = executor
+
+    def resolve_target(self, model: ModelConfig) -> RuntimeTarget:
+        deployment_name = self.serve_builder.deployment_factory.build_deployment_name(model)
+        runtime_context = self.serve_builder.build_runtime_context(self.registry, model.name)
+        return RuntimeTarget(
+            model_name=model.name,
+            model_alias=model.alias,
+            deployment_name=deployment_name,
+            runtime_context=runtime_context,
+        )
+
+    async def dispatch_chat(
+        self,
+        model: ModelConfig,
+        request: ChatCompletionsRequest,
+    ) -> ChatCompletionsResponse:
+        target = self.resolve_target(model)
+        return await self.executor.execute_chat(target=target, request=request)
+
+    async def dispatch_embedding(
+        self,
+        model: ModelConfig,
+        request: EmbeddingRequest,
+    ) -> EmbeddingResponse:
+        target = self.resolve_target(model)
+        return await self.executor.execute_embedding(target=target, request=request)
+
+    async def dispatch_rerank(
+        self,
+        model: ModelConfig,
+        request: RerankRequest,
+    ) -> RerankResponse:
+        target = self.resolve_target(model)
+        return await self.executor.execute_rerank(target=target, request=request)

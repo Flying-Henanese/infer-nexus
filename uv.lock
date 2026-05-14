@@ -1562,6 +1562,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+artifacts = [
+    { name = "huggingface-hub" },
+]
 dev = [
     { name = "httpx" },
     { name = "pytest" },
@@ -1578,6 +1581,7 @@ vllm = [
 requires-dist = [
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27.0" },
+    { name = "huggingface-hub", marker = "extra == 'artifacts'", specifier = ">=0.32.0" },
     { name = "pydantic", specifier = ">=2.8.0" },
     { name = "pydantic-settings", specifier = ">=2.4.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3.0" },
@@ -1587,7 +1591,7 @@ requires-dist = [
     { name = "uvicorn", specifier = ">=0.30.0" },
     { name = "vllm", marker = "extra == 'vllm'", specifier = ">=0.5.0" },
 ]
-provides-extras = ["serve", "vllm", "dev"]
+provides-extras = ["artifacts", "serve", "vllm", "dev"]
 
 [[package]]
 name = "iniconfig"

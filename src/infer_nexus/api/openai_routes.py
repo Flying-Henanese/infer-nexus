@@ -1,21 +1,39 @@
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 
-from infer_nexus.api.deps import get_admission_controller, get_registry
+from infer_nexus.api.deps import (
+    get_admission_controller,
+    get_model_store,
+    get_registry,
+    get_runtime_dispatcher,
+)
 from infer_nexus.catalog.registry import ModelRegistry
 from infer_nexus.control.admission import AdmissionController
 from infer_nexus.core.enums import TaskType
-from infer_nexus.core.errors import AdmissionRejectedError, ModelNotFoundError
+from infer_nexus.core.errors import (
+    AdmissionRejectedError,
+    BackendRequestValidationError,
+    ModelArtifactMissingError,
+    ModelNotFoundError,
+    RuntimeNotConnectedError,
+)
 from infer_nexus.core.schemas import (
     ChatCompletionsRequest,
+    ChatCompletionsResponse,
     EmbeddingRequest,
+    EmbeddingResponse,
     ModelListResponse,
     ModelSummary,
     OpenAIErrorDetail,
     OpenAIErrorResponse,
+    RerankRequest,
+    RerankResponse,
 )
+from infer_nexus.model_store import LocalModelStore
+from infer_nexus.runtime.dispatcher import RuntimeDispatcher
 
 router = APIRouter(prefix="/v1", tags=["openai"])
+compat_router = APIRouter(tags=["openai"])
 
 
 def openai_error_response(
@@ -48,12 +66,14 @@ async def list_models(registry: ModelRegistry = Depends(get_registry)) -> ModelL
     )
 
 
-@router.post("/chat/completions")
+@router.post("/chat/completions", response_model=ChatCompletionsResponse)
 async def create_chat_completion(
     request: ChatCompletionsRequest,
     registry: ModelRegistry = Depends(get_registry),
     admission: AdmissionController = Depends(get_admission_controller),
-) -> JSONResponse:
+    model_store: LocalModelStore = Depends(get_model_store),
+    dispatcher: RuntimeDispatcher = Depends(get_runtime_dispatcher),
+) -> ChatCompletionsResponse | JSONResponse:
     try:
         model = registry.get(request.model)
     except ModelNotFoundError:
@@ -75,7 +95,16 @@ async def create_chat_completion(
         )
 
     try:
+        model_store.require_model_path(model)
         admission.check_model_request(model)
+        return await dispatcher.dispatch_chat(model, request)
+    except ModelArtifactMissingError as exc:
+        return openai_error_response(
+            503,
+            str(exc),
+            error_type="service_unavailable_error",
+            code="model_artifact_missing",
+        )
     except AdmissionRejectedError as exc:
         return openai_error_response(
             429,
@@ -83,21 +112,30 @@ async def create_chat_completion(
             error_type="rate_limit_error",
             code=exc.code,
         )
+    except RuntimeNotConnectedError as exc:
+        return openai_error_response(
+            501,
+            str(exc),
+            error_type="not_implemented_error",
+            code=exc.code,
+        )
+    except BackendRequestValidationError as exc:
+        return openai_error_response(
+            400,
+            str(exc),
+            error_type="invalid_request_error",
+            code=exc.code,
+        )
 
-    return openai_error_response(
-        501,
-        "Chat completions runtime is not connected yet.",
-        error_type="not_implemented_error",
-        code="runtime_not_connected",
-    )
 
-
-@router.post("/embeddings")
+@router.post("/embeddings", response_model=EmbeddingResponse)
 async def create_embedding(
     request: EmbeddingRequest,
     registry: ModelRegistry = Depends(get_registry),
     admission: AdmissionController = Depends(get_admission_controller),
-) -> JSONResponse:
+    model_store: LocalModelStore = Depends(get_model_store),
+    dispatcher: RuntimeDispatcher = Depends(get_runtime_dispatcher),
+) -> EmbeddingResponse | JSONResponse:
     try:
         model = registry.get(request.model)
     except ModelNotFoundError:
@@ -119,7 +157,16 @@ async def create_embedding(
         )
 
     try:
+        model_store.require_model_path(model)
         admission.check_model_request(model)
+        return await dispatcher.dispatch_embedding(model, request)
+    except ModelArtifactMissingError as exc:
+        return openai_error_response(
+            503,
+            str(exc),
+            error_type="service_unavailable_error",
+            code="model_artifact_missing",
+        )
     except AdmissionRejectedError as exc:
         return openai_error_response(
             429,
@@ -127,10 +174,90 @@ async def create_embedding(
             error_type="rate_limit_error",
             code=exc.code,
         )
+    except RuntimeNotConnectedError as exc:
+        return openai_error_response(
+            501,
+            str(exc),
+            error_type="not_implemented_error",
+            code=exc.code,
+        )
+    except BackendRequestValidationError as exc:
+        return openai_error_response(
+            400,
+            str(exc),
+            error_type="invalid_request_error",
+            code=exc.code,
+        )
 
-    return openai_error_response(
-        501,
-        "Embeddings runtime is not connected yet.",
-        error_type="not_implemented_error",
-        code="runtime_not_connected",
-    )
+
+async def _create_rerank_impl(
+    request: RerankRequest,
+    registry: ModelRegistry,
+    admission: AdmissionController,
+    model_store: LocalModelStore,
+    dispatcher: RuntimeDispatcher,
+) -> RerankResponse | JSONResponse:
+    try:
+        model = registry.get(request.model)
+    except ModelNotFoundError:
+        return openai_error_response(
+            404,
+            f"The model '{request.model}' does not exist.",
+            error_type="invalid_request_error",
+            param="model",
+            code="model_not_found",
+        )
+
+    if model.task is not TaskType.RERANK:
+        return openai_error_response(
+            400,
+            f"Model '{request.model}' does not support rerank.",
+            error_type="invalid_request_error",
+            param="model",
+            code="unsupported_task_type",
+        )
+
+    try:
+        model_store.require_model_path(model)
+        admission.check_model_request(model)
+        return await dispatcher.dispatch_rerank(model, request)
+    except ModelArtifactMissingError as exc:
+        return openai_error_response(
+            503,
+            str(exc),
+            error_type="service_unavailable_error",
+            code="model_artifact_missing",
+        )
+    except AdmissionRejectedError as exc:
+        return openai_error_response(
+            429,
+            str(exc),
+            error_type="rate_limit_error",
+            code=exc.code,
+        )
+    except RuntimeNotConnectedError as exc:
+        return openai_error_response(
+            501,
+            str(exc),
+            error_type="not_implemented_error",
+            code=exc.code,
+        )
+    except BackendRequestValidationError as exc:
+        return openai_error_response(
+            400,
+            str(exc),
+            error_type="invalid_request_error",
+            code=exc.code,
+        )
+
+
+@router.post("/rerank", response_model=RerankResponse)
+@compat_router.post("/rerank", response_model=RerankResponse)
+async def create_rerank(
+    request: RerankRequest,
+    registry: ModelRegistry = Depends(get_registry),
+    admission: AdmissionController = Depends(get_admission_controller),
+    model_store: LocalModelStore = Depends(get_model_store),
+    dispatcher: RuntimeDispatcher = Depends(get_runtime_dispatcher),
+) -> RerankResponse | JSONResponse:
+    return await _create_rerank_impl(request, registry, admission, model_store, dispatcher)

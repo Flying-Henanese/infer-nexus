@@ -124,3 +124,32 @@ class EmbeddingResponse(BaseModel):
     data: list[EmbeddingData]
     model: str
     usage: TokenUsage
+
+
+class RerankDocument(BaseModel):
+    text: str
+
+
+class RerankRequest(BaseModel):
+    model: str
+    query: str
+    documents: str | list[str]
+    top_n: int = Field(default=0, ge=0)
+    user: str | None = None
+
+
+class RerankUsage(BaseModel):
+    total_tokens: int
+
+
+class RerankResult(BaseModel):
+    index: int
+    document: RerankDocument
+    relevance_score: float
+
+
+class RerankResponse(BaseModel):
+    id: str
+    model: str
+    usage: RerankUsage
+    results: list[RerankResult]

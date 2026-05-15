@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+"""Start the infer-nexus HTTP gateway using Uvicorn.
+
+Loads service host/port from settings and allows CLI overrides for local runs.
+"""
+
 import argparse
 
 import uvicorn
@@ -8,6 +13,7 @@ from infer_nexus.core.config import load_settings
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse gateway startup arguments."""
     parser = argparse.ArgumentParser(description="Run infer-nexus gateway with Uvicorn.")
     parser.add_argument(
         "--settings",
@@ -34,6 +40,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """Run the gateway app entrypoint with resolved host/port."""
     args = parse_args()
     settings = load_settings(args.settings)
     uvicorn.run(

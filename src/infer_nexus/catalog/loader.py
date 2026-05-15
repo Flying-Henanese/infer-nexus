@@ -1,3 +1,5 @@
+"""Catalog file loading utilities."""
+
 from pathlib import Path
 
 import yaml
@@ -7,6 +9,7 @@ from infer_nexus.core.errors import ConfigError
 
 
 def load_model_catalog(path: str | Path) -> ModelCatalogFile:
+    """Load and validate file-based model catalog configuration."""
     config_path = Path(path)
     if not config_path.exists():
         raise ConfigError(f"model catalog file not found: {config_path}")

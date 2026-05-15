@@ -6,11 +6,15 @@ from infer_nexus.core.enums import BackendType, ModelStatus, TaskType
 
 
 class HealthResponse(BaseModel):
+    """Health-check payload for service liveness endpoints."""
+
     status: Literal["ok"] = "ok"
     service: str = "infer-nexus"
 
 
 class ModelSummary(BaseModel):
+    """OpenAI-style model listing item."""
+
     id: str
     object: Literal["model"] = "model"
     owned_by: str = "infer-nexus"
@@ -21,11 +25,15 @@ class ModelSummary(BaseModel):
 
 
 class ModelListResponse(BaseModel):
+    """OpenAI-compatible model list response envelope."""
+
     object: Literal["list"] = "list"
     data: list[ModelSummary]
 
 
 class CatalogModelResponse(BaseModel):
+    """Native API model metadata response."""
+
     name: str
     alias: str | None = None
     task: TaskType
@@ -44,18 +52,24 @@ class CatalogModelResponse(BaseModel):
 
 
 class ClusterLoadResponse(BaseModel):
+    """Native API cluster load summary."""
+
     status: str
     message: str
     active_models: int
 
 
 class ModelStatusResponse(BaseModel):
+    """Per-model runtime status response."""
+
     name: str
     status: ModelStatus
     message: str
 
 
 class OpenAIErrorDetail(BaseModel):
+    """OpenAI-style error object body."""
+
     message: str
     type: str
     param: str | None = None
@@ -63,16 +77,22 @@ class OpenAIErrorDetail(BaseModel):
 
 
 class OpenAIErrorResponse(BaseModel):
+    """OpenAI-style error response envelope."""
+
     error: OpenAIErrorDetail
 
 
 class ChatMessage(BaseModel):
+    """Chat message unit used in OpenAI-compatible chat APIs."""
+
     role: Literal["system", "user", "assistant", "tool"]
     content: str | list[dict[str, Any]]
     name: str | None = None
 
 
 class ChatCompletionsRequest(BaseModel):
+    """OpenAI-compatible chat completions request."""
+
     model: str
     messages: list[ChatMessage]
     temperature: float | None = None
@@ -82,18 +102,24 @@ class ChatCompletionsRequest(BaseModel):
 
 
 class ChatCompletionChoice(BaseModel):
+    """Single assistant candidate returned by chat completion."""
+
     index: int
     message: ChatMessage
     finish_reason: str | None = None
 
 
 class TokenUsage(BaseModel):
+    """Token accounting object used across response types."""
+
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
 
 
 class ChatCompletionsResponse(BaseModel):
+    """OpenAI-compatible chat completions response."""
+
     id: str
     object: Literal["chat.completion"] = "chat.completion"
     created: int
@@ -103,10 +129,14 @@ class ChatCompletionsResponse(BaseModel):
 
 
 class EmbeddingInputItem(BaseModel):
+    """Embedding input item wrapper for structured variants."""
+
     text: str
 
 
 class EmbeddingRequest(BaseModel):
+    """OpenAI-compatible embeddings request."""
+
     model: str
     input: str | list[str]
     encoding_format: Literal["float", "base64"] | None = "float"
@@ -114,12 +144,16 @@ class EmbeddingRequest(BaseModel):
 
 
 class EmbeddingData(BaseModel):
+    """Single embedding vector entry in the embeddings response."""
+
     object: Literal["embedding"] = "embedding"
     index: int
     embedding: list[float] | str
 
 
 class EmbeddingResponse(BaseModel):
+    """OpenAI-compatible embeddings response."""
+
     object: Literal["list"] = "list"
     data: list[EmbeddingData]
     model: str
@@ -127,10 +161,14 @@ class EmbeddingResponse(BaseModel):
 
 
 class RerankDocument(BaseModel):
+    """Rerank input document wrapper."""
+
     text: str
 
 
 class RerankRequest(BaseModel):
+    """Native rerank request model."""
+
     model: str
     query: str
     documents: str | list[str]
@@ -139,16 +177,22 @@ class RerankRequest(BaseModel):
 
 
 class RerankUsage(BaseModel):
+    """Token accounting for rerank responses."""
+
     total_tokens: int
 
 
 class RerankResult(BaseModel):
+    """Single rerank scoring output entry."""
+
     index: int
     document: RerankDocument
     relevance_score: float
 
 
 class RerankResponse(BaseModel):
+    """Native rerank response model."""
+
     id: str
     model: str
     usage: RerankUsage

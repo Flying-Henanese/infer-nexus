@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+"""Deploy infer-nexus model runtime into a Ray Serve application.
+
+This script builds runtime deployments from configured model catalog entries and
+publishes them under the configured service name.
+"""
+
 import argparse
 
 from infer_nexus.catalog.loader import load_model_catalog
@@ -10,6 +16,7 @@ from infer_nexus.runtime.serve_app import ServeApplicationBuilder
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse Ray/Serve startup options for runtime deployment."""
     parser = argparse.ArgumentParser(description="Run infer-nexus Ray Serve model runtime.")
     parser.add_argument(
         "--settings",
@@ -35,6 +42,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """Initialize Ray, start Serve, and deploy the runtime application."""
     args = parse_args()
 
     settings = load_settings(args.settings)
@@ -46,6 +54,7 @@ def main() -> None:
     )
     builder.validate_registry_runtime_configs(registry)
 
+    # Import lazily so config validation errors surface before Ray bootstrap.
     import ray
     from ray import serve
 

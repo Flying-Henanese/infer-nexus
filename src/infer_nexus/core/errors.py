@@ -1,3 +1,5 @@
+"""Shared exception hierarchy for infer-nexus."""
+
 class InferNexusError(Exception):
     """Base error for infer-nexus."""
 

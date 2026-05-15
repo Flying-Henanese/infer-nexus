@@ -3,6 +3,9 @@ models:
     alias: qwen3-chat
     task: chat
     backend: vllm
+    # Must point to a concrete local model directory (absolute path or path under model_store.root_dir).
+    # The runtime does NOT recursively search a cache root to auto-match repo id/name.
+    # If you use HF/ModelScope cache, set this to the exact model snapshot directory.
     model_path: Qwen/Qwen3-32B-Instruct
     dtype: bfloat16
     tensor_parallel_size: 4

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Execution adapter that bridges request schemas with runtime invocation paths."""
+
 from dataclasses import dataclass
 import inspect
 from time import time
@@ -28,6 +30,8 @@ from infer_nexus.runtime.types import RuntimeTarget
 
 @dataclass(slots=True)
 class RuntimeExecutor:
+    """Execute inference requests via Serve handles or local stub replicas."""
+
     mode: str = "stub"
     handle_resolver: ServeDeploymentHandleResolver | None = None
 
@@ -98,6 +102,7 @@ class RuntimeExecutor:
         method_name: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
+        # Local path is used for stub/dev mode without requiring Ray Serve connectivity.
         replica = ModelRuntimeReplica(target.runtime_context)
         method = getattr(replica, method_name)
         return await method(payload)
@@ -109,6 +114,7 @@ class RuntimeExecutor:
         method_name: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
+        # Serve mode relies on model-specific deployment handles resolved by app name + deployment name.
         if self.handle_resolver is None:
             raise RuntimeNotConnectedError(
                 f"Runtime executor is configured for serve mode but no handle resolver is available "
@@ -141,6 +147,7 @@ class RuntimeExecutor:
             ) from exc
 
     async def _await_handle_response(self, response: Any) -> Any:
+        """Normalize different Ray/Serve return shapes into awaited payload."""
         if inspect.isawaitable(response):
             return await response
         if hasattr(response, "result"):
@@ -153,6 +160,7 @@ class RuntimeExecutor:
         target: RuntimeTarget,
         payload: dict[str, Any],
     ) -> ChatCompletionsResponse:
+        """Adapt backend payload to OpenAI-compatible chat response schema."""
         return ChatCompletionsResponse(
             id=payload.get("id", f"chatcmpl-{uuid4().hex}"),
             created=payload.get("created", int(time())),
@@ -189,6 +197,7 @@ class RuntimeExecutor:
         target: RuntimeTarget,
         payload: dict[str, Any],
     ) -> EmbeddingResponse:
+        """Adapt backend payload to OpenAI-compatible embeddings response schema."""
         return EmbeddingResponse(
             data=[
                 EmbeddingData.model_validate(item)
@@ -217,6 +226,7 @@ class RuntimeExecutor:
         target: RuntimeTarget,
         payload: dict[str, Any],
     ) -> RerankResponse:
+        """Adapt backend payload to native rerank response schema with safe fallback results."""
         document_list = request.documents if isinstance(request.documents, list) else [request.documents]
         fallback_results = [
             {

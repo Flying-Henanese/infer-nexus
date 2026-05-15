@@ -1,0 +1,1 @@
+"""Offline model artifact helpers."""

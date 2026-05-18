@@ -65,15 +65,20 @@ class VLLMBackend(InferenceBackend):
             "dtype": self.runtime_spec.get("dtype") or "auto",
         }
         gpu_memory_utilization = self.runtime_spec.get("gpu_memory_utilization")
-        if gpu_memory_utilization is not None:
-            llm_kwargs["gpu_memory_utilization"] = gpu_memory_utilization
+        max_model_len = self.runtime_spec.get("max_model_len")
         requested_mode = self.runtime_spec.get("task_mode")
 
         # vLLM constructor args vary across versions.
-        # Only pass `task` when the current LLM signature supports it.
+        # Only pass version-sensitive kwargs when the current LLM signature supports them.
         try:
             llm_signature = inspect.signature(LLM.__init__)
-            if "task" in llm_signature.parameters:
+            llm_init_args = llm_signature.parameters
+
+            if gpu_memory_utilization is not None and "gpu_memory_utilization" in llm_init_args:
+                llm_kwargs["gpu_memory_utilization"] = gpu_memory_utilization
+            if max_model_len is not None and "max_model_len" in llm_init_args:
+                llm_kwargs["max_model_len"] = max_model_len
+            if "task" in llm_init_args:
                 llm_kwargs["task"] = requested_mode or "auto"
         except (TypeError, ValueError):
             # If introspection fails, avoid passing version-sensitive args.
@@ -108,6 +113,7 @@ class VLLMBackend(InferenceBackend):
             "model_path": str(resolved_model_path),
             "tensor_parallel_size": model.tensor_parallel_size,
             "dtype": model.dtype,
+            "max_model_len": model.max_model_len,
             "gpu_per_replica": model.gpu_per_replica,
             "gpu_memory_utilization": model.gpu_memory_utilization,
             "cpu_per_replica": model.cpu_per_replica,

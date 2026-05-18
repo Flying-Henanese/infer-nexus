@@ -18,6 +18,7 @@ class ModelConfig(BaseModel):
     max_model_len: int | None = None
     cpu_per_replica: int | float = Field(gt=0)
     gpu_per_replica: int | float = Field(ge=0)
+    gpu_memory_utilization: float | None = Field(default=None, gt=0, le=1)
     min_replicas: int = Field(ge=0)
     max_replicas: int = Field(ge=1)
     capabilities: list[str] = Field(default_factory=list)

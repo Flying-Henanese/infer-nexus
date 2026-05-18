@@ -9,6 +9,7 @@ models:
     max_model_len: 32768
     cpu_per_replica: 4
     gpu_per_replica: 0.3
+    gpu_memory_utilization: 0.75
     min_replicas: 1
     max_replicas: 2
     capabilities:
@@ -27,6 +28,7 @@ models:
     max_model_len: 32768
     cpu_per_replica: 4
     gpu_per_replica: 0.3
+    gpu_memory_utilization: 0.75
     min_replicas: 1
     max_replicas: 2
     labels:

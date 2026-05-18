@@ -6,10 +6,10 @@ models:
     model_path: /nas_data/zhousj/qwen-vl
     dtype: bfloat16
     tensor_parallel_size: 1
-    max_model_len: 32768
+    max_model_len: 4096
     cpu_per_replica: 4
-    gpu_per_replica: 0.3
-    gpu_memory_utilization: 0.3
+    gpu_per_replica: 0.6
+    gpu_memory_utilization: 0.40
     min_replicas: 1
     max_replicas: 2
     capabilities:
@@ -25,10 +25,10 @@ models:
     model_path: /nas_data/models/Qwen/Qwen3-8B
     dtype: bfloat16
     tensor_parallel_size: 1
-    max_model_len: 32768
+    max_model_len: 8192
     cpu_per_replica: 4
-    gpu_per_replica: 0.3
-    gpu_memory_utilization: 0.3
+    gpu_per_replica: 0.6
+    gpu_memory_utilization: 0.4
     min_replicas: 1
     max_replicas: 2
     labels:

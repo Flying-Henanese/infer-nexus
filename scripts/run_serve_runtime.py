@@ -60,6 +60,8 @@ def main() -> None:
 
     runtime_env = {
         "working_dir": ".",
+        # 排除这些文件，防止 Ray 自动触发环境构建逻辑
+        "excludes": ["pyproject.toml", "uv.lock", ".venv", ".git"],
         "env_vars": {"RAY_RUNTIME_ENV_MODIFY_PYTHON_PATH": "0"},
     }
     ray.init(address=args.ray_address, runtime_env=runtime_env)

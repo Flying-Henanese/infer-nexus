@@ -3,7 +3,14 @@ models:
     alias: qwen3-vl-chat-8b-instruct
     task: chat
     backend: vllm
+<<<<<<< HEAD
     model_path: /nas_data/zhousj/qwen-vl
+=======
+    # Must point to a concrete local model directory (absolute path or path under model_store.root_dir).
+    # The runtime does NOT recursively search a cache root to auto-match repo id/name.
+    # If you use HF/ModelScope cache, set this to the exact model snapshot directory.
+    model_path: Qwen/Qwen3-32B-Instruct
+>>>>>>> 7828863494991da21acb321599fd65a1f6a304b1
     dtype: bfloat16
     tensor_parallel_size: 4
     max_model_len: 32768

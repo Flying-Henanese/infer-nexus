@@ -14,19 +14,32 @@ cluster:
   default_platform: cuda
 
 scheduler:
+  # Enable request admission control to protect runtime under overload.
   enable_admission_control: true
+  # Cooldown (seconds) before allowing another scale-up decision.
   scale_up_cooldown_sec: 30
+  # Cooldown (seconds) before allowing another scale-down decision.
   scale_down_cooldown_sec: 300
+  # Queue length threshold used as a scaling pressure signal.
   queue_length_threshold: 8
+  # TTFT threshold in milliseconds (Time To First Token).
   ttft_threshold_ms: 2500
+  # P95 end-to-end latency threshold in milliseconds.
   p95_latency_threshold_ms: 10000
 
 runtime:
   device_env_strategy: ray_managed
   backend: vllm
-  execution_mode: stub
-  backend_init_mode: stub
+  # Stub-only: skips real model execution and uses mocked runtime responses.
+  # Useful for local API contract testing and integration without GPU/models.
+  # For real environment, switch to `serve` to enable real inference execution.
+  execution_mode: serve
+  # Stub-only: skips real backend initialization (e.g., loading vLLM/runtime stack)
+  # so the service can start quickly for simulation and workflow debugging.
+  # For real environment, switch to `real` to initialize the actual backend engine.
+  backend_init_mode: real
 
 model_store:
   root_dir: models
+  # use mirror endpoint to avoid inaccessibility in mainland China
   huggingface_endpoint: https://hf-mirror.com

@@ -1,9 +1,13 @@
+"""Typed schemas for declarative model catalog entries."""
+
 from pydantic import BaseModel, Field, model_validator
 
 from infer_nexus.core.enums import BackendType, ModelStatus, TaskType
 
 
 class ModelConfig(BaseModel):
+    """Declarative model entry loaded from config/models.yaml."""
+
     name: str
     alias: str | None = None
     task: TaskType
@@ -22,10 +26,13 @@ class ModelConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_replica_bounds(self) -> "ModelConfig":
+        """Ensure replica bounds are internally consistent."""
         if self.max_replicas < self.min_replicas:
             raise ValueError("max_replicas must be >= min_replicas")
         return self
 
 
 class ModelCatalogFile(BaseModel):
+    """Top-level catalog file schema."""
+
     models: list[ModelConfig]

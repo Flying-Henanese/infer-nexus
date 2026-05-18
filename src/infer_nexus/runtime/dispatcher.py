@@ -1,3 +1,5 @@
+"""Runtime dispatch orchestration from API-facing model selection to execution target."""
+
 from infer_nexus.catalog.models import ModelConfig
 from infer_nexus.catalog.registry import ModelRegistry
 from infer_nexus.core.schemas import (
@@ -14,6 +16,8 @@ from infer_nexus.runtime.types import RuntimeTarget
 
 
 class RuntimeDispatcher:
+    """Resolve model runtime targets and delegate execution to RuntimeExecutor."""
+
     def __init__(
         self,
         registry: ModelRegistry,
@@ -25,6 +29,7 @@ class RuntimeDispatcher:
         self.executor = executor
 
     def resolve_target(self, model: ModelConfig) -> RuntimeTarget:
+        """Build deployment target metadata from catalog + runtime builder."""
         deployment_name = self.serve_builder.deployment_factory.build_deployment_name(model)
         runtime_context = self.serve_builder.build_runtime_context(self.registry, model.name)
         return RuntimeTarget(

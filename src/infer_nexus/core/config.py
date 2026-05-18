@@ -7,6 +7,8 @@ from infer_nexus.core.errors import ConfigError
 
 
 class ServiceSettings(BaseModel):
+    """Gateway service networking and request-header defaults."""
+
     name: str = "infer-nexus"
     host: str = "0.0.0.0"
     port: int = 8000
@@ -15,16 +17,22 @@ class ServiceSettings(BaseModel):
 
 
 class CatalogSettings(BaseModel):
+    """Catalog file location settings."""
+
     models_path: str = "config/models.yaml"
 
 
 class ClusterSettings(BaseModel):
+    """Cluster-level runtime environment assumptions."""
+
     accelerator_type: str = "cuda"
     device_pool_boundary: str = "ray_runtime_visible_devices"
     default_platform: str = "cuda"
 
 
 class SchedulerSettings(BaseModel):
+    """Admission and scaling policy thresholds."""
+
     enable_admission_control: bool = True
     scale_up_cooldown_sec: int = 30
     scale_down_cooldown_sec: int = 300
@@ -34,6 +42,8 @@ class SchedulerSettings(BaseModel):
 
 
 class RuntimeSettings(BaseModel):
+    """Runtime backend and execution wiring modes."""
+
     device_env_strategy: str = "ray_managed"
     backend: str = "vllm"
     execution_mode: str = "stub"
@@ -41,11 +51,15 @@ class RuntimeSettings(BaseModel):
 
 
 class ModelStoreSettings(BaseModel):
+    """Local model artifact store settings."""
+
     root_dir: str = "models"
     huggingface_endpoint: str = "https://hf-mirror.com"
 
 
 class Settings(BaseModel):
+    """Top-level platform settings loaded from config/settings.yaml."""
+
     service: ServiceSettings = Field(default_factory=ServiceSettings)
     catalog: CatalogSettings = Field(default_factory=CatalogSettings)
     cluster: ClusterSettings = Field(default_factory=ClusterSettings)
@@ -55,6 +69,7 @@ class Settings(BaseModel):
 
 
 def load_settings(path: str | Path = "config/settings.yaml") -> Settings:
+    """Load and validate YAML settings into typed config objects."""
     config_path = Path(path)
     if not config_path.exists():
         raise ConfigError(f"settings file not found: {config_path}")

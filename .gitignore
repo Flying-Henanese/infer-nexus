@@ -62,6 +62,10 @@ venv.bak/
 models/
 artifacts/
 **/artifacts/
+!src/infer_nexus/artifacts/
+!src/infer_nexus/artifacts/**
+src/infer_nexus/artifacts/**/__pycache__/
+src/infer_nexus/artifacts/**/*.pyc
 
 # mypy
 .mypy_cache/

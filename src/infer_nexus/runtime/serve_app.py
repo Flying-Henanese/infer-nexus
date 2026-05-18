@@ -1,3 +1,5 @@
+"""Ray Serve application assembly utilities for infer-nexus runtime."""
+
 from dataclasses import asdict
 from typing import Any
 
@@ -13,6 +15,8 @@ from infer_nexus.runtime.deployments import (
 
 
 class ServeApplicationBuilder:
+    """Build Ray Serve deployment/application graph from declarative model registry."""
+
     def __init__(
         self,
         model_store: LocalModelStore,
@@ -25,12 +29,15 @@ class ServeApplicationBuilder:
         self.backend = VLLMBackend({})
 
     def build_specs(self, registry: ModelRegistry) -> list[DeploymentSpec]:
+        """Compile per-model deployment specs from the catalog registry."""
         return [self.deployment_factory.build_spec(model) for model in registry.list_models()]
 
     def build_plan(self, registry: ModelRegistry) -> dict[str, dict[str, Any]]:
+        """Build serializable deployment plan for diagnostics and inspection."""
         return {spec.model_name: asdict(spec) for spec in self.build_specs(registry)}
 
     def build_local_dev_summary(self, registry: ModelRegistry) -> dict[str, Any]:
+        """Summarize declared model/deployment layout for local bring-up checks."""
         specs = self.build_specs(registry)
         return {
             "deployments": [spec.deployment_name for spec in specs],
@@ -42,6 +49,7 @@ class ServeApplicationBuilder:
         }
 
     def require_ray_serve(self) -> Any:
+        """Import Ray Serve runtime or fail with actionable dependency hint."""
         try:
             from ray import serve
         except ImportError as exc:
@@ -51,6 +59,7 @@ class ServeApplicationBuilder:
         return serve
 
     def build_runtime_context(self, registry: ModelRegistry, model_name: str) -> dict[str, Any]:
+        """Build validated runtime context passed into each model replica deployment."""
         model = registry.get(model_name)
         resolved_model_path = self.model_store.resolve_model_path(model.model_path)
         runtime_spec = self.backend.build_runtime_spec(model, resolved_model_path)
@@ -67,6 +76,7 @@ class ServeApplicationBuilder:
         return runtime_context
 
     def validate_registry_runtime_configs(self, registry: ModelRegistry) -> None:
+        """Eagerly validate all model runtime contexts at startup."""
         for model in registry.list_models():
             self.build_runtime_context(registry, model.name)
 
@@ -76,6 +86,7 @@ class ServeApplicationBuilder:
         serve: Any | None = None,
         replica_cls: type[ModelRuntimeReplica] = ModelRuntimeReplica,
     ) -> dict[str, Any]:
+        """Create one Serve deployment binding per registered model."""
         serve_runtime = serve or self.require_ray_serve()
         bindings: dict[str, Any] = {}
 
@@ -97,6 +108,7 @@ class ServeApplicationBuilder:
         root_cls: type[RuntimeApplicationRoot] = RuntimeApplicationRoot,
         root_name: str = "infer-nexus-root",
     ) -> Any:
+        """Assemble a single Serve application that contains all model deployments."""
         serve_runtime = serve or self.require_ray_serve()
         bindings = self.build_serve_bindings(
             registry,

@@ -1,3 +1,5 @@
+"""Ray Serve deployment building blocks and per-model deployment specs."""
+
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -9,6 +11,8 @@ from infer_nexus.catalog.models import ModelConfig
 
 @dataclass(slots=True)
 class DeploymentSpec:
+    """Deployment declaration derived from one catalog model."""
+
     model_name: str
     model_alias: str | None
     deployment_name: str
@@ -38,6 +42,7 @@ class ModelRuntimeReplica:
         self.backend.startup()
 
     def _build_backend(self, backend_name: str) -> InferenceBackend:
+        """Instantiate backend adapter from runtime spec."""
         if backend_name == "vllm":
             return VLLMBackend(self.runtime_context["runtime_spec"])
         raise ValueError(f"unsupported backend '{backend_name}'")
@@ -70,6 +75,7 @@ class ModelRuntimeReplica:
         return {"status": "ok", **response}
 
     async def __call__(self, request: Any) -> dict[str, Any]:
+        # Phase 1 keeps ingress minimal; typed task methods are used for inference dispatch.
         return {
             "status": "not_implemented",
             "message": "runtime request handling is not connected yet",
@@ -102,10 +108,14 @@ class RuntimeApplicationRoot:
 
 
 class DeploymentFactory:
+    """Translate model catalog entries into Ray Serve deployment parameters."""
+
     def build_deployment_name(self, model: ModelConfig) -> str:
+        """Build stable per-model deployment names for one-model-per-deployment topology."""
         return f"model-{model.name}"
 
     def build_spec(self, model: ModelConfig) -> DeploymentSpec:
+        # Replica bounds are declarative inputs; Serve owns runtime autoscaling behavior.
         autoscaling_config = {
             "min_replicas": model.min_replicas,
             "max_replicas": model.max_replicas,
@@ -128,6 +138,7 @@ class DeploymentFactory:
         )
 
     def build_serve_deployment_kwargs(self, spec: DeploymentSpec) -> dict[str, Any]:
+        """Produce kwargs passed to `serve.deployment(...)`."""
         return {
             "name": spec.deployment_name,
             "ray_actor_options": dict(spec.ray_actor_options),

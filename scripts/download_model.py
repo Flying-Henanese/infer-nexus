@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+"""Download a Hugging Face model into the configured local model store.
+
+This script also prints a ready-to-paste `config/models.yaml` snippet that uses
+the downloaded path relative to `model_store.root_dir`.
+"""
+
 import argparse
 from pathlib import Path
 
@@ -13,6 +19,7 @@ from infer_nexus.model_store import LocalModelStore
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for model download and registration metadata."""
     parser = argparse.ArgumentParser(description="Download a model into the local infer-nexus model store.")
     parser.add_argument("--repo-id", required=True, help="Hugging Face repo id, for example Qwen/Qwen3-32B-Instruct")
     parser.add_argument("--name", required=True, help="Stable infer-nexus model name")
@@ -35,6 +42,7 @@ def main() -> int:
     settings = load_settings(args.settings_path)
     model_store = LocalModelStore.from_settings(settings.model_store)
 
+    # Download into the canonical store layout under model_store.root_dir.
     downloaded_path = prepare_huggingface_download(
         model_store=model_store,
         repo_id=args.repo_id,
@@ -42,7 +50,10 @@ def main() -> int:
         endpoint=settings.model_store.huggingface_endpoint,
     )
 
+    # Keep model_path aligned with repository config style:
+    # path relative to model_store.root_dir, not an absolute host path.
     relative_model_path = downloaded_path.relative_to(model_store.root_dir)
+    # Build a suggested registry block so users can paste it into models.yaml.
     snippet = build_model_registration_snippet(
         name=args.name,
         alias=args.alias,

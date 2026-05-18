@@ -315,6 +315,29 @@ class VLLMBackend(InferenceBackend):
             "max_tokens": request.max_tokens or 512,
         }
 
+    def _invoke_vllm_chat(self, messages: list[dict[str, Any]], sampling_params: dict[str, Any]) -> Any:
+        """Call vLLM chat across versions with different method signatures."""
+        if self.engine is None:
+            raise RuntimeError("vLLM engine is not initialized")
+
+        try:
+            from vllm import SamplingParams
+        except ImportError:
+            SamplingParams = None  # type: ignore[assignment]
+
+        if SamplingParams is not None:
+            try:
+                return self.engine.chat(messages, sampling_params=SamplingParams(**sampling_params))
+            except TypeError:
+                pass
+
+        try:
+            return self.engine.chat(messages, **sampling_params)
+        except TypeError:
+            if SamplingParams is not None:
+                return self.engine.chat(messages, SamplingParams(**sampling_params))
+            raise
+
     def _build_chat_messages(self, request: ChatCompletionsRequest) -> list[dict[str, Any]]:
         if request.stream:
             raise BackendRequestValidationError(
@@ -426,7 +449,7 @@ class VLLMBackend(InferenceBackend):
                 sampling_params,
             )
 
-        result = self.engine.chat(messages, **sampling_params)
+        result = self._invoke_vllm_chat(messages, sampling_params)
         return self._convert_chat_result(
             request=request,
             runtime_spec=runtime_spec,

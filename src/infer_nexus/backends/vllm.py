@@ -64,6 +64,9 @@ class VLLMBackend(InferenceBackend):
             "tensor_parallel_size": self.runtime_spec["tensor_parallel_size"],
             "dtype": self.runtime_spec.get("dtype") or "auto",
         }
+        gpu_memory_utilization = self.runtime_spec.get("gpu_memory_utilization")
+        if gpu_memory_utilization is not None:
+            llm_kwargs["gpu_memory_utilization"] = gpu_memory_utilization
         requested_mode = self.runtime_spec.get("task_mode")
 
         # vLLM constructor args vary across versions.
@@ -106,6 +109,7 @@ class VLLMBackend(InferenceBackend):
             "tensor_parallel_size": model.tensor_parallel_size,
             "dtype": model.dtype,
             "gpu_per_replica": model.gpu_per_replica,
+            "gpu_memory_utilization": model.gpu_memory_utilization,
             "cpu_per_replica": model.cpu_per_replica,
             "task_mode": task_mode,
         }

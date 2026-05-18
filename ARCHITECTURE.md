@@ -138,6 +138,7 @@ Rationale:
 
 Constraint:
 - Resource admission must avoid accepting traffic the cluster cannot serve reasonably
+- Fractional GPU scheduling alone does not guarantee per-model physical GPU separation
 
 ### 4.4 Resource pool boundary vs deployment resource requests
 The platform must distinguish between two separate concerns:
@@ -184,6 +185,11 @@ The architecture should follow these rules:
 
 This separation is necessary to preserve shared-pool scheduling and avoid falling back to manual device partitioning.
 
+#### Operational caveat observed in current implementation
+- With fractional `num_gpus` (for example `0.3` or `0.6`), Ray may co-locate multiple model replicas on one physical GPU.
+- In this mode, deployments can still fail with vLLM KV cache initialization errors even when catalog config is valid.
+- For stability-first bring-up, prefer one-replica-per-GPU (`num_gpus=1`) before reintroducing fractional sharing.
+
 ### 4.5 Serving backend
 Phase 1 assumes `vLLM` as the only backend.
 
@@ -194,6 +200,7 @@ Rationale:
 
 Implementation note:
 - The codebase should still define a thin backend abstraction to avoid coupling all logic directly to vLLM internals
+- Runtime adapter must tolerate vLLM API drift across versions (constructor kwargs and `LLM.chat()` signatures).
 
 ### 4.6 No Web UI
 Phase 1 is API-only.
@@ -339,6 +346,7 @@ Each model entry should include at least:
 - `dtype`
 - `tensor_parallel_size`
 - `max_model_len`
+- `gpu_memory_utilization`
 - `gpu_per_replica`
 - `min_replicas`
 - `max_replicas`
@@ -411,6 +419,7 @@ At runtime, `infer-nexus` should:
 - resolve each model to a local filesystem path
 - fail clearly if a configured model is missing from local storage
 - avoid implicit remote downloads when starting deployments or serving requests
+- pass model memory/context constraints (`max_model_len`, `gpu_memory_utilization`) through backend runtime specs
 
 Example model declaration:
 
@@ -520,6 +529,7 @@ Scale up when any of these conditions persist for a configured window:
 Only scale up if:
 - current replicas are below `max_replicas`
 - cluster GPU capacity can satisfy the additional replica
+- projected per-replica memory headroom can still satisfy vLLM KV cache initialization
 
 ### Suggested scale-down rules
 Scale down when all of these conditions remain true for a configured cool-down window:

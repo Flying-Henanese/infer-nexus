@@ -1,302 +1,100 @@
 # Next Session Handoff
 
-## Current State
+## Current Snapshot (2026-05-18)
 
-`infer-nexus` is no longer just a skeleton. It now has:
-- a working FastAPI northbound gateway
-- a local model store abstraction
-- offline model download support
-- a runtime dispatcher/executor split
-- per-model Ray Serve deployment assembly
-- backend adapter wiring for `chat`, `embedding`, and `rerank`
-- a minimal dual-process startup path for Ubuntu + CUDA validation
+The project is running in real Ray Serve + vLLM mode on Ubuntu/CUDA and is past the initial scaffolding stage.
 
-The current implementation still defaults to `stub` runtime behavior on this machine, but the code structure is already aligned to the intended real runtime shape.
+Current active model catalog:
+- `Qwen3-VL-8B-Instruct` (`alias: qwen3-vl-chat-8b-instruct`)
+- `Qwen3-8B` (`alias: qwen3-8b`)
 
-## What Was Completed
+Current startup defaults in `scripts/start_minimal.sh`:
+- `CUDA_VISIBLE_DEVICES_VALUE="1,3"`
+- Ray is started only when no existing cluster is reachable.
 
-### Documentation
-- Maintained [ARCHITECTURE.md](./ARCHITECTURE.md) as the design source of truth
-- Maintained [AGENT.md](./AGENT.md) as the implementation guardrail file
-- Added [MINIMAL_STARTUP.md](./MINIMAL_STARTUP.md) for the first runnable Ubuntu + CUDA shape
-- Added [DEPLOYMENT_CHECKLIST.md](./DEPLOYMENT_CHECKLIST.md) for first real-machine bring-up
-- Updated [README.md](./README.md) to point to the startup and deployment docs
-- Updated `ARCHITECTURE.md` to document future convergence toward a single operator-facing startup flow while preserving one external API entrypoint
+## What Was Recently Fixed
 
-### Repository Structure
-- Python source is under `src/infer_nexus/`
-- Tests are under `tests/`
-- Operational scripts are under `scripts/`
-- `uv` is configured to use the Tsinghua mirror in [pyproject.toml](./pyproject.toml)
+1. vLLM 0.18.1 compatibility in backend startup
+- `src/infer_nexus/backends/vllm.py` now avoids passing unsupported `task` kwargs.
+- Task support check falls back safely across versions.
 
-### Configuration
-- Settings file: [config/settings.yaml](./config/settings.yaml)
-- Model catalog: [config/models.yaml](./config/models.yaml)
-- Current registered models:
-  - `qwen3-chat` -> `qwen3-32b-instruct`
-  - `bge-embedding` -> `bge-large-zh-v1.5`
-  - `bge-rerank` -> `bge-reranker-v2-m3`
-- `model_path` now has local-path semantics for runtime loading
-- `model_store.root_dir` is the local model artifact root
-- `model_store.huggingface_endpoint` is `https://hf-mirror.com`
+2. Model-level memory/context knobs are now wired from config
+- `gpu_memory_utilization` added and validated in model schema.
+- `max_model_len` is now passed through runtime spec into `LLM(...)`.
+- Confirmed in logs via `non-default args` and `max_seq_len=...`.
 
-### Local Model Store and Offline Download
-Added:
-- [src/infer_nexus/model_store.py](./src/infer_nexus/model_store.py)
-- [src/infer_nexus/artifacts/download.py](./src/infer_nexus/artifacts/download.py)
-- [scripts/download_model.py](./scripts/download_model.py)
+3. Chat call compatibility across vLLM versions
+- `LLM.chat()` invocation now uses `SamplingParams`-compatible path for vLLM 0.18.1.
+- Fixes `TypeError: unexpected keyword argument 'temperature'`.
 
-Current behavior:
-- runtime only loads from local model paths
-- runtime does not download model weights during startup or request handling
-- the download script downloads into the local model store and prints a suggested registration snippet
-- the download script does not modify `config/models.yaml`
-- missing local model artifacts now surface as explicit errors
+4. Stop script hardening
+- `scripts/stop_minimal.sh` now force-stops Ray (`ray stop -f`) and improves cleanup behavior for child/stray inference processes.
 
-### FastAPI Gateway
-Entrypoint:
-- [src/infer_nexus/main.py](./src/infer_nexus/main.py)
+## Current Main Runtime Problem
 
-Routes:
-- [src/infer_nexus/api/health_routes.py](./src/infer_nexus/api/health_routes.py)
-- [src/infer_nexus/api/platform_routes.py](./src/infer_nexus/api/platform_routes.py)
-- [src/infer_nexus/api/openai_routes.py](./src/infer_nexus/api/openai_routes.py)
-- [src/infer_nexus/api/deps.py](./src/infer_nexus/api/deps.py)
+`max_model_len` is now effective, but deployment can still fail due to GPU memory pressure during KV cache initialization:
 
-Current API surface:
-- `GET /healthz`
-- `GET /readyz`
-- `GET /v1/models`
-- `GET /api/catalog/models`
-- `GET /api/catalog/models/{model_name}`
-- `GET /api/models/{model_name}/status`
-- `GET /api/cluster/load`
-- `GET /api/cluster/capacity`
-- `POST /v1/chat/completions`
-- `POST /v1/embeddings`
-- `POST /v1/rerank`
-- `POST /rerank`
+- Typical failure:
+  - `ValueError: No available memory for the cache blocks`
+  - `Available KV cache memory: <negative GiB>`
 
-Important current behavior:
-- unknown models return `404`
-- task mismatch returns `400 unsupported_task_type`
-- missing local artifacts return `503 model_artifact_missing`
-- phase-1 unsupported request features return `400`, for example `stream=true`
-- serve-mode handle failures return `501 runtime_not_connected`
-- platform lookup/status endpoints now return `404` instead of leaking into `500`
+This is not a config-parsing bug now. It is a scheduling/capacity issue when both models initialize under current GPU sharing behavior.
 
-### Runtime Layer
-Implemented:
-- [src/infer_nexus/runtime/types.py](./src/infer_nexus/runtime/types.py)
-- [src/infer_nexus/runtime/dispatcher.py](./src/infer_nexus/runtime/dispatcher.py)
-- [src/infer_nexus/runtime/executor.py](./src/infer_nexus/runtime/executor.py)
-- [src/infer_nexus/runtime/handles.py](./src/infer_nexus/runtime/handles.py)
-- [src/infer_nexus/runtime/deployments.py](./src/infer_nexus/runtime/deployments.py)
-- [src/infer_nexus/runtime/serve_app.py](./src/infer_nexus/runtime/serve_app.py)
+## Why It Fails
 
-Current structure:
-- route -> dispatcher -> executor -> replica -> backend adapter
-- `RuntimeExecutor` supports:
-  - `stub` mode: local replica invocation
-  - `serve` mode: Serve deployment handle invocation
-- per-model Serve deployment specs are generated from the catalog
-- Serve application assembly can build one composed Serve app containing all model deployments plus a root deployment
+- Ray schedules using logical GPU resources (`gpu_per_replica`) rather than real-time free VRAM.
+- With fractional GPU requests, replicas can still land on the same physical card.
+- vLLM graph capture + weights + KV cache budget can exceed available memory on that card.
 
-### Backend Layer
-Implemented:
-- [src/infer_nexus/backends/base.py](./src/infer_nexus/backends/base.py)
-- [src/infer_nexus/backends/vllm.py](./src/infer_nexus/backends/vllm.py)
+## Recommended Next Actions
 
-Current behavior:
-- `VLLMBackend` is stateful and has lifecycle hooks:
-  - `startup()`
-  - `shutdown()`
-- `backend_init_mode=stub` keeps runtime safe on the current machine
-- `backend_init_mode=real` is prepared for real vLLM engine initialization on Ubuntu + CUDA
-- supported task mappings are explicitly enforced:
-  - `chat -> generate`
-  - `embedding -> embed`
-  - `rerank -> score`
-- config/runtime mismatches fail fast through `BackendConfigurationError`
+1. Enforce model-to-device separation for stability-first validation
+- Prefer `gpu_per_replica: 1` for both models initially.
+- Set both models to `min_replicas: 1`, `max_replicas: 1`.
+- Keep startup bounded with `--cuda-visible-devices 1,3 --num-gpus 2`.
 
-Task-specific behavior:
-- `chat` is designed around `LLM.chat()` semantics
-- `embedding` is designed around `LLM.embed()` semantics
-- `rerank` is designed around `LLM.score()` semantics
+2. If fractional GPU must be kept
+- Add explicit placement/resource constraints in deployment actor options (code change required).
+- Do not rely on fractional `num_gpus` alone for physical separation.
 
-Current Phase 1 request limits:
-- chat only supports text messages
-- chat rejects `stream=true`
-- multimodal message content is rejected
-- `embedding` rejects empty input lists
-- `rerank` rejects empty document lists
+3. Keep memory knobs conservative while dual-model bring-up is unstable
+- Reduce `max_model_len` first, then tune `gpu_memory_utilization`.
+- Remember: in multi-model same-host scenarios, increasing `gpu_memory_utilization` can worsen contention.
 
-### Minimal Startup Path
-Added:
-- [scripts/run_gateway.py](./scripts/run_gateway.py)
-- [scripts/run_serve_runtime.py](./scripts/run_serve_runtime.py)
-- [MINIMAL_STARTUP.md](./MINIMAL_STARTUP.md)
+4. Verify each rollout with log checkpoints
+- `non-default args` shows expected `max_model_len` and `gpu_memory_utilization`.
+- `max_seq_len=...` matches catalog config.
+- No `No available memory for the cache blocks` in either model replica.
 
-Current minimal runtime shape:
-1. Ray Serve runtime process owns model deployments
-2. FastAPI gateway process exposes the northbound APIs
+## Fast Verification Commands
 
-This is deliberate. It keeps runtime debugging and northbound API debugging separate for the first real deployment.
-
-## What Was Verified
-
-### Dependency Installation
-- `uv sync` works with the configured mainland China mirror
-- `uv sync --extra dev` works
-
-### Automated Tests
-Command:
+Health:
 ```bash
-uv run pytest -q
+curl http://127.0.0.1:8000/healthz
 ```
 
-Current result:
-```text
-61 passed in 0.49s
-```
-
-Coverage now includes:
-- health and readiness endpoints
-- catalog and platform endpoints
-- model status behavior
-- OpenAI model discovery
-- chat request success/error paths
-- embedding request success/error paths
-- rerank request success/error paths
-- unknown-model behavior
-- missing-artifact behavior
-- admission rejection behavior
-- serve-handle-not-connected behavior
-- local model store behavior
-- backend request validation behavior
-- runtime dispatch in stub mode
-- runtime dispatch in serve mode with fake handles
-- Serve app/build-plan assembly
-- startup script behavior for both gateway and serve runtime
-- app lifespan wiring for `stub` and `serve` executor modes
-
-### Current Environment Boundaries
-Verified on current macOS environment:
-- Python package layout
-- config loading
-- model registry behavior
-- local model store behavior
-- FastAPI app startup via `TestClient`
-- route behavior
-- runtime dispatch structure
-- backend adapter wiring in stub mode
-- startup script behavior through unit tests
-
-Not verified yet in current environment:
-- real `ray[serve]` runtime startup
-- real `vLLM` installation on this machine
-- GPU resource scheduling
-- CUDA device visibility behavior
-- actual inference execution with a real vLLM engine
-
-Important note:
-- Installing `vllm` on the current macOS arm64 machine did not work with the current dependency path because it resolved NVIDIA-specific packages without compatible wheels.
-- Real vLLM validation should happen on the target `Ubuntu + CUDA` machine.
-
-## Recommended Starting Documents For Next Session
-
-Read these first:
-1. [ARCHITECTURE.md](./ARCHITECTURE.md)
-2. [AGENT.md](./AGENT.md)
-3. [MINIMAL_STARTUP.md](./MINIMAL_STARTUP.md)
-4. [DEPLOYMENT_CHECKLIST.md](./DEPLOYMENT_CHECKLIST.md)
-5. [NEXT_SESSION.md](./NEXT_SESSION.md)
-
-## What Should Be Done Next
-
-### Highest Priority
-1. Perform the first real Ubuntu + CUDA bring-up
-   - Follow [DEPLOYMENT_CHECKLIST.md](./DEPLOYMENT_CHECKLIST.md)
-   - Switch `config/settings.yaml` to:
-     - `runtime.execution_mode: serve`
-     - `runtime.backend_init_mode: real`
-   - Start Ray with an explicit GPU pool boundary
-   - Deploy the Serve runtime
-   - Start the gateway
-   - Verify chat, embedding, and rerank end-to-end
-
-2. Validate real vLLM backend behavior in the target environment
-   - Confirm `VLLMBackend.startup()` can initialize `vllm.LLM(...)`
-   - Confirm `chat` works through the `LLM.chat()` path
-   - Confirm `embedding` works through `LLM.embed()`
-   - Confirm `rerank` works through `LLM.score()`
-   - Inspect any model-specific startup needs such as `hf_overrides`, score templates, or task-specific runner settings
-
-3. Fix real-environment issues found during first deployment
-   - resource sizing mismatches
-   - model artifact path mismatches
-   - Serve handle connectivity issues
-   - backend initialization failures
-   - task-mode compatibility issues
-
-### Next Architectural Step After First Real Bring-Up
-4. Start converging toward a single operator-facing startup flow
-   - Keep one external API entrypoint
-   - Keep Ray Serve as the owner of model replicas
-   - Move toward a Serve ingress deployment for the gateway instead of a permanently separate Uvicorn process
-
-This does **not** mean “clients call per-model Serve ports”.
-The intended direction is:
-- one external API entrypoint
-- gateway logic hosted as Serve ingress
-- model deployments still separate behind it
-
-### After That
-5. Add real runtime-aware load and capacity inspection
-   - replace stub cluster capacity
-   - aggregate real runtime/deployment state
-
-6. Flesh out admission control with real load signals
-   - queue length
-   - TTFT
-   - latency-based rejection hooks
-
-7. Revisit Phase 1 constraints after the first real deployment
-   - streaming
-   - richer rerank behavior
-   - controlled config reload / reconcile
-
-## Recommended Commands For Next Session
-
-Install dependencies:
+Model list:
 ```bash
-uv sync --extra dev
+curl http://127.0.0.1:8000/v1/models
 ```
 
-Run tests:
+Chat test (`qwen3-8b`):
 ```bash
-uv run pytest -q
+curl -X POST "http://127.0.0.1:8000/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen3-8b",
+    "messages": [{"role": "user", "content": "请回复: service ready"}],
+    "temperature": 0.1,
+    "max_tokens": 32,
+    "stream": false
+  }'
 ```
 
-If preparing the target runtime environment:
-```bash
-uv sync --extra serve --extra vllm
-```
+## Files Most Likely To Touch Next
 
-Start gateway locally:
-```bash
-uv run python scripts/run_gateway.py
-```
-
-Start serve runtime on target machine:
-```bash
-uv run python scripts/run_serve_runtime.py --ray-address auto
-```
-
-## Notes For The Next Session
-- The project is now beyond protocol-only scaffolding. Avoid regressing it back into route-level ad hoc logic.
-- Keep the backend abstraction intact. Do not bypass `dispatcher -> executor -> replica -> backend`.
-- Keep `model_path` semantics local-path-oriented.
-- Keep runtime model loading local-only; do not introduce online downloads into startup or request handling.
-- Keep the shared resource-pool model; do not introduce per-model static device pinning.
-- The current dual-process startup shape is temporary but intentional. It exists to simplify the first real deployment, not as the desired long-term UX.
+- `config/models.yaml`
+- `scripts/start_minimal.sh`
+- `scripts/stop_minimal.sh`
+- `src/infer_nexus/backends/vllm.py`
+- `src/infer_nexus/runtime/deployments.py` (if adding placement constraints)

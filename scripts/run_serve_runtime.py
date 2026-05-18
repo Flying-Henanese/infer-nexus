@@ -49,7 +49,11 @@ def main() -> None:
     import ray
     from ray import serve
 
-    ray.init(address=args.ray_address)
+    runtime_env = {
+        "working_dir": ".",
+        "env_vars": {"RAY_RUNTIME_ENV_MODIFY_PYTHON_PATH": "0"},
+    }
+    ray.init(address=args.ray_address, runtime_env=runtime_env)
     serve.start(proxy_location=args.proxy_location)
 
     app = builder.build_serve_application(registry, serve=serve)

@@ -158,6 +158,20 @@ curl -X POST http://127.0.0.1:8000/v1/chat/completions \
   }'
 ```
 
+## One-Click Script
+
+To bring up the whole minimal flow with one command (install deps + start/attach Ray + deploy Serve runtime + start gateway), run:
+
+```bash
+scripts/start_minimal.sh --cuda-visible-devices 0,1,2,3 --num-gpus 4
+```
+
+Stop everything (including Ray) with:
+
+```bash
+scripts/stop_minimal.sh
+```
+
 ## Current Limitations
 
 - The gateway and Serve runtime are still separate processes.

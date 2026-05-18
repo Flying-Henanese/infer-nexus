@@ -33,6 +33,7 @@ class ModelRuntimeReplica:
         runtime_context: dict[str, Any],
         backend: InferenceBackend | None = None,
     ) -> None:
+        """初始化模型副本并启动后端。"""
         self.runtime_context = runtime_context
         self.backend = backend or self._build_backend(runtime_context["runtime_spec"]["backend"])
         self.backend.validate_runtime_spec(
@@ -48,6 +49,7 @@ class ModelRuntimeReplica:
         raise ValueError(f"unsupported backend '{backend_name}'")
 
     async def chat_completion(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """处理 chat completion 负载。"""
         request = ChatCompletionsRequest.model_validate(payload)
         response = await self.backend.chat_completion(
             self.runtime_context["runtime_spec"],
@@ -57,6 +59,7 @@ class ModelRuntimeReplica:
         return {"status": "ok", **response}
 
     async def embedding(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """处理 embedding 负载。"""
         request = EmbeddingRequest.model_validate(payload)
         response = await self.backend.embedding(
             self.runtime_context["runtime_spec"],
@@ -66,6 +69,7 @@ class ModelRuntimeReplica:
         return {"status": "ok", **response}
 
     async def rerank(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """处理 rerank 负载。"""
         request = RerankRequest.model_validate(payload)
         response = await self.backend.rerank(
             self.runtime_context["runtime_spec"],
@@ -75,6 +79,7 @@ class ModelRuntimeReplica:
         return {"status": "ok", **response}
 
     async def __call__(self, request: Any) -> dict[str, Any]:
+        """Serve HTTP ingress 占位处理。"""
         # Phase 1 keeps ingress minimal; typed task methods are used for inference dispatch.
         return {
             "status": "not_implemented",
@@ -84,6 +89,7 @@ class ModelRuntimeReplica:
         }
 
     def __del__(self) -> None:
+        """析构时尝试关闭后端资源。"""
         backend = getattr(self, "backend", None)
         if backend is not None:
             try:
@@ -96,9 +102,11 @@ class RuntimeApplicationRoot:
     """Synthetic ingress to keep all model deployments inside one Serve application."""
 
     def __init__(self, **model_deployments: Any) -> None:
+        """初始化根 ingress，持有所有模型部署绑定。"""
         self.model_deployments = model_deployments
 
     async def __call__(self, request: Any | None = None) -> dict[str, Any]:
+        """返回根应用健康状态与已挂载模型列表。"""
         return {
             "status": "ok",
             "message": "infer-nexus runtime root is active",
@@ -115,6 +123,7 @@ class DeploymentFactory:
         return f"model-{model.name}"
 
     def build_spec(self, model: ModelConfig) -> DeploymentSpec:
+        """从模型配置生成部署规格。"""
         # Replica bounds are declarative inputs; Serve owns runtime autoscaling behavior.
         autoscaling_config = {
             "min_replicas": model.min_replicas,

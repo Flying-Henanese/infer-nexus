@@ -1,3 +1,5 @@
+"""核心枚举定义。"""
+
 from enum import StrEnum
 
 

@@ -1,3 +1,5 @@
+"""运行时分发器测试。"""
+
 import asyncio
 
 import pytest
@@ -14,6 +16,7 @@ from infer_nexus.runtime.serve_app import ServeApplicationBuilder
 
 
 def make_dispatcher(executor: RuntimeExecutor | None = None) -> tuple[ModelRegistry, LocalModelStore, RuntimeDispatcher]:
+    """构造带测试模型目录的运行时分发器。"""
     registry = ModelRegistry(load_model_catalog('config/models.yaml'))
     store = LocalModelStore('models')
     for relative_path in [
@@ -32,6 +35,7 @@ def make_dispatcher(executor: RuntimeExecutor | None = None) -> tuple[ModelRegis
 
 
 def test_dispatcher_resolves_target_with_runtime_context() -> None:
+    """分发器应为模型解析出完整运行时目标。"""
     registry, _, dispatcher = make_dispatcher()
 
     target = dispatcher.resolve_target(registry.get('qwen3-chat'))
@@ -44,6 +48,7 @@ def test_dispatcher_resolves_target_with_runtime_context() -> None:
 
 
 def test_dispatch_chat_returns_stub_chat_completion() -> None:
+    """stub 模式下 chat 分发应返回占位响应。"""
     registry, _, dispatcher = make_dispatcher()
     request = ChatCompletionsRequest(
         model='qwen3-chat',
@@ -60,6 +65,7 @@ def test_dispatch_chat_returns_stub_chat_completion() -> None:
 
 
 def test_dispatch_embedding_returns_stub_embedding_response() -> None:
+    """stub 模式下 embedding 分发应返回占位向量。"""
     registry, _, dispatcher = make_dispatcher()
     request = EmbeddingRequest(
         model='bge-embedding',
@@ -74,6 +80,7 @@ def test_dispatch_embedding_returns_stub_embedding_response() -> None:
 
 
 def test_dispatch_rerank_returns_stub_rerank_response() -> None:
+    """stub 模式下 rerank 分发应返回相关度排序结果。"""
     registry, _, dispatcher = make_dispatcher()
     request = RerankRequest(
         model='bge-rerank',
@@ -95,17 +102,24 @@ def test_dispatch_rerank_returns_stub_rerank_response() -> None:
 
 
 class FakeDeploymentMethod:
+    """模拟 Serve 句柄上的远程方法。"""
+
     def __init__(self, payload: dict) -> None:
+        """保存固定返回负载。"""
         self.payload = payload
 
     async def remote(self, request_payload: dict) -> dict:
+        """回显请求负载并返回预设响应。"""
         result = dict(self.payload)
         result['payload'] = request_payload
         return result
 
 
 class FakeDeploymentHandle:
+    """模拟单个模型部署句柄。"""
+
     def __init__(self, deployment_name: str) -> None:
+        """初始化 chat/embedding/rerank 三类远程方法。"""
         self.chat_completion = FakeDeploymentMethod(
             {
                 'status': 'ok',
@@ -144,12 +158,16 @@ class FakeDeploymentHandle:
 
 
 class FakeServe:
+    """模拟 Serve runtime。"""
+
     def get_deployment_handle(self, deployment_name: str, app_name: str) -> FakeDeploymentHandle:
+        """返回模拟部署句柄。"""
         assert app_name == 'infer-nexus'
         return FakeDeploymentHandle(deployment_name)
 
 
 def test_dispatch_chat_uses_serve_handle_in_serve_mode() -> None:
+    """serve 模式下 chat 分发应通过 deployment handle 执行。"""
     resolver = ServeDeploymentHandleResolver(app_name='infer-nexus', serve=FakeServe())
     executor = RuntimeExecutor(mode='serve', handle_resolver=resolver)
     registry, _, dispatcher = make_dispatcher(executor)
@@ -167,6 +185,7 @@ def test_dispatch_chat_uses_serve_handle_in_serve_mode() -> None:
 
 
 def test_dispatch_embedding_uses_serve_handle_in_serve_mode() -> None:
+    """serve 模式下 embedding 分发应通过 deployment handle 执行。"""
     resolver = ServeDeploymentHandleResolver(app_name='infer-nexus', serve=FakeServe())
     executor = RuntimeExecutor(mode='serve', handle_resolver=resolver)
     registry, _, dispatcher = make_dispatcher(executor)
@@ -183,6 +202,7 @@ def test_dispatch_embedding_uses_serve_handle_in_serve_mode() -> None:
 
 
 def test_dispatch_rerank_uses_serve_handle_in_serve_mode() -> None:
+    """serve 模式下 rerank 分发应通过 deployment handle 执行。"""
     resolver = ServeDeploymentHandleResolver(app_name='infer-nexus', serve=FakeServe())
     executor = RuntimeExecutor(mode='serve', handle_resolver=resolver)
     registry, _, dispatcher = make_dispatcher(executor)
@@ -204,6 +224,7 @@ def test_dispatch_rerank_uses_serve_handle_in_serve_mode() -> None:
 
 
 def test_dispatch_raises_when_serve_mode_has_no_resolver() -> None:
+    """serve 模式未提供 resolver 时应抛出运行时未连接错误。"""
     executor = RuntimeExecutor(mode='serve')
     registry, _, dispatcher = make_dispatcher(executor)
     request = ChatCompletionsRequest(

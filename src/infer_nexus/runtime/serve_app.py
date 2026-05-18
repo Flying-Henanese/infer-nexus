@@ -23,6 +23,7 @@ class ServeApplicationBuilder:
         backend_init_mode: str = "stub",
         deployment_factory: DeploymentFactory | None = None,
     ) -> None:
+        """初始化 Serve 应用构建器。"""
         self.model_store = model_store
         self.backend_init_mode = backend_init_mode
         self.deployment_factory = deployment_factory or DeploymentFactory()

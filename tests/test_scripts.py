@@ -1,3 +1,5 @@
+"""脚本入口行为测试。"""
+
 from __future__ import annotations
 
 import importlib.util
@@ -8,6 +10,7 @@ from infer_nexus.core.config import Settings
 
 
 def load_script_module(module_name: str, relative_path: str):
+    """按相对路径动态加载脚本模块。"""
     script_path = Path(relative_path)
     spec = importlib.util.spec_from_file_location(module_name, script_path)
     assert spec is not None
@@ -22,6 +25,7 @@ run_serve_runtime = load_script_module('run_serve_runtime_script', 'scripts/run_
 
 
 def test_run_gateway_main_uses_settings_and_cli_overrides(monkeypatch) -> None:
+    """run_gateway.main 应使用配置并允许 CLI 覆盖 host/port。"""
     settings = Settings()
     settings.service.host = '0.0.0.0'
     settings.service.port = 8000
@@ -58,6 +62,7 @@ def test_run_gateway_main_uses_settings_and_cli_overrides(monkeypatch) -> None:
 
 
 def test_run_serve_runtime_main_deploys_named_app(monkeypatch, prepared_model_store) -> None:
+    """run_serve_runtime.main 应按服务名部署 Serve 应用。"""
     settings = Settings()
     settings.service.name = 'infer-nexus'
     settings.model_store.root_dir = str(prepared_model_store)

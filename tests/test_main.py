@@ -1,3 +1,5 @@
+"""主应用生命周期测试。"""
+
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -10,6 +12,7 @@ def test_app_lifespan_uses_stub_executor_by_default(
     monkeypatch,
     prepared_model_store: Path,
 ) -> None:
+    """默认配置下应使用 stub 执行器且不创建 serve 句柄解析器。"""
     settings = Settings()
     settings.model_store.root_dir = str(prepared_model_store)
 
@@ -27,6 +30,7 @@ def test_app_lifespan_builds_serve_handle_resolver_in_serve_mode(
     monkeypatch,
     prepared_model_store: Path,
 ) -> None:
+    """serve 模式下应创建 serve 句柄解析器。"""
     settings = Settings()
     settings.model_store.root_dir = str(prepared_model_store)
     settings.runtime.execution_mode = 'serve'

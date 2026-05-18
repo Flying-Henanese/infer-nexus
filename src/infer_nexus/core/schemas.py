@@ -1,3 +1,5 @@
+"""API 请求/响应与内部传输的 Pydantic 数据模型。"""
+
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field

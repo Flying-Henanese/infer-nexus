@@ -1,3 +1,5 @@
+"""API 路由集成测试。"""
+
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -7,6 +9,7 @@ from infer_nexus.main import create_app
 
 
 def test_health_and_ready_endpoints(prepared_model_store: Path) -> None:
+    """健康与就绪接口应返回 200 和标准响应体。"""
     app = create_app()
 
     with TestClient(app) as client:
@@ -20,6 +23,7 @@ def test_health_and_ready_endpoints(prepared_model_store: Path) -> None:
 
 
 def test_catalog_and_openai_model_endpoints(prepared_model_store: Path) -> None:
+    """模型列表与目录接口应返回预期模型集合。"""
     app = create_app()
 
     with TestClient(app) as client:
@@ -44,6 +48,7 @@ def test_catalog_and_openai_model_endpoints(prepared_model_store: Path) -> None:
 
 
 def test_catalog_model_lookup_by_alias(prepared_model_store: Path) -> None:
+    """目录接口应支持通过 alias 查询模型。"""
     app = create_app()
 
     with TestClient(app) as client:
@@ -54,6 +59,7 @@ def test_catalog_model_lookup_by_alias(prepared_model_store: Path) -> None:
 
 
 def test_catalog_model_lookup_returns_404_for_unknown_model(prepared_model_store: Path) -> None:
+    """未知模型查询应返回 404。"""
     app = create_app()
 
     with TestClient(app) as client:
@@ -64,6 +70,7 @@ def test_catalog_model_lookup_returns_404_for_unknown_model(prepared_model_store
 
 
 def test_model_status_reports_present_local_path(prepared_model_store: Path) -> None:
+    """模型文件存在时状态接口应返回 unknown 且包含路径提示。"""
     app = create_app()
 
     with TestClient(app) as client:
@@ -75,6 +82,7 @@ def test_model_status_reports_present_local_path(prepared_model_store: Path) -> 
 
 
 def test_model_status_reports_missing_local_artifact(prepared_model_store: Path) -> None:
+    """模型文件缺失时状态接口应返回 degraded。"""
     missing_path = prepared_model_store / 'Qwen' / 'Qwen3-32B-Instruct'
     missing_path.rmdir()
 
@@ -89,6 +97,7 @@ def test_model_status_reports_missing_local_artifact(prepared_model_store: Path)
 
 
 def test_model_status_returns_404_for_unknown_model(prepared_model_store: Path) -> None:
+    """未知模型状态查询应返回 404。"""
     app = create_app()
 
     with TestClient(app) as client:
@@ -99,6 +108,7 @@ def test_model_status_returns_404_for_unknown_model(prepared_model_store: Path) 
 
 
 def test_chat_completions_returns_stub_chat_completion_for_chat_model(prepared_model_store: Path) -> None:
+    """chat 接口应为 chat 模型返回 stub completion。"""
     app = create_app()
 
     payload = {
@@ -119,6 +129,7 @@ def test_chat_completions_returns_stub_chat_completion_for_chat_model(prepared_m
 
 
 def test_chat_completions_reports_unknown_model(prepared_model_store: Path) -> None:
+    """chat 接口请求未知模型应返回 model_not_found。"""
     app = create_app()
 
     payload = {
@@ -134,6 +145,7 @@ def test_chat_completions_reports_unknown_model(prepared_model_store: Path) -> N
 
 
 def test_chat_completions_reports_missing_local_artifact(prepared_model_store: Path) -> None:
+    """chat 接口在模型文件缺失时应返回 503。"""
     missing_path = prepared_model_store / 'Qwen' / 'Qwen3-32B-Instruct'
     missing_path.rmdir()
 
@@ -153,6 +165,7 @@ def test_chat_completions_reports_missing_local_artifact(prepared_model_store: P
 
 
 def test_chat_completions_rejects_embedding_model(prepared_model_store: Path) -> None:
+    """chat 接口不应接受 embedding 模型。"""
     app = create_app()
 
     payload = {
@@ -168,6 +181,7 @@ def test_chat_completions_rejects_embedding_model(prepared_model_store: Path) ->
 
 
 def test_chat_completions_rejects_streaming_in_phase1(prepared_model_store: Path) -> None:
+    """阶段一 chat 接口应拒绝流式参数。"""
     app = create_app()
 
     payload = {
@@ -184,6 +198,7 @@ def test_chat_completions_rejects_streaming_in_phase1(prepared_model_store: Path
 
 
 def test_chat_completions_rejects_multimodal_message_content(prepared_model_store: Path) -> None:
+    """阶段一 chat 接口应拒绝多模态消息内容。"""
     app = create_app()
 
     payload = {
@@ -204,6 +219,7 @@ def test_chat_completions_rejects_multimodal_message_content(prepared_model_stor
 
 
 def test_chat_completions_returns_429_when_admission_rejects(prepared_model_store: Path) -> None:
+    """准入控制拒绝时 chat 接口应返回 429。"""
     app = create_app()
     payload = {
         'model': 'qwen3-chat',
@@ -224,6 +240,7 @@ def test_chat_completions_returns_429_when_admission_rejects(prepared_model_stor
 def test_chat_completions_returns_501_when_serve_handle_is_unavailable(
     prepared_model_store: Path,
 ) -> None:
+    """serve 句柄不可用时 chat 接口应返回 501。"""
     app = create_app()
     payload = {
         'model': 'qwen3-chat',
@@ -239,6 +256,7 @@ def test_chat_completions_returns_501_when_serve_handle_is_unavailable(
 
 
 def test_embeddings_returns_stub_embedding_response_for_embedding_model(prepared_model_store: Path) -> None:
+    """embedding 接口应返回 stub 向量响应。"""
     app = create_app()
 
     payload = {
@@ -257,6 +275,7 @@ def test_embeddings_returns_stub_embedding_response_for_embedding_model(prepared
 
 
 def test_embeddings_returns_base64_embedding_when_requested(prepared_model_store: Path) -> None:
+    """请求 base64 编码时 embedding 输出应为字符串。"""
     app = create_app()
 
     payload = {
@@ -276,6 +295,7 @@ def test_embeddings_returns_base64_embedding_when_requested(prepared_model_store
 
 
 def test_embeddings_report_unknown_model(prepared_model_store: Path) -> None:
+    """embedding 接口请求未知模型应返回 model_not_found。"""
     app = create_app()
 
     payload = {
@@ -291,6 +311,7 @@ def test_embeddings_report_unknown_model(prepared_model_store: Path) -> None:
 
 
 def test_embeddings_reports_missing_local_artifact(prepared_model_store: Path) -> None:
+    """embedding 接口在模型文件缺失时应返回 503。"""
     missing_path = prepared_model_store / 'BAAI' / 'bge-large-zh-v1.5'
     missing_path.rmdir()
 
@@ -310,6 +331,7 @@ def test_embeddings_reports_missing_local_artifact(prepared_model_store: Path) -
 
 
 def test_embeddings_rejects_chat_model(prepared_model_store: Path) -> None:
+    """embedding 接口不应接受 chat 模型。"""
     app = create_app()
 
     payload = {
@@ -325,6 +347,7 @@ def test_embeddings_rejects_chat_model(prepared_model_store: Path) -> None:
 
 
 def test_embeddings_reject_empty_input(prepared_model_store: Path) -> None:
+    """embedding 接口应拒绝空输入。"""
     app = create_app()
 
     payload = {
@@ -340,6 +363,7 @@ def test_embeddings_reject_empty_input(prepared_model_store: Path) -> None:
 
 
 def test_rerank_returns_stub_rerank_response_for_rerank_model(prepared_model_store: Path) -> None:
+    """rerank 接口应返回 stub 排序结果。"""
     app = create_app()
 
     payload = {
@@ -365,6 +389,7 @@ def test_rerank_returns_stub_rerank_response_for_rerank_model(prepared_model_sto
 
 
 def test_rerank_root_path_is_compatible(prepared_model_store: Path) -> None:
+    """兼容路径 rerank 入口应可正常返回结果。"""
     app = create_app()
 
     payload = {
@@ -384,6 +409,7 @@ def test_rerank_root_path_is_compatible(prepared_model_store: Path) -> None:
 
 
 def test_rerank_reports_unknown_model(prepared_model_store: Path) -> None:
+    """rerank 接口请求未知模型应返回 model_not_found。"""
     app = create_app()
 
     payload = {
@@ -400,6 +426,7 @@ def test_rerank_reports_unknown_model(prepared_model_store: Path) -> None:
 
 
 def test_rerank_reports_missing_local_artifact(prepared_model_store: Path) -> None:
+    """rerank 接口在模型文件缺失时应返回 503。"""
     missing_path = prepared_model_store / 'BAAI' / 'bge-reranker-v2-m3'
     missing_path.rmdir()
 
@@ -419,6 +446,7 @@ def test_rerank_reports_missing_local_artifact(prepared_model_store: Path) -> No
 
 
 def test_rerank_rejects_embedding_model(prepared_model_store: Path) -> None:
+    """rerank 接口不应接受 embedding 模型。"""
     app = create_app()
 
     payload = {
@@ -435,6 +463,7 @@ def test_rerank_rejects_embedding_model(prepared_model_store: Path) -> None:
 
 
 def test_rerank_rejects_empty_documents(prepared_model_store: Path) -> None:
+    """rerank 接口应拒绝空文档列表。"""
     app = create_app()
 
     payload = {

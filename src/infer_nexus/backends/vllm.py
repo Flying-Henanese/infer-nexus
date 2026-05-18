@@ -1,3 +1,5 @@
+"""vLLM 后端适配实现。"""
+
 import base64
 import inspect
 from pathlib import Path
@@ -13,6 +15,8 @@ from infer_nexus.core.schemas import ChatCompletionsRequest, EmbeddingRequest, R
 
 
 class VLLMBackend(InferenceBackend):
+    """vLLM 后端适配器，负责 runtime spec 校验、引擎生命周期与请求转换。"""
+
     TASK_TO_MODE = {
         "chat": "generate",
         "embedding": "embed",
@@ -20,11 +24,13 @@ class VLLMBackend(InferenceBackend):
     }
 
     def __init__(self, runtime_spec: dict[str, Any]) -> None:
+        """初始化后端实例。"""
         self.runtime_spec = runtime_spec
         self.engine: Any | None = None
         self.engine_state: str = "created"
 
     def validate_runtime_spec(self, runtime_spec: dict[str, Any], runtime_context: dict[str, Any]) -> None:
+        """校验模型任务与 runtime spec 的后端参数一致性。"""
         task = getattr(runtime_context.get("task"), "value", runtime_context.get("task"))
         if task not in self.TASK_TO_MODE:
             raise BackendConfigurationError(
@@ -46,6 +52,7 @@ class VLLMBackend(InferenceBackend):
             )
 
     def startup(self) -> None:
+        """启动 vLLM 引擎；stub 模式下不加载真实模型。"""
         init_mode = self.runtime_spec.get("backend_init_mode", "stub")
         if init_mode != "real":
             self.engine = None
@@ -68,8 +75,8 @@ class VLLMBackend(InferenceBackend):
         max_model_len = self.runtime_spec.get("max_model_len")
         requested_mode = self.runtime_spec.get("task_mode")
 
-        # vLLM constructor args vary across versions.
-        # Only pass version-sensitive kwargs when the current LLM signature supports them.
+        # 核心兼容逻辑：
+        # 不同 vLLM 版本构造参数不一致，仅在当前版本签名支持时才传入对应参数。
         try:
             llm_signature = inspect.signature(LLM.__init__)
             llm_init_args = llm_signature.parameters
@@ -106,10 +113,12 @@ class VLLMBackend(InferenceBackend):
         self.engine_state = "ready"
 
     def shutdown(self) -> None:
+        """关闭引擎并清理状态。"""
         self.engine = None
         self.engine_state = "stopped"
 
     def build_runtime_spec(self, model: ModelConfig, resolved_model_path: Path) -> dict[str, Any]:
+        """将模型声明转换为 vLLM 可消费的 runtime spec。"""
         task_mode = self.TASK_TO_MODE.get(model.task.value)
         if task_mode is None:
             raise BackendConfigurationError(
@@ -129,6 +138,7 @@ class VLLMBackend(InferenceBackend):
         }
 
     def _normalize_embedding_inputs(self, request: EmbeddingRequest) -> list[str]:
+        """归一化 embedding 输入为字符串列表。"""
         inputs = request.input if isinstance(request.input, list) else [request.input]
         if not inputs:
             raise BackendRequestValidationError(
@@ -138,6 +148,7 @@ class VLLMBackend(InferenceBackend):
         return inputs
 
     def _encode_embedding_base64(self, embedding: list[float]) -> str:
+        """将浮点向量编码为 OpenAI 兼容 base64 格式。"""
         packed = struct.pack(f"<{len(embedding)}f", *embedding)
         return base64.b64encode(packed).decode("ascii")
 
@@ -148,6 +159,7 @@ class VLLMBackend(InferenceBackend):
         runtime_context: dict[str, Any],
         inputs: list[str],
     ) -> dict[str, Any]:
+        """构建 embedding 的 stub 响应。"""
         data = []
         for index, item in enumerate(inputs):
             embedding = [
@@ -185,6 +197,7 @@ class VLLMBackend(InferenceBackend):
         runtime_context: dict[str, Any],
         result: Any,
     ) -> dict[str, Any]:
+        """将 vLLM embedding 原始结果转换为 API 响应。"""
         if not result:
             raise RuntimeError("vLLM embed returned no result")
 
@@ -220,6 +233,7 @@ class VLLMBackend(InferenceBackend):
         }
 
     def _normalize_rerank_documents(self, request: RerankRequest) -> list[str]:
+        """归一化 rerank 文档输入为字符串列表。"""
         documents = request.documents if isinstance(request.documents, list) else [request.documents]
         if not documents:
             raise BackendRequestValidationError(
@@ -229,6 +243,7 @@ class VLLMBackend(InferenceBackend):
         return documents
 
     def _score_stub_document(self, query: str, document: str) -> float:
+        """基于词项重叠计算简单 stub 相关度分数。"""
         query_terms = {term for term in query.lower().split() if term}
         document_terms = {term for term in document.lower().split() if term}
         overlap = len(query_terms & document_terms)
@@ -242,6 +257,7 @@ class VLLMBackend(InferenceBackend):
         runtime_context: dict[str, Any],
         documents: list[str],
     ) -> dict[str, Any]:
+        """构建 rerank 的 stub 响应。"""
         scored = [
             {
                 "index": index,
@@ -276,6 +292,7 @@ class VLLMBackend(InferenceBackend):
         documents: list[str],
         result: Any,
     ) -> dict[str, Any]:
+        """将 vLLM score 原始结果转换为 rerank 响应。"""
         if not result:
             raise RuntimeError("vLLM score returned no result")
 
@@ -309,6 +326,7 @@ class VLLMBackend(InferenceBackend):
         }
 
     def _build_sampling_params(self, request: ChatCompletionsRequest) -> dict[str, Any]:
+        """从 chat 请求提取采样参数并补充默认值。"""
         return {
             "temperature": request.temperature if request.temperature is not None else 0.7,
             "top_p": request.top_p if request.top_p is not None else 1.0,
@@ -339,6 +357,7 @@ class VLLMBackend(InferenceBackend):
             raise
 
     def _build_chat_messages(self, request: ChatCompletionsRequest) -> list[dict[str, Any]]:
+        """将 chat 消息转换为 vLLM 输入格式，并校验阶段一约束。"""
         if request.stream:
             raise BackendRequestValidationError(
                 "Streaming chat completions are not supported in Phase 1.",
@@ -366,6 +385,7 @@ class VLLMBackend(InferenceBackend):
         runtime_context: dict[str, Any],
         sampling_params: dict[str, Any],
     ) -> dict[str, Any]:
+        """构建 chat 的 stub 响应。"""
         content = (
             f"backend stub response from {runtime_spec['backend']} "
             f"for deployment '{runtime_context['deployment_name']}' "
@@ -404,6 +424,7 @@ class VLLMBackend(InferenceBackend):
         result: Any,
         sampling_params: dict[str, Any],
     ) -> dict[str, Any]:
+        """将 vLLM chat 原始结果转换为 OpenAI 风格响应。"""
         if not result:
             raise RuntimeError("vLLM chat returned no result")
 
@@ -439,6 +460,8 @@ class VLLMBackend(InferenceBackend):
         request: ChatCompletionsRequest,
         runtime_context: dict[str, Any],
     ) -> dict[str, Any]:
+        """执行 chat completion。"""
+        # 先做请求归一化和参数确定，再根据引擎是否就绪选择真实推理或 stub 降级。
         messages = self._build_chat_messages(request)
         sampling_params = self._build_sampling_params(request)
         if self.engine is None:
@@ -464,6 +487,7 @@ class VLLMBackend(InferenceBackend):
         request: EmbeddingRequest,
         runtime_context: dict[str, Any],
     ) -> dict[str, Any]:
+        """执行 embedding。"""
         inputs = self._normalize_embedding_inputs(request)
         if self.engine is None:
             return self._build_embedding_stub_response(
@@ -487,6 +511,7 @@ class VLLMBackend(InferenceBackend):
         request: RerankRequest,
         runtime_context: dict[str, Any],
     ) -> dict[str, Any]:
+        """执行 rerank。"""
         documents = self._normalize_rerank_documents(request)
         if self.engine is None:
             return self._build_rerank_stub_response(

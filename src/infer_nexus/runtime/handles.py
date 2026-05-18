@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Ray Serve deployment handle resolution helpers."""
+
+from __future__ import annotations
 
 from typing import Any
 
@@ -9,6 +9,7 @@ class ServeDeploymentHandleResolver:
     """Resolve Ray Serve deployment handles within a named Serve application."""
 
     def __init__(self, app_name: str, serve: Any | None = None) -> None:
+        """初始化 Serve 句柄解析器。"""
         self.app_name = app_name
         self._serve = serve
 

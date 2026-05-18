@@ -1,3 +1,5 @@
+"""OpenAI 兼容接口路由。"""
+
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 
@@ -44,6 +46,7 @@ def openai_error_response(
     param: str | None = None,
     code: str | None = None,
 ) -> JSONResponse:
+    """构造 OpenAI 风格错误响应，统一网关错误返回格式。"""
     payload = OpenAIErrorResponse(
         error=OpenAIErrorDetail(message=message, type=error_type, param=param, code=code)
     )
@@ -52,6 +55,7 @@ def openai_error_response(
 
 @router.get("/models", response_model=ModelListResponse)
 async def list_models(registry: ModelRegistry = Depends(get_registry)) -> ModelListResponse:
+    """列出对外可见模型清单（以 alias 优先作为展示 ID）。"""
     return ModelListResponse(
         data=[
             ModelSummary(
@@ -74,6 +78,8 @@ async def create_chat_completion(
     model_store: LocalModelStore = Depends(get_model_store),
     dispatcher: RuntimeDispatcher = Depends(get_runtime_dispatcher),
 ) -> ChatCompletionsResponse | JSONResponse:
+    """处理聊天补全请求，执行模型校验、准入校验和运行时分发。"""
+    # 第一步：检查请求模型是否已注册。
     try:
         model = registry.get(request.model)
     except ModelNotFoundError:
@@ -85,6 +91,7 @@ async def create_chat_completion(
             code="model_not_found",
         )
 
+    # 第二步：检查模型任务类型，防止把 embedding/rerank 模型误用于 chat 接口。
     if model.task is not TaskType.CHAT:
         return openai_error_response(
             400,
@@ -94,6 +101,7 @@ async def create_chat_completion(
             code="unsupported_task_type",
         )
 
+    # 第三步：检查模型文件是否存在，并通过准入控制后进入运行时执行。
     try:
         model_store.require_model_path(model)
         admission.check_model_request(model)
@@ -136,6 +144,7 @@ async def create_embedding(
     model_store: LocalModelStore = Depends(get_model_store),
     dispatcher: RuntimeDispatcher = Depends(get_runtime_dispatcher),
 ) -> EmbeddingResponse | JSONResponse:
+    """处理向量化请求，执行模型校验、准入校验和运行时分发。"""
     try:
         model = registry.get(request.model)
     except ModelNotFoundError:
@@ -197,6 +206,7 @@ async def _create_rerank_impl(
     model_store: LocalModelStore,
     dispatcher: RuntimeDispatcher,
 ) -> RerankResponse | JSONResponse:
+    """Rerank 共享实现，供 `/v1/rerank` 与兼容路径复用。"""
     try:
         model = registry.get(request.model)
     except ModelNotFoundError:
@@ -260,4 +270,5 @@ async def create_rerank(
     model_store: LocalModelStore = Depends(get_model_store),
     dispatcher: RuntimeDispatcher = Depends(get_runtime_dispatcher),
 ) -> RerankResponse | JSONResponse:
+    """处理 rerank 请求。"""
     return await _create_rerank_impl(request, registry, admission, model_store, dispatcher)

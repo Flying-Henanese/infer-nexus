@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-from __future__ import annotations
-
 """Download a Hugging Face model into the configured local model store.
 
 This script also prints a ready-to-paste `config/models.yaml` snippet that uses
 the downloaded path relative to `model_store.root_dir`.
 """
+
+from __future__ import annotations
 
 import argparse
 from pathlib import Path
@@ -38,6 +38,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    """下载模型并输出建议的模型注册配置片段。"""
     args = parse_args()
     settings = load_settings(args.settings_path)
     model_store = LocalModelStore.from_settings(settings.model_store)

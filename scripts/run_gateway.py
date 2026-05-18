@@ -1,9 +1,9 @@
-from __future__ import annotations
-
 """Start the infer-nexus HTTP gateway using Uvicorn.
 
 Loads service host/port from settings and allows CLI overrides for local runs.
 """
+
+from __future__ import annotations
 
 import argparse
 

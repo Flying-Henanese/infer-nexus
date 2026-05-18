@@ -1,3 +1,5 @@
+"""模型文件下载与模型注册片段生成工具。"""
+
 from pathlib import Path
 from textwrap import dedent
 
@@ -11,6 +13,7 @@ def download_huggingface_model(
     endpoint: str,
     revision: str | None = None,
 ) -> Path:
+    """下载 Hugging Face 模型到指定目录并返回落地路径。"""
     try:
         from huggingface_hub import snapshot_download
     except ImportError as exc:
@@ -42,6 +45,7 @@ def build_model_registration_snippet(
     max_replicas: int,
     dtype: str | None = None,
 ) -> str:
+    """生成可粘贴到 `models.yaml` 的模型注册配置片段。"""
     dtype_line = f"\n    dtype: {dtype}" if dtype else ""
     return dedent(
         f"""
@@ -66,6 +70,7 @@ def prepare_huggingface_download(
     revision: str | None = None,
     endpoint: str,
 ) -> Path:
+    """根据本地模型仓库约定路径执行 Hugging Face 下载。"""
     target_dir = model_store.build_repo_target_dir(repo_id)
     return download_huggingface_model(
         repo_id=repo_id,

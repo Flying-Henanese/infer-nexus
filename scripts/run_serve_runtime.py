@@ -1,10 +1,10 @@
-from __future__ import annotations
-
 """Deploy infer-nexus model runtime into a Ray Serve application.
 
 This script builds runtime deployments from configured model catalog entries and
 publishes them under the configured service name.
 """
+
+from __future__ import annotations
 
 import argparse
 

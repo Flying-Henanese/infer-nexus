@@ -1,3 +1,5 @@
+"""平台运维接口路由（目录、状态、负载）。"""
+
 from fastapi import APIRouter, Depends, HTTPException
 
 from infer_nexus.api.deps import get_load_inspector, get_model_store, get_registry
@@ -11,6 +13,7 @@ router = APIRouter(prefix="/api", tags=["platform"])
 
 
 def _get_model_or_404(model_name: str, registry: ModelRegistry):
+    """按模型名读取模型，未命中时转换为 HTTP 404。"""
     try:
         return registry.get(model_name)
     except ModelNotFoundError as exc:
@@ -19,6 +22,7 @@ def _get_model_or_404(model_name: str, registry: ModelRegistry):
 
 @router.get("/catalog/models", response_model=list[CatalogModelResponse])
 async def list_catalog_models(registry: ModelRegistry = Depends(get_registry)) -> list[CatalogModelResponse]:
+    """返回目录中的全部模型声明。"""
     return [CatalogModelResponse.model_validate(model.model_dump()) for model in registry.list_models()]
 
 
@@ -27,6 +31,7 @@ async def get_catalog_model(
     model_name: str,
     registry: ModelRegistry = Depends(get_registry),
 ) -> CatalogModelResponse:
+    """返回单个目录模型声明。"""
     model = _get_model_or_404(model_name, registry)
     return CatalogModelResponse.model_validate(model.model_dump())
 
@@ -37,6 +42,7 @@ async def get_model_status(
     registry: ModelRegistry = Depends(get_registry),
     model_store: LocalModelStore = Depends(get_model_store),
 ) -> ModelStatusResponse:
+    """返回模型状态与本地模型文件可用性。"""
     model = _get_model_or_404(model_name, registry)
     try:
         resolved_path = model_store.require_model_path(model)
@@ -54,6 +60,7 @@ async def get_cluster_load(
     registry: ModelRegistry = Depends(get_registry),
     inspector: LoadInspector = Depends(get_load_inspector),
 ) -> ClusterLoadResponse:
+    """返回当前集群负载快照（阶段一为简化指标）。"""
     snapshot = inspector.snapshot(registry)
     return ClusterLoadResponse(
         status=snapshot.status,
@@ -64,6 +71,7 @@ async def get_cluster_load(
 
 @router.get("/cluster/capacity", response_model=dict[str, str | int])
 async def get_cluster_capacity(registry: ModelRegistry = Depends(get_registry)) -> dict[str, str | int]:
+    """返回容量信息（当前为占位实现）。"""
     return {
         "status": "stub",
         "message": "capacity backend not connected",

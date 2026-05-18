@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Execution adapter that bridges request schemas with runtime invocation paths."""
+
+from __future__ import annotations
 
 from dataclasses import dataclass
 import inspect
@@ -41,6 +41,8 @@ class RuntimeExecutor:
         target: RuntimeTarget,
         request: ChatCompletionsRequest,
     ) -> ChatCompletionsResponse:
+        """执行聊天请求并转换为统一响应结构。"""
+        # serve 模式走远程句柄；stub 模式本地实例化副本，便于本地开发与测试。
         if self.mode == "serve":
             payload = await self._invoke_handle(
                 target=target,
@@ -61,6 +63,7 @@ class RuntimeExecutor:
         target: RuntimeTarget,
         request: EmbeddingRequest,
     ) -> EmbeddingResponse:
+        """执行向量化请求并转换为统一响应结构。"""
         if self.mode == "serve":
             payload = await self._invoke_handle(
                 target=target,
@@ -81,6 +84,7 @@ class RuntimeExecutor:
         target: RuntimeTarget,
         request: RerankRequest,
     ) -> RerankResponse:
+        """执行 rerank 请求并转换为统一响应结构。"""
         if self.mode == "serve":
             payload = await self._invoke_handle(
                 target=target,
@@ -102,6 +106,7 @@ class RuntimeExecutor:
         method_name: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
+        """在本地进程内调用副本方法（stub/dev 路径）。"""
         # Local path is used for stub/dev mode without requiring Ray Serve connectivity.
         replica = ModelRuntimeReplica(target.runtime_context)
         method = getattr(replica, method_name)
@@ -114,6 +119,7 @@ class RuntimeExecutor:
         method_name: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
+        """通过 Ray Serve deployment handle 调用远程副本方法。"""
         # Serve mode relies on model-specific deployment handles resolved by app name + deployment name.
         if self.handle_resolver is None:
             raise RuntimeNotConnectedError(
@@ -161,6 +167,7 @@ class RuntimeExecutor:
         payload: dict[str, Any],
     ) -> ChatCompletionsResponse:
         """Adapt backend payload to OpenAI-compatible chat response schema."""
+        # payload 允许后端按最小约定返回字段；此处补齐默认值并强制映射到外部协议。
         return ChatCompletionsResponse(
             id=payload.get("id", f"chatcmpl-{uuid4().hex}"),
             created=payload.get("created", int(time())),
@@ -198,6 +205,7 @@ class RuntimeExecutor:
         payload: dict[str, Any],
     ) -> EmbeddingResponse:
         """Adapt backend payload to OpenAI-compatible embeddings response schema."""
+        # embedding data 逐项做结构校验，确保输出稳定且可被 OpenAI SDK 消费。
         return EmbeddingResponse(
             data=[
                 EmbeddingData.model_validate(item)
@@ -227,6 +235,7 @@ class RuntimeExecutor:
         payload: dict[str, Any],
     ) -> RerankResponse:
         """Adapt backend payload to native rerank response schema with safe fallback results."""
+        # 当后端无返回时提供可解释的降级结果，避免接口层直接失败。
         document_list = request.documents if isinstance(request.documents, list) else [request.documents]
         fallback_results = [
             {

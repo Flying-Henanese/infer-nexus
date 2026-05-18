@@ -8,6 +8,7 @@ class ModelRegistry:
     """In-memory model lookup registry by canonical name and alias."""
 
     def __init__(self, catalog: ModelCatalogFile) -> None:
+        """使用模型目录构建名称与别名索引。"""
         self._by_name: dict[str, ModelConfig] = {}
         self._alias_to_name: dict[str, str] = {}
 

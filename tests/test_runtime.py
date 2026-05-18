@@ -1,3 +1,5 @@
+"""运行时构建与 vLLM 后端行为测试。"""
+
 import sys
 import types
 import asyncio
@@ -18,20 +20,26 @@ from infer_nexus.runtime.serve_app import ServeApplicationBuilder
 
 @pytest.fixture
 def registry() -> ModelRegistry:
+    """返回基于测试配置加载的模型注册表。"""
     return ModelRegistry(load_model_catalog('config/models.yaml'))
 
 
 @pytest.fixture
 def model_store() -> LocalModelStore:
+    """返回测试用本地模型仓库实例。"""
     return LocalModelStore('models')
 
 
 class FakeBoundDeployment:
+    """模拟 Serve deployment.bind 产物。"""
+
     def __init__(self, kwargs: dict, replica_cls: type[ModelRuntimeReplica]) -> None:
+        """记录 deployment 参数和副本类。"""
         self.kwargs = kwargs
         self.replica_cls = replica_cls
 
     def bind(self, *args, **kwargs) -> dict:
+        """返回可断言的绑定信息。"""
         return {
             'deployment_kwargs': self.kwargs,
             'replica_cls': self.replica_cls,
@@ -41,7 +49,10 @@ class FakeBoundDeployment:
 
 
 class FakeServe:
+    """模拟 Serve 对象。"""
+
     def deployment(self, **kwargs):
+        """模拟 `serve.deployment` 装饰器。"""
         def wrapper(replica_cls: type[ModelRuntimeReplica]) -> FakeBoundDeployment:
             return FakeBoundDeployment(kwargs, replica_cls)
 
@@ -52,6 +63,7 @@ def test_serve_builder_plan_contains_all_registered_models(
     registry: ModelRegistry,
     model_store: LocalModelStore,
 ) -> None:
+    """构建计划应覆盖目录中的全部模型。"""
     builder = ServeApplicationBuilder(model_store=model_store)
 
     plan = builder.build_plan(registry)
@@ -71,6 +83,7 @@ def test_serve_builder_local_dev_summary(
     registry: ModelRegistry,
     model_store: LocalModelStore,
 ) -> None:
+    """本地开发摘要应返回模型、部署与资源汇总。"""
     builder = ServeApplicationBuilder(model_store=model_store)
 
     summary = builder.build_local_dev_summary(registry)
@@ -89,6 +102,7 @@ def test_build_runtime_context_contains_resolved_local_model_path(
     registry: ModelRegistry,
     model_store: LocalModelStore,
 ) -> None:
+    """运行时上下文应包含已解析模型路径和后端规格。"""
     builder = ServeApplicationBuilder(model_store=model_store)
 
     runtime_context = builder.build_runtime_context(registry, 'qwen3-chat')
@@ -105,6 +119,7 @@ def test_build_serve_bindings_from_fake_serve(
     registry: ModelRegistry,
     model_store: LocalModelStore,
 ) -> None:
+    """应基于 fake serve 正确生成各模型 binding。"""
     builder = ServeApplicationBuilder(model_store=model_store)
 
     bindings = builder.build_serve_bindings(registry, serve=FakeServe())
@@ -125,6 +140,7 @@ def test_build_serve_application_wraps_all_model_bindings(
     registry: ModelRegistry,
     model_store: LocalModelStore,
 ) -> None:
+    """Serve 应用根节点应包含全部模型 binding。"""
     builder = ServeApplicationBuilder(model_store=model_store)
 
     app = builder.build_serve_application(registry, serve=FakeServe())
@@ -138,6 +154,7 @@ def test_build_serve_application_wraps_all_model_bindings(
 
 
 def test_require_ray_serve_raises_without_dependency(monkeypatch: pytest.MonkeyPatch) -> None:
+    """缺少 ray 依赖时 require_ray_serve 应报错。"""
     builder = ServeApplicationBuilder(model_store=LocalModelStore('models'))
     monkeypatch.delitem(sys.modules, 'ray', raising=False)
 
@@ -155,6 +172,7 @@ def test_require_ray_serve_raises_without_dependency(monkeypatch: pytest.MonkeyP
 
 
 def test_require_ray_serve_returns_injected_module(monkeypatch: pytest.MonkeyPatch) -> None:
+    """存在注入模块时 require_ray_serve 应直接返回。"""
     builder = ServeApplicationBuilder(model_store=LocalModelStore('models'))
     fake_serve = object()
     fake_ray = types.SimpleNamespace(serve=fake_serve)
@@ -167,6 +185,7 @@ def test_model_runtime_replica_calls_backend_for_chat(
     registry: ModelRegistry,
     model_store: LocalModelStore,
 ) -> None:
+    """模型副本应调用后端完成 chat 请求。"""
     builder = ServeApplicationBuilder(model_store=model_store)
     runtime_context = builder.build_runtime_context(registry, 'qwen3-chat')
     replica = ModelRuntimeReplica(runtime_context)
@@ -193,6 +212,7 @@ def test_model_runtime_replica_calls_backend_for_embedding(
     registry: ModelRegistry,
     model_store: LocalModelStore,
 ) -> None:
+    """模型副本应调用后端完成 embedding 请求。"""
     builder = ServeApplicationBuilder(model_store=model_store)
     runtime_context = builder.build_runtime_context(registry, 'bge-embedding')
     replica = ModelRuntimeReplica(runtime_context)
@@ -216,6 +236,7 @@ def test_model_runtime_replica_calls_backend_for_embedding_base64(
     registry: ModelRegistry,
     model_store: LocalModelStore,
 ) -> None:
+    """embedding 请求指定 base64 时应返回字符串向量。"""
     builder = ServeApplicationBuilder(model_store=model_store)
     runtime_context = builder.build_runtime_context(registry, 'bge-embedding')
     replica = ModelRuntimeReplica(runtime_context)
@@ -237,6 +258,7 @@ def test_model_runtime_replica_calls_backend_for_embedding_base64(
 
 
 def test_vllm_backend_builds_sampling_params_and_text_messages() -> None:
+    """vLLM 后端应正确生成采样参数和消息格式。"""
     backend = VLLMBackend({})
     request = ChatCompletionsRequest(
         model='qwen3-chat',
@@ -255,6 +277,7 @@ def test_vllm_backend_builds_sampling_params_and_text_messages() -> None:
 
 
 def test_vllm_backend_rejects_streaming_and_multimodal_messages() -> None:
+    """阶段一应拒绝流式与多模态 chat 请求。"""
     backend = VLLMBackend({})
     streaming = ChatCompletionsRequest(
         model='qwen3-chat',
@@ -274,6 +297,7 @@ def test_vllm_backend_rejects_streaming_and_multimodal_messages() -> None:
 
 
 def test_vllm_backend_normalizes_embedding_inputs_and_rejects_empty() -> None:
+    """embedding 输入归一化应接受字符串并拒绝空输入。"""
     backend = VLLMBackend({})
 
     assert backend._normalize_embedding_inputs(
@@ -293,6 +317,7 @@ def test_model_runtime_replica_calls_backend_for_rerank(
     registry: ModelRegistry,
     model_store: LocalModelStore,
 ) -> None:
+    """模型副本应调用后端完成 rerank 请求。"""
     builder = ServeApplicationBuilder(model_store=model_store)
     runtime_context = builder.build_runtime_context(registry, 'bge-rerank')
     replica = ModelRuntimeReplica(runtime_context)
@@ -321,6 +346,7 @@ def test_model_runtime_replica_calls_backend_for_rerank(
 
 
 def test_vllm_backend_normalizes_rerank_documents_and_rejects_empty() -> None:
+    """rerank 文档归一化应接受字符串并拒绝空文档列表。"""
     backend = VLLMBackend({})
 
     assert backend._normalize_rerank_documents(
@@ -337,6 +363,7 @@ def test_vllm_backend_normalizes_rerank_documents_and_rejects_empty() -> None:
 
 
 def test_vllm_backend_rejects_runtime_spec_task_mode_mismatch() -> None:
+    """runtime_spec 与任务类型不匹配时应抛配置错误。"""
     backend = VLLMBackend({})
     runtime_context = {
         'model_name': 'bge-large-zh-v1_5',
@@ -352,6 +379,7 @@ def test_vllm_backend_rejects_runtime_spec_task_mode_mismatch() -> None:
 
 
 def test_serve_builder_rejects_unsupported_vllm_task(model_store: LocalModelStore) -> None:
+    """不支持的任务类型应在构建运行时上下文时被拒绝。"""
     registry = ModelRegistry(
         ModelCatalogFile(
             models=[

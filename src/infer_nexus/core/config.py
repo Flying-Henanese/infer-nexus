@@ -1,3 +1,5 @@
+"""应用配置模型与加载逻辑。"""
+
 from pathlib import Path
 
 import yaml

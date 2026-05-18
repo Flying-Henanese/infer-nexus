@@ -1,4 +1,5 @@
 import base64
+import inspect
 from pathlib import Path
 import struct
 from time import time
@@ -58,14 +59,29 @@ class VLLMBackend(InferenceBackend):
                 "vLLM is not installed. Install the 'vllm' extra or switch runtime.backend_init_mode to 'stub'."
             ) from exc
 
-        self.engine = LLM(
-            model=self.runtime_spec["model_path"],
-            tensor_parallel_size=self.runtime_spec["tensor_parallel_size"],
-            dtype=self.runtime_spec.get("dtype") or "auto",
-            task=self.runtime_spec.get("task_mode", "auto"),
-        )
+        llm_kwargs: dict[str, Any] = {
+            "model": self.runtime_spec["model_path"],
+            "tensor_parallel_size": self.runtime_spec["tensor_parallel_size"],
+            "dtype": self.runtime_spec.get("dtype") or "auto",
+        }
         requested_mode = self.runtime_spec.get("task_mode")
+
+        # vLLM constructor args vary across versions.
+        # Only pass `task` when the current LLM signature supports it.
+        try:
+            llm_signature = inspect.signature(LLM.__init__)
+            if "task" in llm_signature.parameters:
+                llm_kwargs["task"] = requested_mode or "auto"
+        except (TypeError, ValueError):
+            # If introspection fails, avoid passing version-sensitive args.
+            pass
+
+        self.engine = LLM(**llm_kwargs)
         supported_tasks = getattr(self.engine, "supported_tasks", None)
+        if not supported_tasks:
+            engine_task = getattr(self.engine, "task", None)
+            if engine_task:
+                supported_tasks = [engine_task]
         if supported_tasks and requested_mode not in supported_tasks:
             raise BackendConfigurationError(
                 f"Loaded vLLM model does not support requested task_mode '{requested_mode}'. "

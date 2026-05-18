@@ -73,11 +73,19 @@ class VLLMBackend(InferenceBackend):
         try:
             llm_signature = inspect.signature(LLM.__init__)
             llm_init_args = llm_signature.parameters
+            accepts_var_kwargs = any(
+                parameter.kind == inspect.Parameter.VAR_KEYWORD
+                for parameter in llm_init_args.values()
+            )
 
-            if gpu_memory_utilization is not None and "gpu_memory_utilization" in llm_init_args:
+            if gpu_memory_utilization is not None and (
+                "gpu_memory_utilization" in llm_init_args or accepts_var_kwargs
+            ):
                 llm_kwargs["gpu_memory_utilization"] = gpu_memory_utilization
-            if max_model_len is not None and "max_model_len" in llm_init_args:
+            if max_model_len is not None and ("max_model_len" in llm_init_args or accepts_var_kwargs):
                 llm_kwargs["max_model_len"] = max_model_len
+            # Keep task strict: vLLM 0.18.1 forwards unknown kwargs and
+            # EngineArgs will reject unsupported `task`.
             if "task" in llm_init_args:
                 llm_kwargs["task"] = requested_mode or "auto"
         except (TypeError, ValueError):

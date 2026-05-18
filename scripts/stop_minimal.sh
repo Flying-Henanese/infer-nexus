@@ -45,9 +45,10 @@ kill_from_pid_file() {
 kill_from_pid_file "${GATEWAY_PID_FILE}" "gateway"
 kill_from_pid_file "${SERVE_PID_FILE}" "serve runtime"
 
-# Stop Ray head if any. This is safe when Ray isn't running.
+# Stop Ray runtime forcefully so detached Serve replicas / vLLM workers
+# do not keep occupying GPU memory after the gateway/runtime parent exits.
 if command -v ray >/dev/null 2>&1; then
-  ray stop >/dev/null 2>&1 || true
+  ray stop -f >/dev/null 2>&1 || true
 fi
 
 if [[ -d "${STATE_DIR}" ]]; then

@@ -39,15 +39,15 @@ models:
     alias: mineru
     task: chat
     backend: vllm
-    model_path: opendatalab/MinerU2.5-2509-1.2B
+    model_path: /nas_data/zhousj/mineru
     dtype: auto
     tensor_parallel_size: 1
-    max_model_len: 16384
+    max_model_len: 8192
     cpu_per_replica: 4
-    gpu_per_replica: 1
-    gpu_memory_utilization: 0.85
-    min_replicas: 7
-    max_replicas: 8
+    gpu_per_replica: 0.4
+    gpu_memory_utilization: 0.4
+    min_replicas: 1
+    max_replicas: 1
     capabilities:
       - vision
     engine_kwargs:

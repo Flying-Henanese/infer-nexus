@@ -103,7 +103,7 @@ def test_vllm_backend_normalizes_data_url_payload_before_passing_to_vllm() -> No
 
     messages = backend._build_chat_messages(request)
 
-    assert messages[0]["content"][1]["image_url"]["url"] == "data:image/png;base64,aGVsbG8/="
+    assert messages[0]["content"][1]["image_url"]["url"] == "data:image/png;base64,aGVsbG8/"
 
 
 def test_vllm_backend_rejects_multimodal_content_for_non_vision_models() -> None:

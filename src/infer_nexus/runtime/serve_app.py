@@ -62,16 +62,17 @@ class ServeApplicationBuilder:
     def build_runtime_context(self, registry: ModelRegistry, model_name: str) -> dict[str, Any]:
         """Build validated runtime context passed into each model replica deployment."""
         model = registry.get(model_name)
-        resolved_model_path = self.model_store.resolve_model_path(model.model_path)
-        runtime_spec = self.backend.build_runtime_spec(model, resolved_model_path)
+        model_reference = self.model_store.resolve_model_reference(model)
+        runtime_spec = self.backend.build_runtime_spec(model, model_reference)
         runtime_spec["backend_init_mode"] = self.backend_init_mode
         runtime_context = {
             "model_name": model.name,
             "model_alias": model.alias,
+            "served_model_name": model.served_model_name or model.alias or model.name,
             "task": model.task,
             "capabilities": list(model.capabilities),
             "deployment_name": self.deployment_factory.build_deployment_name(model),
-            "resolved_model_path": str(resolved_model_path),
+            "resolved_model_path": str(model_reference),
             "runtime_spec": runtime_spec,
         }
         self.backend.validate_runtime_spec(runtime_spec, runtime_context)

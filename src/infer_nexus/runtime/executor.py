@@ -171,7 +171,10 @@ class RuntimeExecutor:
         return ChatCompletionsResponse(
             id=payload.get("id", f"chatcmpl-{uuid4().hex}"),
             created=payload.get("created", int(time())),
-            model=payload.get("model", request.model),
+            model=payload.get(
+                "model",
+                target.runtime_context.get("served_model_name", request.model),
+            ),
             choices=[
                 ChatCompletionChoice(
                     index=0,
@@ -211,7 +214,10 @@ class RuntimeExecutor:
                 EmbeddingData.model_validate(item)
                 for item in payload.get("data", [])
             ],
-            model=payload.get("model", request.model),
+            model=payload.get(
+                "model",
+                target.runtime_context.get("served_model_name", request.model),
+            ),
             usage=TokenUsage.model_validate(
                 payload.get(
                     "usage",
@@ -249,7 +255,10 @@ class RuntimeExecutor:
         ]
         return RerankResponse(
             id=payload.get("id", f"rerank-{uuid4().hex}"),
-            model=payload.get("model", request.model),
+            model=payload.get(
+                "model",
+                target.runtime_context.get("served_model_name", request.model),
+            ),
             usage=RerankUsage.model_validate(
                 payload.get("usage", {"total_tokens": 1 + len(document_list)})
             ),

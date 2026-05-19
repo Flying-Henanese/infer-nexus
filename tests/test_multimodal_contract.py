@@ -82,6 +82,30 @@ def test_vllm_backend_should_accept_remote_image_urls() -> None:
     assert messages[0]["content"][1]["image_url"]["url"] == "https://example.com/demo.png"
 
 
+def test_vllm_backend_normalizes_data_url_payload_before_passing_to_vllm() -> None:
+    """Whitespace and URL-safe base64 should be normalized for vLLM."""
+    backend = VLLMBackend({"capabilities": ["vision"]})
+    request = ChatCompletionsRequest(
+        model="mineru",
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Read this image."},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,aGV sbG8_\n"},
+                    },
+                ],
+            }
+        ],
+    )
+
+    messages = backend._build_chat_messages(request)
+
+    assert messages[0]["content"][1]["image_url"]["url"] == "data:image/png;base64,aGVsbG8/="
+
+
 def test_vllm_backend_rejects_multimodal_content_for_non_vision_models() -> None:
     """Non-vision models should still reject image blocks."""
     backend = VLLMBackend({})

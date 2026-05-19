@@ -136,6 +136,39 @@ def test_build_serve_bindings_from_fake_serve(
     )
 
 
+def test_deployment_factory_applies_llmconfig_style_overrides() -> None:
+    """Deployment config should be able to override autoscaling and actor options."""
+    spec = ServeApplicationBuilder(model_store=LocalModelStore('models')).deployment_factory.build_spec(
+        ModelConfig(
+            name='mineru',
+            alias='mineru',
+            task=TaskType.CHAT,
+            model_path='opendatalab/MinerU2.5-2509-1.2B',
+            tensor_parallel_size=1,
+            cpu_per_replica=4,
+            gpu_per_replica=1,
+            min_replicas=1,
+            max_replicas=2,
+            deployment_config={
+                'autoscaling_config': {
+                    'min_replicas': 7,
+                    'max_replicas': 8,
+                    'target_ongoing_requests': 20,
+                },
+                'ray_actor_options': {'num_cpus': 6},
+            },
+        )
+    )
+
+    assert spec.autoscaling_config == {
+        'min_replicas': 7,
+        'max_replicas': 8,
+        'target_ongoing_requests': 20,
+    }
+    assert spec.ray_actor_options['num_cpus'] == 6
+    assert spec.ray_actor_options['num_gpus'] == 1
+
+
 def test_build_serve_application_wraps_all_model_bindings(
     registry: ModelRegistry,
     model_store: LocalModelStore,
@@ -332,12 +365,36 @@ def test_vllm_backend_build_runtime_spec_preserves_engine_kwargs(tmp_path) -> No
         },
     )
 
-    runtime_spec = backend.build_runtime_spec(model, tmp_path / 'mineru')
+    runtime_spec = backend.build_runtime_spec(model, str(tmp_path / 'mineru'))
 
     assert runtime_spec['engine_kwargs'] == {
         'trust_remote_code': True,
         'limit_mm_per_prompt': {'image': 10},
     }
+
+
+def test_vllm_backend_build_runtime_spec_uses_served_model_name_and_loading_config() -> None:
+    """Runtime spec should preserve official-style loading metadata."""
+    backend = VLLMBackend({})
+    model = ModelConfig(
+        name='mineru',
+        alias='mineru',
+        served_model_name='mineru-chat',
+        task=TaskType.CHAT,
+        model_loading_config={'model_id': 'opendatalab/MinerU2.5-2509-1.2B'},
+        tensor_parallel_size=1,
+        cpu_per_replica=4,
+        gpu_per_replica=1,
+        min_replicas=1,
+        max_replicas=1,
+        require_local_artifacts=False,
+    )
+
+    runtime_spec = backend.build_runtime_spec(model, 'opendatalab/MinerU2.5-2509-1.2B')
+
+    assert runtime_spec['model_path'] == 'opendatalab/MinerU2.5-2509-1.2B'
+    assert runtime_spec['served_model_name'] == 'mineru-chat'
+    assert runtime_spec['model_loading_config']['model_id'] == 'opendatalab/MinerU2.5-2509-1.2B'
 
 
 def test_vllm_backend_startup_forwards_engine_kwargs(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -373,6 +430,41 @@ def test_vllm_backend_startup_forwards_engine_kwargs(monkeypatch: pytest.MonkeyP
     assert captured_kwargs['model'] == 'opendatalab/MinerU2.5-2509-1.2B'
     assert captured_kwargs['trust_remote_code'] is True
     assert captured_kwargs['limit_mm_per_prompt'] == {'image': 10}
+
+
+def test_vllm_backend_sampling_params_include_official_compatible_fields() -> None:
+    """Sampling params should preserve common OpenAI/vLLM request fields."""
+    backend = VLLMBackend({})
+    request = ChatCompletionsRequest(
+        model='mineru',
+        messages=[{'role': 'user', 'content': 'hello'}],
+        temperature=0.2,
+        top_p=0.9,
+        max_tokens=256,
+        presence_penalty=0.3,
+        frequency_penalty=0.4,
+        repetition_penalty=1.05,
+        stop=['DONE'],
+        n=2,
+        seed=7,
+        extra_body={'top_k': 20, 'min_p': 0.1},
+    )
+
+    sampling = backend._build_sampling_params(request)
+
+    assert sampling == {
+        'temperature': 0.2,
+        'top_p': 0.9,
+        'max_tokens': 256,
+        'presence_penalty': 0.3,
+        'frequency_penalty': 0.4,
+        'repetition_penalty': 1.05,
+        'stop': ['DONE'],
+        'n': 2,
+        'seed': 7,
+        'top_k': 20,
+        'min_p': 0.1,
+    }
 
 
 def test_vllm_backend_rejects_streaming_and_multimodal_messages_for_text_only_models() -> None:

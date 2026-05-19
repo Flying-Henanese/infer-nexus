@@ -1,8 +1,8 @@
 """API 请求/响应与内部传输的 Pydantic 数据模型。"""
 
-from typing import Annotated, Literal, TypeAlias
+from typing import Annotated, Any, Literal, TypeAlias
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from infer_nexus.core.enums import BackendType, ModelStatus, TaskType
 
@@ -40,7 +40,8 @@ class CatalogModelResponse(BaseModel):
     alias: str | None = None
     task: TaskType
     backend: BackendType
-    model_path: str
+    model_path: str | None = None
+    model_loading_config: dict[str, Any] = Field(default_factory=dict)
     dtype: str | None = None
     tensor_parallel_size: int = Field(ge=1)
     max_model_len: int | None = None
@@ -50,6 +51,10 @@ class CatalogModelResponse(BaseModel):
     min_replicas: int = Field(ge=0)
     max_replicas: int = Field(ge=1)
     capabilities: list[str] = Field(default_factory=list)
+    engine_kwargs: dict[str, Any] = Field(default_factory=dict)
+    deployment_config: dict[str, Any] = Field(default_factory=dict)
+    served_model_name: str | None = None
+    require_local_artifacts: bool = True
     labels: list[str] = Field(default_factory=list)
     status: ModelStatus = ModelStatus.UNKNOWN
 
@@ -96,6 +101,7 @@ class ChatImageURL(BaseModel):
     """OpenAI-compatible image URL block payload."""
 
     url: str
+    detail: Literal["auto", "low", "high"] | None = None
 
 
 class ChatImageContentPart(BaseModel):
@@ -117,15 +123,31 @@ class ChatMessage(BaseModel):
     role: Literal["system", "user", "assistant", "tool"]
     content: str | list[ChatContentPart]
     name: str | None = None
+    tool_call_id: str | None = None
 
 
 class ChatCompletionsRequest(BaseModel):
     """OpenAI-compatible chat completions request."""
 
+    model_config = ConfigDict(extra="allow")
+
     model: str
     messages: list[ChatMessage]
     temperature: float | None = None
     top_p: float | None = None
+    presence_penalty: float | None = None
+    frequency_penalty: float | None = None
+    repetition_penalty: float | None = None
+    stop: str | list[str] | None = None
+    n: int | None = Field(default=None, ge=1)
+    seed: int | None = None
+    logprobs: bool | None = None
+    top_logprobs: int | None = Field(default=None, ge=0)
+    response_format: dict[str, Any] | None = None
+    tools: list[dict[str, Any]] | None = None
+    tool_choice: str | dict[str, Any] | None = None
+    extra_body: dict[str, Any] | None = None
+    user: str | None = None
     max_tokens: int | None = Field(default=None, ge=1)
     stream: bool = False
 

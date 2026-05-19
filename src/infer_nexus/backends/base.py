@@ -1,7 +1,6 @@
 """后端适配器抽象接口。"""
 
 from abc import ABC, abstractmethod
-from pathlib import Path
 from typing import Any
 
 from infer_nexus.catalog.models import ModelConfig
@@ -27,7 +26,7 @@ class InferenceBackend(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def build_runtime_spec(self, model: ModelConfig, resolved_model_path: Path) -> dict[str, Any]:
+    def build_runtime_spec(self, model: ModelConfig, resolved_model_reference: str) -> dict[str, Any]:
         """从模型声明构建后端可执行的 runtime spec。"""
         raise NotImplementedError
 

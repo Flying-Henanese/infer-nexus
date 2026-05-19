@@ -129,10 +129,12 @@ class DeploymentFactory:
             "min_replicas": model.min_replicas,
             "max_replicas": model.max_replicas,
         }
+        autoscaling_config.update(model.deployment_config.autoscaling_config)
         ray_actor_options = {
             "num_cpus": model.cpu_per_replica,
             "num_gpus": model.gpu_per_replica,
         }
+        ray_actor_options.update(model.deployment_config.ray_actor_options)
         return DeploymentSpec(
             model_name=model.name,
             model_alias=model.alias,

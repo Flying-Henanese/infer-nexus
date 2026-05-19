@@ -70,6 +70,29 @@ def test_local_model_store_raises_for_missing_artifact(tmp_path: Path) -> None:
         store.require_model_path(model)
 
 
+def test_local_model_store_uses_remote_model_id_when_local_artifacts_are_not_required() -> None:
+    """Remote model IDs should be usable without a local artifact check."""
+    store = LocalModelStore('models')
+    model = ModelConfig(
+        name='mineru',
+        alias='mineru',
+        task=TaskType.CHAT,
+        model_loading_config={'model_id': 'opendatalab/MinerU2.5-2509-1.2B'},
+        tensor_parallel_size=1,
+        cpu_per_replica=4,
+        gpu_per_replica=1,
+        min_replicas=1,
+        max_replicas=1,
+        require_local_artifacts=False,
+    )
+
+    resolved = store.require_model_path(model)
+    reference = store.resolve_model_reference(model)
+
+    assert resolved.as_posix() == 'opendatalab/MinerU2.5-2509-1.2B'
+    assert reference == 'opendatalab/MinerU2.5-2509-1.2B'
+
+
 def test_build_model_registration_snippet_uses_model_path_field() -> None:
     """生成的注册片段应包含 model_path、dtype 和 alias 字段。"""
     snippet = build_model_registration_snippet(

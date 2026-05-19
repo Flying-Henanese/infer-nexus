@@ -26,8 +26,20 @@ class LocalModelStore:
             return candidate.resolve()
         return (self.root_dir / candidate).resolve()
 
+    def resolve_model_reference(self, model: ModelConfig) -> str:
+        """Resolve the runtime model reference used to initialize the backend."""
+        if model.model_loading_config.model_id:
+            return model.model_loading_config.model_id
+        if model.model_path is None:
+            raise ModelArtifactMissingError(model.name, "<unset>", "<unset>")
+        return str(self.resolve_model_path(model.model_path))
+
     def require_model_path(self, model: ModelConfig) -> Path:
         """要求模型路径存在，不存在则抛出业务异常。"""
+        if not model.require_local_artifacts and model.model_loading_config.model_id:
+            return Path(model.model_loading_config.model_id)
+        if model.model_path is None:
+            raise ModelArtifactMissingError(model.name, "<unset>", "<unset>")
         resolved_path = self.resolve_model_path(model.model_path)
         if not resolved_path.exists():
             raise ModelArtifactMissingError(model.name, model.model_path, str(resolved_path))

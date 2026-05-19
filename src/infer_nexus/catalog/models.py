@@ -7,6 +7,20 @@ from pydantic import BaseModel, Field, model_validator
 from infer_nexus.core.enums import BackendType, ModelStatus, TaskType
 
 
+class ModelLoadingConfig(BaseModel):
+    """Ray/vLLM-style model loading options."""
+
+    model_id: str | None = None
+    revision: str | None = None
+
+
+class DeploymentConfig(BaseModel):
+    """Ray Serve deployment overrides aligned with LLMConfig semantics."""
+
+    autoscaling_config: dict[str, Any] = Field(default_factory=dict)
+    ray_actor_options: dict[str, Any] = Field(default_factory=dict)
+
+
 class ModelConfig(BaseModel):
     """模型目录中的单个模型配置（由 ``config/models.yaml`` 加载）。"""
 
@@ -20,7 +34,8 @@ class ModelConfig(BaseModel):
     # 推理后端类型，决定模型实例由哪种引擎承载（默认 VLLM）。
     backend: BackendType = BackendType.VLLM
     # 模型权重或模型资源路径（本地路径/挂载路径/远程已同步路径）。
-    model_path: str
+    model_path: str | None = None
+    model_loading_config: ModelLoadingConfig = Field(default_factory=ModelLoadingConfig)
     # 推理数据类型（可选），如 fp16/bf16/fp32；为空时由后端自动推断或使用默认值。
     dtype: str | None = None
     # 张量并行度（Tensor Parallelism）大小，必须 >= 1。
@@ -44,6 +59,9 @@ class ModelConfig(BaseModel):
     # 常用于策略匹配、路由筛选与前端能力展示。
     capabilities: list[str] = Field(default_factory=list)
     engine_kwargs: dict[str, Any] = Field(default_factory=dict)
+    deployment_config: DeploymentConfig = Field(default_factory=DeploymentConfig)
+    served_model_name: str | None = None
+    require_local_artifacts: bool = True
     # 通用标签列表：用于业务分组、环境标记、A/B 实验或运营筛选。
     labels: list[str] = Field(default_factory=list)
     # 模型状态（如可用/下线/未知），用于控制是否参与调度及展示状态。
@@ -54,6 +72,8 @@ class ModelConfig(BaseModel):
         """Ensure replica bounds are internally consistent."""
         if self.max_replicas < self.min_replicas:
             raise ValueError("max_replicas must be >= min_replicas")
+        if not self.model_path and not self.model_loading_config.model_id:
+            raise ValueError("either model_path or model_loading_config.model_id must be set")
         return self
 
 

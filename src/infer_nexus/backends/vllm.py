@@ -2,7 +2,7 @@
 
 import base64
 import inspect
-from pathlib import Path
+import re
 import struct
 from time import time
 from typing import Any
@@ -71,6 +71,9 @@ class VLLMBackend(InferenceBackend):
             "tensor_parallel_size": self.runtime_spec["tensor_parallel_size"],
             "dtype": self.runtime_spec.get("dtype") or "auto",
         }
+        loading_config = self.runtime_spec.get("model_loading_config") or {}
+        if loading_config.get("revision"):
+            llm_kwargs["revision"] = loading_config["revision"]
         llm_kwargs.update(self.runtime_spec.get("engine_kwargs") or {})
         gpu_memory_utilization = self.runtime_spec.get("gpu_memory_utilization")
         max_model_len = self.runtime_spec.get("max_model_len")
@@ -118,7 +121,7 @@ class VLLMBackend(InferenceBackend):
         self.engine = None
         self.engine_state = "stopped"
 
-    def build_runtime_spec(self, model: ModelConfig, resolved_model_path: Path) -> dict[str, Any]:
+    def build_runtime_spec(self, model: ModelConfig, resolved_model_reference: str) -> dict[str, Any]:
         """将模型声明转换为 vLLM 可消费的 runtime spec。"""
         task_mode = self.TASK_TO_MODE.get(model.task.value)
         if task_mode is None:
@@ -128,7 +131,7 @@ class VLLMBackend(InferenceBackend):
 
         return {
             "backend": "vllm",
-            "model_path": str(resolved_model_path),
+            "model_path": resolved_model_reference,
             "tensor_parallel_size": model.tensor_parallel_size,
             "dtype": model.dtype,
             "max_model_len": model.max_model_len,
@@ -138,6 +141,8 @@ class VLLMBackend(InferenceBackend):
             "task_mode": task_mode,
             "capabilities": list(model.capabilities),
             "engine_kwargs": dict(model.engine_kwargs),
+            "model_loading_config": model.model_loading_config.model_dump(mode="json"),
+            "served_model_name": model.served_model_name or model.alias or model.name,
         }
 
     def _normalize_embedding_inputs(self, request: EmbeddingRequest) -> list[str]:
@@ -330,11 +335,46 @@ class VLLMBackend(InferenceBackend):
 
     def _build_sampling_params(self, request: ChatCompletionsRequest) -> dict[str, Any]:
         """从 chat 请求提取采样参数并补充默认值。"""
-        return {
+        extra = dict(request.extra_body or {})
+        model_extra = getattr(request, "model_extra", None) or {}
+        max_tokens = request.max_tokens or extra.pop("max_tokens", None) or model_extra.get(
+            "max_completion_tokens"
+        ) or 512
+        params: dict[str, Any] = {
             "temperature": request.temperature if request.temperature is not None else 0.7,
             "top_p": request.top_p if request.top_p is not None else 1.0,
-            "max_tokens": request.max_tokens or 512,
+            "max_tokens": max_tokens,
         }
+        optional_params = {
+            "presence_penalty": request.presence_penalty,
+            "frequency_penalty": request.frequency_penalty,
+            "repetition_penalty": request.repetition_penalty,
+            "stop": request.stop,
+            "n": request.n,
+            "seed": request.seed,
+            "logprobs": request.top_logprobs if request.logprobs else None,
+        }
+        for key, value in optional_params.items():
+            if value is not None:
+                params[key] = value
+
+        allowed_extra_keys = {
+            "best_of",
+            "top_k",
+            "min_p",
+            "min_tokens",
+            "ignore_eos",
+            "skip_special_tokens",
+            "spaces_between_special_tokens",
+            "include_stop_str_in_output",
+            "truncate_prompt_tokens",
+            "prompt_logprobs",
+        }
+        for key in allowed_extra_keys:
+            if key in extra and extra[key] is not None:
+                params[key] = extra[key]
+
+        return params
 
     def _invoke_vllm_chat(self, messages: list[dict[str, Any]], sampling_params: dict[str, Any]) -> Any:
         """Call vLLM chat across versions with different method signatures."""
@@ -366,6 +406,29 @@ class VLLMBackend(InferenceBackend):
             capabilities = runtime_context.get("capabilities", [])
         return "vision" in (capabilities or [])
 
+    def _normalize_data_url(self, url: str) -> str:
+        """Normalize base64 data URLs into the stricter form expected by vLLM."""
+        if not url.startswith("data:") or ";base64," not in url:
+            return url
+
+        prefix, payload = url.split(",", 1)
+        normalized = re.sub(r"\s+", "", payload)
+        normalized = normalized.replace("-", "+").replace("_", "/")
+        padding = len(normalized) % 4
+        if padding:
+            normalized += "=" * (4 - padding)
+        return f"{prefix},{normalized}"
+
+    def _serialize_content_block(self, block: Any) -> dict[str, Any]:
+        """Serialize one multimodal content block with minimal normalization."""
+        payload = block.model_dump(mode="json")
+        if payload.get("type") == "image_url":
+            image_url = payload.get("image_url") or {}
+            url = image_url.get("url")
+            if isinstance(url, str):
+                image_url["url"] = self._normalize_data_url(url)
+        return payload
+
     def _serialize_message_content(
         self,
         content: Any,
@@ -388,7 +451,7 @@ class VLLMBackend(InferenceBackend):
                 code="invalid_input",
             )
 
-        return [block.model_dump(mode="json") for block in content]
+        return [self._serialize_content_block(block) for block in content]
 
     def _build_chat_messages(
         self,
@@ -415,6 +478,8 @@ class VLLMBackend(InferenceBackend):
             }
             if message.name:
                 payload["name"] = message.name
+            if message.tool_call_id:
+                payload["tool_call_id"] = message.tool_call_id
             messages.append(payload)
         return messages
 

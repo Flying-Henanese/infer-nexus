@@ -16,6 +16,8 @@ class ModelRegistry:
             self._by_name[model.name] = model
             if model.alias:
                 self._alias_to_name[model.alias] = model.name
+            if model.served_model_name:
+                self._alias_to_name[model.served_model_name] = model.name
 
     def list_models(self) -> list[ModelConfig]:
         """Return all registered models in load order."""

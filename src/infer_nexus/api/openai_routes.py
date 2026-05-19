@@ -59,7 +59,7 @@ async def list_models(registry: ModelRegistry = Depends(get_registry)) -> ModelL
     return ModelListResponse(
         data=[
             ModelSummary(
-                id=model.alias or model.name,
+                id=model.served_model_name or model.alias or model.name,
                 task=model.task,
                 backend=model.backend,
                 status=model.status,

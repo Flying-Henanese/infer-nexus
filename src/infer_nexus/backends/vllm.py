@@ -135,6 +135,7 @@ class VLLMBackend(InferenceBackend):
             "gpu_memory_utilization": model.gpu_memory_utilization,
             "cpu_per_replica": model.cpu_per_replica,
             "task_mode": task_mode,
+            "capabilities": list(model.capabilities),
         }
 
     def _normalize_embedding_inputs(self, request: EmbeddingRequest) -> list[str]:
@@ -356,7 +357,43 @@ class VLLMBackend(InferenceBackend):
                 return self.engine.chat(messages, SamplingParams(**sampling_params))
             raise
 
-    def _build_chat_messages(self, request: ChatCompletionsRequest) -> list[dict[str, Any]]:
+    def _supports_multimodal(self, runtime_context: dict[str, Any] | None = None) -> bool:
+        """Return whether the current model runtime is allowed to accept image blocks."""
+        capabilities = self.runtime_spec.get("capabilities")
+        if capabilities is None and runtime_context is not None:
+            capabilities = runtime_context.get("capabilities", [])
+        return "vision" in (capabilities or [])
+
+    def _serialize_message_content(
+        self,
+        content: Any,
+        *,
+        allow_multimodal: bool,
+    ) -> str | list[dict[str, Any]]:
+        """Normalize text or multimodal content into the payload expected by vLLM."""
+        if isinstance(content, str):
+            return content
+
+        if not allow_multimodal:
+            raise BackendRequestValidationError(
+                "This model does not support multimodal chat content.",
+                code="unsupported_message_content",
+            )
+
+        if not content:
+            raise BackendRequestValidationError(
+                "Multimodal chat content must include at least one content block.",
+                code="invalid_input",
+            )
+
+        return [block.model_dump(mode="json") for block in content]
+
+    def _build_chat_messages(
+        self,
+        request: ChatCompletionsRequest,
+        *,
+        runtime_context: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
         """将 chat 消息转换为 vLLM 输入格式，并校验阶段一约束。"""
         if request.stream:
             raise BackendRequestValidationError(
@@ -364,15 +401,16 @@ class VLLMBackend(InferenceBackend):
                 code="unsupported_parameter",
             )
 
+        allow_multimodal = self._supports_multimodal(runtime_context)
         messages: list[dict[str, Any]] = []
         for message in request.messages:
-            if not isinstance(message.content, str):
-                raise BackendRequestValidationError(
-                    "Only text chat messages are supported in Phase 1.",
-                    code="unsupported_message_content",
-                )
-
-            payload = {"role": message.role, "content": message.content}
+            payload = {
+                "role": message.role,
+                "content": self._serialize_message_content(
+                    message.content,
+                    allow_multimodal=allow_multimodal,
+                ),
+            }
             if message.name:
                 payload["name"] = message.name
             messages.append(payload)
@@ -410,7 +448,7 @@ class VLLMBackend(InferenceBackend):
             "backend": runtime_spec["backend"],
             "deployment": runtime_context["deployment_name"],
             "raw": {
-                "messages": self._build_chat_messages(request),
+                "messages": self._build_chat_messages(request, runtime_context=runtime_context),
                 "sampling_params": sampling_params,
             },
         }
@@ -462,7 +500,7 @@ class VLLMBackend(InferenceBackend):
     ) -> dict[str, Any]:
         """执行 chat completion。"""
         # 先做请求归一化和参数确定，再根据引擎是否就绪选择真实推理或 stub 降级。
-        messages = self._build_chat_messages(request)
+        messages = self._build_chat_messages(request, runtime_context=runtime_context)
         sampling_params = self._build_sampling_params(request)
         if self.engine is None:
             return self._build_chat_stub_response(

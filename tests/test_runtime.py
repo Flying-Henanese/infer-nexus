@@ -276,8 +276,41 @@ def test_vllm_backend_builds_sampling_params_and_text_messages() -> None:
     assert backend._build_chat_messages(request) == [{'role': 'user', 'content': 'hello'}]
 
 
-def test_vllm_backend_rejects_streaming_and_multimodal_messages() -> None:
-    """阶段一应拒绝流式与多模态 chat 请求。"""
+def test_vllm_backend_accepts_multimodal_messages_for_vision_models() -> None:
+    """Vision-capable models should pass multimodal chat blocks to vLLM."""
+    backend = VLLMBackend({'capabilities': ['vision']})
+    multimodal = ChatCompletionsRequest(
+        model='qwen3-vl-chat-8b-instruct',
+        messages=[
+            {
+                'role': 'user',
+                'content': [
+                    {'type': 'text', 'text': 'hello'},
+                    {
+                        'type': 'image_url',
+                        'image_url': {'url': 'https://example.com/demo.png'},
+                    },
+                ],
+            }
+        ],
+    )
+
+    assert backend._build_chat_messages(multimodal) == [
+        {
+            'role': 'user',
+            'content': [
+                {'type': 'text', 'text': 'hello'},
+                {
+                    'type': 'image_url',
+                    'image_url': {'url': 'https://example.com/demo.png'},
+                },
+            ],
+        }
+    ]
+
+
+def test_vllm_backend_rejects_streaming_and_multimodal_messages_for_text_only_models() -> None:
+    """Streaming stays unsupported and text-only models still reject image blocks."""
     backend = VLLMBackend({})
     streaming = ChatCompletionsRequest(
         model='qwen3-chat',
@@ -292,7 +325,7 @@ def test_vllm_backend_rejects_streaming_and_multimodal_messages() -> None:
     with pytest.raises(BackendRequestValidationError, match='Streaming chat completions'):
         backend._build_chat_messages(streaming)
 
-    with pytest.raises(BackendRequestValidationError, match='Only text chat messages'):
+    with pytest.raises(BackendRequestValidationError, match='does not support multimodal'):
         backend._build_chat_messages(multimodal)
 
 

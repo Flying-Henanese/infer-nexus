@@ -69,6 +69,7 @@ class ServeApplicationBuilder:
             "model_name": model.name,
             "model_alias": model.alias,
             "task": model.task,
+            "capabilities": list(model.capabilities),
             "deployment_name": self.deployment_factory.build_deployment_name(model),
             "resolved_model_path": str(resolved_model_path),
             "runtime_spec": runtime_spec,

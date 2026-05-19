@@ -1,6 +1,6 @@
 """API 请求/响应与内部传输的 Pydantic 数据模型。"""
 
-from typing import Any, Literal
+from typing import Annotated, Literal, TypeAlias
 
 from pydantic import BaseModel, Field
 
@@ -85,11 +85,37 @@ class OpenAIErrorResponse(BaseModel):
     error: OpenAIErrorDetail
 
 
+class ChatTextContentPart(BaseModel):
+    """OpenAI-compatible text content block."""
+
+    type: Literal["text"]
+    text: str
+
+
+class ChatImageURL(BaseModel):
+    """OpenAI-compatible image URL block payload."""
+
+    url: str
+
+
+class ChatImageContentPart(BaseModel):
+    """OpenAI-compatible image content block."""
+
+    type: Literal["image_url"]
+    image_url: ChatImageURL
+
+
+ChatContentPart: TypeAlias = Annotated[
+    ChatTextContentPart | ChatImageContentPart,
+    Field(discriminator="type"),
+]
+
+
 class ChatMessage(BaseModel):
     """Chat message unit used in OpenAI-compatible chat APIs."""
 
     role: Literal["system", "user", "assistant", "tool"]
-    content: str | list[dict[str, Any]]
+    content: str | list[ChatContentPart]
     name: str | None = None
 
 

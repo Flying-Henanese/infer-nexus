@@ -197,21 +197,60 @@ def test_chat_completions_rejects_streaming_in_phase1(prepared_model_store: Path
     assert response.json()['error']['code'] == 'unsupported_parameter'
 
 
-def test_chat_completions_rejects_multimodal_message_content(prepared_model_store: Path) -> None:
-    """阶段一 chat 接口应拒绝多模态消息内容。"""
+def test_chat_completions_accepts_multimodal_message_content_for_vision_model(
+    prepared_model_store: Path,
+) -> None:
+    """Vision-capable chat models should accept multimodal message content."""
     app = create_app()
 
     payload = {
-        'model': 'qwen3-chat',
+        'model': 'qwen3-vl-chat-8b-instruct',
         'messages': [
             {
                 'role': 'user',
-                'content': [{'type': 'text', 'text': 'hello'}],
+                'content': [
+                    {'type': 'text', 'text': 'hello'},
+                    {
+                        'type': 'image_url',
+                        'image_url': {'url': 'https://example.com/demo.png'},
+                    },
+                ],
             }
         ],
     }
 
     with TestClient(app) as client:
+        client.app.state.model_store.require_model_path = lambda _model: None
+        response = client.post('/v1/chat/completions', json=payload)
+
+    assert response.status_code == 200
+    assert response.json()['choices'][0]['message']['role'] == 'assistant'
+
+
+def test_chat_completions_rejects_multimodal_message_content_for_text_only_model(
+    prepared_model_store: Path,
+) -> None:
+    """Text-only chat models should reject multimodal message content."""
+    app = create_app()
+
+    payload = {
+        'model': 'qwen3-8b',
+        'messages': [
+            {
+                'role': 'user',
+                'content': [
+                    {'type': 'text', 'text': 'hello'},
+                    {
+                        'type': 'image_url',
+                        'image_url': {'url': 'https://example.com/demo.png'},
+                    },
+                ],
+            }
+        ],
+    }
+
+    with TestClient(app) as client:
+        client.app.state.model_store.require_model_path = lambda _model: None
         response = client.post('/v1/chat/completions', json=payload)
 
     assert response.status_code == 400

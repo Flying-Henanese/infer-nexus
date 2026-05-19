@@ -421,7 +421,7 @@ class VLLMBackend(InferenceBackend):
 
     def _serialize_content_block(self, block: Any) -> dict[str, Any]:
         """Serialize one multimodal content block with minimal normalization."""
-        payload = block.model_dump(mode="json")
+        payload = block.model_dump(mode="json", exclude_none=True)
         if payload.get("type") == "image_url":
             image_url = payload.get("image_url") or {}
             url = image_url.get("url")

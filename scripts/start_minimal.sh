@@ -15,6 +15,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STATE_DIR="${ROOT_DIR}/.infer-nexus"
 LOG_DIR="${STATE_DIR}/logs"
 PID_DIR="${STATE_DIR}/pids"
+RAY_STATE_FILE="${STATE_DIR}/ray_state.env"
 
 SETTINGS="config/settings.yaml"
 RAY_ADDRESS="auto"
@@ -62,6 +63,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 mkdir -p "${LOG_DIR}" "${PID_DIR}"
+rm -f "${RAY_STATE_FILE}"
 
 cd "${ROOT_DIR}"
 
@@ -94,6 +96,10 @@ ray_is_running() {
 
 start_ray_head_if_needed() {
   if ray_is_running; then
+    cat >"${RAY_STATE_FILE}" <<EOF
+RAY_STARTED_BY_SCRIPT=0
+RAY_ADDRESS=${RAY_ADDRESS}
+EOF
     return 0
   fi
 
@@ -113,6 +119,10 @@ local args=(start --head --disable-usage-stats)
   local i
   for i in {1..40}; do
     if ray_is_running; then
+      cat >"${RAY_STATE_FILE}" <<EOF
+RAY_STARTED_BY_SCRIPT=1
+RAY_ADDRESS=${RAY_ADDRESS}
+EOF
       return 0
     fi
     sleep 0.25

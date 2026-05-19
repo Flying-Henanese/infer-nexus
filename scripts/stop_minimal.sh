@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STATE_DIR="${ROOT_DIR}/.infer-nexus"
 PID_DIR="${STATE_DIR}/pids"
+RAY_STATE_FILE="${STATE_DIR}/ray_state.env"
 
 SERVE_PID_FILE="${PID_DIR}/serve_runtime.pid"
 GATEWAY_PID_FILE="${PID_DIR}/gateway.pid"
@@ -65,20 +66,84 @@ kill_stray_vllm_local() {
   done
 }
 
+load_ray_state() {
+  RAY_STARTED_BY_SCRIPT=1
+  RAY_ADDRESS="auto"
+  if [[ -f "${RAY_STATE_FILE}" ]]; then
+    # shellcheck disable=SC1090
+    source "${RAY_STATE_FILE}" || true
+  fi
+}
+
+stop_serve_app() {
+  if ! command -v python >/dev/null 2>&1; then
+    return 0
+  fi
+  local ray_address="${1:-auto}"
+  python - <<PY >/dev/null 2>&1 || true
+try:
+    import ray
+    from ray import serve
+
+    ray.init(address="${ray_address}", ignore_reinit_error=True, logging_level="ERROR")
+    try:
+        serve.shutdown()
+    finally:
+        ray.shutdown()
+except Exception:
+    pass
+PY
+}
+
+kill_stray_ray_local() {
+  # Best-effort cleanup for leftover local Ray daemons/workers.
+  local patterns=(
+    "raylet"
+    "gcs_server"
+    "monitor.py"
+    "dashboard.py"
+    "dashboard_agent.py"
+    "log_monitor.py"
+    "runtime_env_agent.py"
+    "ray::"
+    "default_worker.py"
+  )
+  local pattern
+  for pattern in "${patterns[@]}"; do
+    if pgrep -f "${pattern}" >/dev/null 2>&1; then
+      pkill -TERM -f "${pattern}" >/dev/null 2>&1 || true
+    fi
+  done
+  sleep 2
+  for pattern in "${patterns[@]}"; do
+    if pgrep -f "${pattern}" >/dev/null 2>&1; then
+      pkill -KILL -f "${pattern}" >/dev/null 2>&1 || true
+    fi
+  done
+}
+
 kill_from_pid_file "${GATEWAY_PID_FILE}" "gateway"
 kill_from_pid_file "${SERVE_PID_FILE}" "serve runtime"
 
-# Stop Ray runtime forcefully so detached Serve replicas / vLLM workers
-# do not keep occupying GPU memory after the gateway/runtime parent exits.
-if command -v ray >/dev/null 2>&1; then
+load_ray_state
+
+# Ask Serve to shut down first so replicas have a chance to exit cleanly.
+stop_serve_app "${RAY_ADDRESS}"
+
+# Stop Ray runtime forcefully when this script created the local cluster, so
+# detached Serve replicas / vLLM workers do not keep occupying GPU memory.
+if [[ "${RAY_STARTED_BY_SCRIPT}" == "1" ]] && command -v ray >/dev/null 2>&1; then
   ray stop -f >/dev/null 2>&1 || true
 fi
 
 kill_stray_vllm_local
+kill_stray_ray_local
 
 if [[ -d "${STATE_DIR}" ]]; then
   printf '%s\n' "stopped" >"${STATE_DIR}/STATUS" || true
 fi
+
+rm -f "${RAY_STATE_FILE}"
 
 echo "Stopped."
 

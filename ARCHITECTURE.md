@@ -8,7 +8,8 @@ The project uses:
 - `Python` as the implementation language
 - `uv` for dependency and environment management
 - `Ray Serve` for deployment lifecycle, routing, and autoscaling support
-- `vLLM` as the default inference backend
+- `vLLM` as the local runtime backend
+- OpenAI-compatible upstream proxying for compatibility-sensitive models
 - OpenAI-compatible northbound APIs for client compatibility
 
 Primary goals:
@@ -61,11 +62,11 @@ Client
       -> Native Platform API Layer
       -> Auth / Admission / Routing
           -> Model Catalog
+          -> Backend Dispatch per Model
+              -> vllm_openai_proxy -> Upstream vLLM/OpenAI-compatible server
+              -> vllm (local) -> Ray Serve Deployments -> vLLM Runtime
           -> Load Inspector
           -> Scaling Policy
-          -> Ray Serve Deployments
-              -> vLLM Runtime per Model
-                  -> LLM / Embedding / Rerank / VLM
 ```
 
 ### Responsibilities by layer
@@ -84,7 +85,9 @@ Client
 #### Routing Layer
 - Resolves the requested model
 - Selects the correct task path based on model type
-- Dispatches to the matching Ray Serve deployment
+- Dispatches by backend type:
+  - `vllm_openai_proxy`: forwards to configured upstream `/v1/...` endpoint
+  - `vllm`: dispatches to matching local Ray Serve deployment
 
 #### Load Inspector and Admission Control
 - Aggregates runtime health and load indicators
@@ -104,6 +107,11 @@ Client
 - Runs the actual model inference engines
 - Provides OpenAI-like behavior where possible
 - Can later be replaced by `vllm-ascend` without redesigning the entire platform
+
+#### OpenAI Proxy Backend
+- Preserves northbound SDK compatibility (`base_url + model`)
+- Forwards request payloads to upstream OpenAI-compatible servers
+- Keeps response semantics close to upstream behavior, including SSE streaming
 
 ## 4. Core Decisions
 
@@ -190,17 +198,22 @@ This separation is necessary to preserve shared-pool scheduling and avoid fallin
 - In this mode, deployments can still fail with vLLM KV cache initialization errors even when catalog config is valid.
 - For stability-first bring-up, prefer one-replica-per-GPU (`num_gpus=1`) before reintroducing fractional sharing.
 
-### 4.5 Serving backend
-Phase 1 assumes `vLLM` as the only backend.
+### 4.5 Serving backends
+Current implementation supports two backends:
+
+1. `vllm` (local)
+2. `vllm_openai_proxy` (upstream OpenAI-compatible proxy)
 
 
 Rationale:
-- Good compatibility and current fit for LLM-style workloads
+- `vllm`: good fit when local runtime control and resource ownership are needed
+- `vllm_openai_proxy`: highest compatibility with official upstream server behavior
 - Forward path exists to `vllm-ascend`
 
-Implementation note:
-- The codebase should still define a thin backend abstraction to avoid coupling all logic directly to vLLM internals
-- Runtime adapter must tolerate vLLM API drift across versions (constructor kwargs and `LLM.chat()` signatures).
+Implementation notes:
+- Keep backend abstraction thin to avoid hard-coupling gateway logic to one runtime.
+- For compatibility-sensitive multimodal models, prefer `vllm_openai_proxy`.
+- Keep local `LLM.chat()` path as fallback, not universal default.
 
 ### 4.6 No Web UI
 Phase 1 is API-only.

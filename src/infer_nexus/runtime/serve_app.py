@@ -5,6 +5,7 @@ from typing import Any
 
 from infer_nexus.backends.vllm import VLLMBackend
 from infer_nexus.catalog.registry import ModelRegistry
+from infer_nexus.core.enums import BackendType
 from infer_nexus.model_store import LocalModelStore
 from infer_nexus.runtime.deployments import (
     DeploymentFactory,
@@ -31,7 +32,11 @@ class ServeApplicationBuilder:
 
     def build_specs(self, registry: ModelRegistry) -> list[DeploymentSpec]:
         """Compile per-model deployment specs from the catalog registry."""
-        return [self.deployment_factory.build_spec(model) for model in registry.list_models()]
+        return [
+            self.deployment_factory.build_spec(model)
+            for model in registry.list_models()
+            if model.backend == BackendType.VLLM
+        ]
 
     def build_plan(self, registry: ModelRegistry) -> dict[str, dict[str, Any]]:
         """Build serializable deployment plan for diagnostics and inspection."""
@@ -81,6 +86,8 @@ class ServeApplicationBuilder:
     def validate_registry_runtime_configs(self, registry: ModelRegistry) -> None:
         """Eagerly validate all model runtime contexts at startup."""
         for model in registry.list_models():
+            if model.backend != BackendType.VLLM:
+                continue
             self.build_runtime_context(registry, model.name)
 
     def build_serve_bindings(

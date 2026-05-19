@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
+from starlette.responses import Response
 
 from infer_nexus.api.deps import (
     get_admission_controller,
@@ -11,7 +12,7 @@ from infer_nexus.api.deps import (
 )
 from infer_nexus.catalog.registry import ModelRegistry
 from infer_nexus.control.admission import AdmissionController
-from infer_nexus.core.enums import TaskType
+from infer_nexus.core.enums import BackendType, TaskType
 from infer_nexus.core.errors import (
     AdmissionRejectedError,
     BackendRequestValidationError,
@@ -77,7 +78,7 @@ async def create_chat_completion(
     admission: AdmissionController = Depends(get_admission_controller),
     model_store: LocalModelStore = Depends(get_model_store),
     dispatcher: RuntimeDispatcher = Depends(get_runtime_dispatcher),
-) -> ChatCompletionsResponse | JSONResponse:
+) -> ChatCompletionsResponse | JSONResponse | Response:
     """处理聊天补全请求，执行模型校验、准入校验和运行时分发。"""
     # 第一步：检查请求模型是否已注册。
     try:
@@ -103,7 +104,8 @@ async def create_chat_completion(
 
     # 第三步：检查模型文件是否存在，并通过准入控制后进入运行时执行。
     try:
-        model_store.require_model_path(model)
+        if model.backend != BackendType.VLLM_OPENAI_PROXY:
+            model_store.require_model_path(model)
         admission.check_model_request(model)
         return await dispatcher.dispatch_chat(model, request)
     except ModelArtifactMissingError as exc:
@@ -143,7 +145,7 @@ async def create_embedding(
     admission: AdmissionController = Depends(get_admission_controller),
     model_store: LocalModelStore = Depends(get_model_store),
     dispatcher: RuntimeDispatcher = Depends(get_runtime_dispatcher),
-) -> EmbeddingResponse | JSONResponse:
+) -> EmbeddingResponse | JSONResponse | Response:
     """处理向量化请求，执行模型校验、准入校验和运行时分发。"""
     try:
         model = registry.get(request.model)
@@ -166,7 +168,8 @@ async def create_embedding(
         )
 
     try:
-        model_store.require_model_path(model)
+        if model.backend != BackendType.VLLM_OPENAI_PROXY:
+            model_store.require_model_path(model)
         admission.check_model_request(model)
         return await dispatcher.dispatch_embedding(model, request)
     except ModelArtifactMissingError as exc:
@@ -205,7 +208,7 @@ async def _create_rerank_impl(
     admission: AdmissionController,
     model_store: LocalModelStore,
     dispatcher: RuntimeDispatcher,
-) -> RerankResponse | JSONResponse:
+) -> RerankResponse | JSONResponse | Response:
     """Rerank 共享实现，供 `/v1/rerank` 与兼容路径复用。"""
     try:
         model = registry.get(request.model)
@@ -228,7 +231,8 @@ async def _create_rerank_impl(
         )
 
     try:
-        model_store.require_model_path(model)
+        if model.backend != BackendType.VLLM_OPENAI_PROXY:
+            model_store.require_model_path(model)
         admission.check_model_request(model)
         return await dispatcher.dispatch_rerank(model, request)
     except ModelArtifactMissingError as exc:
@@ -269,6 +273,6 @@ async def create_rerank(
     admission: AdmissionController = Depends(get_admission_controller),
     model_store: LocalModelStore = Depends(get_model_store),
     dispatcher: RuntimeDispatcher = Depends(get_runtime_dispatcher),
-) -> RerankResponse | JSONResponse:
+) -> RerankResponse | JSONResponse | Response:
     """处理 rerank 请求。"""
     return await _create_rerank_impl(request, registry, admission, model_store, dispatcher)

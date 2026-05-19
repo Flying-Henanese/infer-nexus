@@ -2,8 +2,25 @@
 
 Shared inference service factory for internal development and testing.
 
-See [ARCHITECTURE.md](./ARCHITECTURE.md) for the system design and [AGENT.md](./AGENT.md) for implementation rules.
+## Current Runtime Shape
 
-For the current smallest runnable deployment shape, see [MINIMAL_STARTUP.md](./MINIMAL_STARTUP.md).
+- Runtime mode: `Ray Serve + vLLM`
+- Gateway: `FastAPI` (`/v1/*` OpenAI-compatible + `/api/*` platform APIs)
+- Default gateway bind: `0.0.0.0:8000`
+- Current catalog focus: chat models (see `config/models.yaml`)
 
-For first-time Ubuntu + CUDA bring-up, use [DEPLOYMENT_CHECKLIST.md](./DEPLOYMENT_CHECKLIST.md).
+## Quick Start
+
+For the current smallest runnable deployment shape:
+
+- [MINIMAL_STARTUP.md](./MINIMAL_STARTUP.md)
+
+For first-time Ubuntu + CUDA bring-up:
+
+- [DEPLOYMENT_CHECKLIST.md](./DEPLOYMENT_CHECKLIST.md)
+
+## Documentation Map
+
+- [ARCHITECTURE.md](./ARCHITECTURE.md): system design, boundaries, and phase goals
+- [AGENT.md](./AGENT.md): implementation rules and constraints
+- [NEXT_SESSION.md](./NEXT_SESSION.md): latest handoff notes and known runtime issues

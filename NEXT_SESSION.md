@@ -1,6 +1,6 @@
 # Next Session Handoff
 
-## Current Snapshot (2026-05-18)
+## Current Snapshot (2026-05-19)
 
 The project is running in real Ray Serve + vLLM mode on Ubuntu/CUDA and is past the initial scaffolding stage.
 
@@ -11,6 +11,10 @@ Current active model catalog:
 Current startup defaults in `scripts/start_minimal.sh`:
 - `CUDA_VISIBLE_DEVICES_VALUE="1,3"`
 - Ray is started only when no existing cluster is reachable.
+
+Documentation alignment completed:
+- `README.md` now documents the current runtime shape and doc entrypoints.
+- `MINIMAL_STARTUP.md` and `DEPLOYMENT_CHECKLIST.md` now treat chat as required smoke test and embeddings/rerank as optional, depending on enabled catalog models.
 
 ## What Was Recently Fixed
 

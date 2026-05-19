@@ -106,19 +106,36 @@ These come from [config/settings.yaml](/Users/zhoushujian/Projects/GitHub/infer-
 
 ## Minimal Validation
 
-Check model discovery:
-
-```bash
-curl http://127.0.0.1:8000/v1/models
-```
-
 Check health:
 
 ```bash
 curl http://127.0.0.1:8000/healthz
+curl http://127.0.0.1:8000/readyz
 ```
 
-Check embeddings:
+Check model discovery:
+
+```bash
+curl http://127.0.0.1:8000/v1/models
+curl http://127.0.0.1:8000/api/catalog/models
+```
+
+Required smoke test (current default catalog is chat-first):
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "qwen3-8b",
+    "messages": [
+      {"role": "user", "content": "hello"}
+    ]
+  }'
+```
+
+Optional smoke tests (run only if corresponding models are registered in `config/models.yaml`):
+
+Embeddings:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/v1/embeddings \
@@ -129,7 +146,7 @@ curl -X POST http://127.0.0.1:8000/v1/embeddings \
   }'
 ```
 
-Check rerank:
+Rerank (`/v1/rerank` or compatibility path `/rerank`):
 
 ```bash
 curl -X POST http://127.0.0.1:8000/v1/rerank \
@@ -142,19 +159,6 @@ curl -X POST http://127.0.0.1:8000/v1/rerank \
       "The capital of France is Paris."
     ],
     "top_n": 1
-  }'
-```
-
-Check chat:
-
-```bash
-curl -X POST http://127.0.0.1:8000/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "model": "qwen3-chat",
-    "messages": [
-      {"role": "user", "content": "hello"}
-    ]
   }'
 ```
 
@@ -176,8 +180,8 @@ scripts/stop_minimal.sh
 
 - The gateway and Serve runtime are still separate processes.
 - True single-port serving is not implemented yet.
-- `stream=true` is still rejected in Phase 1.
-- VLM is still intentionally unsupported.
+- `stream=true` behavior is backend/version dependent and should be validated per model.
+- VLM remains an extension point and may need model-specific request shaping.
 - Some models may need vLLM-specific startup overrides such as score templates or `hf_overrides`.
 
 ## Convergence Direction

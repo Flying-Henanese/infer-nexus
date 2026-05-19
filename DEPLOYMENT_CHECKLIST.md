@@ -57,7 +57,7 @@ find models -maxdepth 3 -type d | sort
 ## 4. Registered Model Configuration
 
 - Review `config/models.yaml`.
-- Confirm each model has the correct:
+- Confirm each enabled model has the correct:
   - `task`
   - `backend`
   - `model_path`
@@ -65,8 +65,8 @@ find models -maxdepth 3 -type d | sort
   - `gpu_per_replica`
   - `min_replicas`
   - `max_replicas`
-- Confirm `model_path` is a local-path semantic value, not a Hugging Face repo id.
-- Confirm the sum of `gpu_per_replica * min_replicas` across all models fits within the intended pool.
+- Confirm `model_path` points to a valid local path in your environment.
+- Confirm the sum of `gpu_per_replica * min_replicas` across all enabled models fits within the intended pool.
 
 ## 5. Runtime Settings
 
@@ -139,43 +139,19 @@ curl http://127.0.0.1:8000/v1/models
 curl http://127.0.0.1:8000/api/catalog/models
 ```
 
-- Chat:
+- Required: run at least one chat request against an actually registered chat alias (for current default config, `qwen3-8b` works):
 
 ```bash
 curl -X POST http://127.0.0.1:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "qwen3-chat",
+    "model": "qwen3-8b",
     "messages": [{"role": "user", "content": "hello"}]
   }'
 ```
 
-- Embeddings:
-
-```bash
-curl -X POST http://127.0.0.1:8000/v1/embeddings \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "model": "bge-embedding",
-    "input": "hello world"
-  }'
-```
-
-- Rerank:
-
-```bash
-curl -X POST http://127.0.0.1:8000/v1/rerank \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "model": "bge-rerank",
-    "query": "capital of france",
-    "documents": [
-      "The capital of Brazil is Brasilia.",
-      "The capital of France is Paris."
-    ],
-    "top_n": 1
-  }'
-```
+- Optional: run embeddings only if an embedding model is enabled in `config/models.yaml`.
+- Optional: run rerank only if a rerank model is enabled in `config/models.yaml`.
 
 ## 10. Failure Interpretation
 
@@ -184,7 +160,7 @@ curl -X POST http://127.0.0.1:8000/v1/rerank \
 - `400 unsupported_task_type`
   - The request hit a model registered for the wrong task.
 - `400 unsupported_parameter`
-  - Phase 1 feature is not implemented, for example `stream=true`.
+  - Requested parameter is not accepted by current request/backend path.
 - `501 runtime_not_connected`
   - The gateway cannot resolve or invoke the Serve deployment handle.
 - Startup crash during Serve runtime deployment
@@ -199,6 +175,5 @@ The first deployment is good enough to continue only if:
 - Gateway starts and stays healthy.
 - `/v1/models` returns the expected registered aliases.
 - At least one chat request succeeds.
-- At least one embedding request succeeds.
-- At least one rerank request succeeds.
+- For each task type enabled in your catalog, at least one request for that task succeeds.
 - No request path falls back to unexpected `500` responses.

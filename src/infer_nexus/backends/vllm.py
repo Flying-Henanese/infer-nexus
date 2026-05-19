@@ -71,6 +71,7 @@ class VLLMBackend(InferenceBackend):
             "tensor_parallel_size": self.runtime_spec["tensor_parallel_size"],
             "dtype": self.runtime_spec.get("dtype") or "auto",
         }
+        llm_kwargs.update(self.runtime_spec.get("engine_kwargs") or {})
         gpu_memory_utilization = self.runtime_spec.get("gpu_memory_utilization")
         max_model_len = self.runtime_spec.get("max_model_len")
         requested_mode = self.runtime_spec.get("task_mode")
@@ -136,6 +137,7 @@ class VLLMBackend(InferenceBackend):
             "cpu_per_replica": model.cpu_per_replica,
             "task_mode": task_mode,
             "capabilities": list(model.capabilities),
+            "engine_kwargs": dict(model.engine_kwargs),
         }
 
     def _normalize_embedding_inputs(self, request: EmbeddingRequest) -> list[str]:

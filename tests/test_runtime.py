@@ -309,6 +309,72 @@ def test_vllm_backend_accepts_multimodal_messages_for_vision_models() -> None:
     ]
 
 
+def test_vllm_backend_build_runtime_spec_preserves_engine_kwargs(tmp_path) -> None:
+    """Model engine kwargs should be preserved in runtime spec for startup."""
+    backend = VLLMBackend({})
+    model = ModelConfig(
+        name='mineru',
+        alias='mineru',
+        task=TaskType.CHAT,
+        backend='vllm',
+        model_path='opendatalab/MinerU2.5-2509-1.2B',
+        dtype='auto',
+        tensor_parallel_size=1,
+        max_model_len=16384,
+        cpu_per_replica=4,
+        gpu_per_replica=1,
+        min_replicas=1,
+        max_replicas=1,
+        capabilities=['vision'],
+        engine_kwargs={
+            'trust_remote_code': True,
+            'limit_mm_per_prompt': {'image': 10},
+        },
+    )
+
+    runtime_spec = backend.build_runtime_spec(model, tmp_path / 'mineru')
+
+    assert runtime_spec['engine_kwargs'] == {
+        'trust_remote_code': True,
+        'limit_mm_per_prompt': {'image': 10},
+    }
+
+
+def test_vllm_backend_startup_forwards_engine_kwargs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Catalog-provided engine kwargs should be forwarded to vLLM LLM."""
+    captured_kwargs: dict[str, object] = {}
+
+    class FakeLLM:
+        def __init__(self, **kwargs) -> None:
+            captured_kwargs.update(kwargs)
+            self.supported_tasks = ['generate']
+
+    fake_vllm = types.SimpleNamespace(LLM=FakeLLM)
+    monkeypatch.setitem(sys.modules, 'vllm', fake_vllm)
+
+    backend = VLLMBackend(
+        {
+            'model_path': 'opendatalab/MinerU2.5-2509-1.2B',
+            'tensor_parallel_size': 1,
+            'dtype': 'auto',
+            'max_model_len': 16384,
+            'gpu_memory_utilization': 0.85,
+            'task_mode': 'generate',
+            'engine_kwargs': {
+                'trust_remote_code': True,
+                'limit_mm_per_prompt': {'image': 10},
+            },
+            'backend_init_mode': 'real',
+        }
+    )
+
+    backend.startup()
+
+    assert captured_kwargs['model'] == 'opendatalab/MinerU2.5-2509-1.2B'
+    assert captured_kwargs['trust_remote_code'] is True
+    assert captured_kwargs['limit_mm_per_prompt'] == {'image': 10}
+
+
 def test_vllm_backend_rejects_streaming_and_multimodal_messages_for_text_only_models() -> None:
     """Streaming stays unsupported and text-only models still reject image blocks."""
     backend = VLLMBackend({})

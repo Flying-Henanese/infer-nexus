@@ -1,5 +1,7 @@
 """Typed schemas for declarative model catalog entries."""
 
+from typing import Any
+
 from pydantic import BaseModel, Field, model_validator
 
 from infer_nexus.core.enums import BackendType, ModelStatus, TaskType
@@ -41,6 +43,7 @@ class ModelConfig(BaseModel):
     # 能力标签列表：用于声明模型具备的具体能力特征（如函数调用、多模态等）。
     # 常用于策略匹配、路由筛选与前端能力展示。
     capabilities: list[str] = Field(default_factory=list)
+    engine_kwargs: dict[str, Any] = Field(default_factory=dict)
     # 通用标签列表：用于业务分组、环境标记、A/B 实验或运营筛选。
     labels: list[str] = Field(default_factory=list)
     # 模型状态（如可用/下线/未知），用于控制是否参与调度及展示状态。

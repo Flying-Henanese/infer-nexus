@@ -467,6 +467,35 @@ def test_vllm_backend_sampling_params_include_official_compatible_fields() -> No
     }
 
 
+def test_vllm_backend_sampling_params_accept_mineru_http_client_fields_at_top_level() -> None:
+    """MinerU http-client sends vLLM-compatible extras as top-level request fields."""
+    backend = VLLMBackend({})
+    request = ChatCompletionsRequest(
+        model='mineru',
+        messages=[{'role': 'user', 'content': 'hello'}],
+        max_tokens=128,
+        **{
+            'top_k': 20,
+            'skip_special_tokens': False,
+            'vllm_xargs': {
+                'no_repeat_ngram_size': 16,
+                'debug': True,
+            },
+        },
+    )
+
+    sampling = backend._build_sampling_params(request)
+
+    assert sampling == {
+        'temperature': 0.7,
+        'top_p': 1.0,
+        'max_tokens': 128,
+        'top_k': 20,
+        'skip_special_tokens': False,
+        'no_repeat_ngram_size': 16,
+    }
+
+
 def test_vllm_backend_rejects_streaming_and_multimodal_messages_for_text_only_models() -> None:
     """Streaming stays unsupported and text-only models still reject image blocks."""
     backend = VLLMBackend({})

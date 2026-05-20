@@ -141,7 +141,17 @@ class RuntimeExecutor:
             )
 
         try:
-            handle = self.handle_resolver.get_handle(target.deployment_name)
+            if not target.app_name:
+                raise RuntimeNotConnectedError(
+                    f"Runtime target for deployment '{target.deployment_name}' does not define a Serve app name.",
+                    code="backend_misconfigured",
+                )
+            handle = self.handle_resolver.get_handle(
+                target.deployment_name,
+                app_name=target.app_name,
+            )
+        except RuntimeNotConnectedError:
+            raise
         except Exception as exc:
             raise RuntimeNotConnectedError(
                 f"Failed to resolve Serve handle for deployment '{target.deployment_name}': {exc}"

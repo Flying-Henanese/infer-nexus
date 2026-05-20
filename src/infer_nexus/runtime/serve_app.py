@@ -11,7 +11,6 @@ from infer_nexus.runtime.deployments import (
     DeploymentFactory,
     DeploymentSpec,
     ModelRuntimeReplica,
-    RuntimeApplicationRoot,
 )
 
 
@@ -22,11 +21,13 @@ class ServeApplicationBuilder:
         self,
         model_store: LocalModelStore,
         backend_init_mode: str = "stub",
+        service_name: str = "infer-nexus",
         deployment_factory: DeploymentFactory | None = None,
     ) -> None:
         """初始化 Serve 应用构建器。"""
         self.model_store = model_store
         self.backend_init_mode = backend_init_mode
+        self.service_name = service_name
         self.deployment_factory = deployment_factory or DeploymentFactory()
         self.backend = VLLMBackend({})
 
@@ -46,6 +47,7 @@ class ServeApplicationBuilder:
         """Summarize declared model/deployment layout for local bring-up checks."""
         specs = self.build_specs(registry)
         return {
+            "applications": [self.build_application_name(spec.model_name) for spec in specs],
             "deployments": [spec.deployment_name for spec in specs],
             "models": [spec.model_alias or spec.model_name for spec in specs],
             "model_store_root": str(self.model_store.root_dir),
@@ -53,6 +55,10 @@ class ServeApplicationBuilder:
                 spec.num_gpus * spec.autoscaling_config["min_replicas"] for spec in specs
             ),
         }
+
+    def build_application_name(self, model_name: str) -> str:
+        """Build stable Serve application names for one-model-per-app deployments."""
+        return f"{self.service_name}-model-{model_name}"
 
     def require_ray_serve(self) -> Any:
         """Import Ray Serve runtime or fail with actionable dependency hint."""
@@ -73,6 +79,7 @@ class ServeApplicationBuilder:
         runtime_context = {
             "model_name": model.name,
             "model_alias": model.alias,
+            "app_name": self.build_application_name(model.name),
             "served_model_name": model.served_model_name or model.alias or model.name,
             "task": model.task,
             "capabilities": list(model.capabilities),
@@ -109,21 +116,3 @@ class ServeApplicationBuilder:
 
         return bindings
 
-    def build_serve_application(
-        self,
-        registry: ModelRegistry,
-        *,
-        serve: Any | None = None,
-        replica_cls: type[ModelRuntimeReplica] = ModelRuntimeReplica,
-        root_cls: type[RuntimeApplicationRoot] = RuntimeApplicationRoot,
-        root_name: str = "infer-nexus-root",
-    ) -> Any:
-        """Assemble a single Serve application that contains all model deployments."""
-        serve_runtime = serve or self.require_ray_serve()
-        bindings = self.build_serve_bindings(
-            registry,
-            serve=serve_runtime,
-            replica_cls=replica_cls,
-        )
-        root = serve_runtime.deployment(name=root_name)(root_cls)
-        return root.bind(**bindings)

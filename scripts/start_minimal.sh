@@ -141,6 +141,24 @@ pid_is_running() {
   kill -0 "${pid}" >/dev/null 2>&1
 }
 
+wait_for_pid_exit() {
+  local pid_file="$1"
+  local label="$2"
+  local timeout_seconds="$3"
+  local waited=0
+
+  while pid_is_running "${pid_file}"; do
+    if [[ "${waited}" -ge "${timeout_seconds}" ]]; then
+      echo "Timed out waiting for ${label} to finish initialization." >&2
+      return 1
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+
+  wait "$(cat "${pid_file}")"
+}
+
 write_status() {
   local msg="$1"
   printf '%s\n' "${msg}" >"${STATE_DIR}/STATUS"
@@ -150,6 +168,8 @@ start_ray_head_if_needed
 
 SERVE_PID_FILE="${PID_DIR}/serve_runtime.pid"
 GATEWAY_PID_FILE="${PID_DIR}/gateway.pid"
+
+STARTED_SERVE_RUNTIME=0
 
 if pid_is_running "${SERVE_PID_FILE}"; then
   echo "Serve runtime already running (pid $(cat "${SERVE_PID_FILE}"))."
@@ -161,6 +181,14 @@ else
       --proxy-location "${PROXY_LOCATION}"
   ) >"${LOG_DIR}/serve_runtime.log" 2>&1 &
   echo $! >"${SERVE_PID_FILE}"
+  STARTED_SERVE_RUNTIME=1
+fi
+
+if [[ "${STARTED_SERVE_RUNTIME}" -eq 1 ]]; then
+  if ! wait_for_pid_exit "${SERVE_PID_FILE}" "serve runtime deployment" 900; then
+    echo "Serve runtime failed to deploy. See ${LOG_DIR}/serve_runtime.log" >&2
+    exit 1
+  fi
 fi
 
 if pid_is_running "${GATEWAY_PID_FILE}"; then

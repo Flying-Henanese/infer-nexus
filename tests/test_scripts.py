@@ -61,7 +61,7 @@ def test_run_gateway_main_uses_settings_and_cli_overrides(monkeypatch) -> None:
     }
 
 
-def test_run_serve_runtime_main_deploys_named_app(monkeypatch, prepared_model_store) -> None:
+def test_run_serve_runtime_main_deploys_per_model_apps(monkeypatch, prepared_model_store) -> None:
     """run_serve_runtime.main 应按服务名部署 Serve 应用。"""
     settings = Settings()
     settings.service.name = 'infer-nexus'
@@ -74,33 +74,63 @@ def test_run_serve_runtime_main_deploys_named_app(monkeypatch, prepared_model_st
         ray_address='auto',
         proxy_location='Disabled',
         blocking=False,
+        ready_timeout_seconds=30.0,
+        ready_poll_interval_seconds=0.01,
     ))
     monkeypatch.setattr(run_serve_runtime, 'load_settings', lambda _path: settings)
 
-    def fake_build_app(self, registry, *, serve=None, replica_cls=None, root_cls=None, root_name='infer-nexus-root'):
+    def fake_build_bindings(self, registry, *, serve=None, replica_cls=None):
         captured['registry_size'] = len(registry.list_models())
-        captured['root_name'] = root_name
-        return {'app': 'serve'}
+        return {
+            'qwen3-32b-instruct': {'app': 'qwen'},
+            'bge-large-zh-v1_5': {'app': 'embed'},
+            'bge-reranker-v2-m3': {'app': 'rerank'},
+        }
 
     monkeypatch.setattr(
         run_serve_runtime.ServeApplicationBuilder,
-        'build_serve_application',
-        fake_build_app,
+        'build_serve_bindings',
+        fake_build_bindings,
+    )
+    monkeypatch.setattr(
+        run_serve_runtime.ServeApplicationBuilder,
+        'build_specs',
+        lambda self, registry: [
+            types.SimpleNamespace(model_name='qwen3-32b-instruct'),
+            types.SimpleNamespace(model_name='bge-large-zh-v1_5'),
+            types.SimpleNamespace(model_name='bge-reranker-v2-m3'),
+        ],
     )
 
+    class FakeDeploymentStatus:
+        def __init__(self, status: str) -> None:
+            self.status = status
+
+    class FakeApplicationStatus:
+        def __init__(self) -> None:
+            self.status = 'RUNNING'
+            self.deployments = {'model-qwen3-32b-instruct': FakeDeploymentStatus('HEALTHY')}
+
+    class FakeServeStatus:
+        def __init__(self) -> None:
+            self.applications = {
+                'infer-nexus-model-qwen3-32b-instruct': FakeApplicationStatus(),
+                'infer-nexus-model-bge-large-zh-v1_5': FakeApplicationStatus(),
+                'infer-nexus-model-bge-reranker-v2-m3': FakeApplicationStatus(),
+            }
+
+    captured_runs: list[dict[str, object]] = []
     fake_serve = types.SimpleNamespace(
         start=lambda proxy_location: captured.update({'proxy_location': proxy_location}),
-        run=lambda app, name, route_prefix, blocking: captured.update(
-            {
-                'app': app,
-                'name': name,
-                'route_prefix': route_prefix,
-                'blocking': blocking,
-            }
+        run=lambda app, name, route_prefix, blocking: captured_runs.append(
+            {'app': app, 'name': name, 'route_prefix': route_prefix, 'blocking': blocking}
         ),
+        status=lambda: FakeServeStatus(),
     )
     fake_ray = types.ModuleType('ray')
-    fake_ray.init = lambda address=None: captured.update({'ray_address': address})
+    fake_ray.init = lambda address=None, runtime_env=None: captured.update(
+        {'ray_address': address, 'runtime_env': runtime_env}
+    )
     fake_ray.serve = fake_serve
     monkeypatch.setitem(__import__('sys').modules, 'ray', fake_ray)
 
@@ -108,9 +138,12 @@ def test_run_serve_runtime_main_deploys_named_app(monkeypatch, prepared_model_st
 
     assert captured['ray_address'] == 'auto'
     assert captured['proxy_location'] == 'Disabled'
-    assert captured['name'] == 'infer-nexus'
-    assert captured['route_prefix'] is None
-    assert captured['blocking'] is False
+    assert captured['runtime_env']['working_dir'] == '.'
     assert captured['registry_size'] == 3
-    assert captured['root_name'] == 'infer-nexus-root'
-    assert captured['app'] == {'app': 'serve'}
+    assert [item['name'] for item in captured_runs] == [
+        'infer-nexus-model-qwen3-32b-instruct',
+        'infer-nexus-model-bge-large-zh-v1_5',
+        'infer-nexus-model-bge-reranker-v2-m3',
+    ]
+    assert all(item['route_prefix'] is None for item in captured_runs)
+    assert all(item['blocking'] is False for item in captured_runs)

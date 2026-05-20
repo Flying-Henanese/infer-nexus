@@ -88,6 +88,11 @@ def test_serve_builder_local_dev_summary(
 
     summary = builder.build_local_dev_summary(registry)
 
+    assert summary['applications'] == [
+        'infer-nexus-model-qwen3-32b-instruct',
+        'infer-nexus-model-bge-large-zh-v1_5',
+        'infer-nexus-model-bge-reranker-v2-m3',
+    ]
     assert summary['models'] == ['qwen3-chat', 'bge-embedding', 'bge-rerank']
     assert summary['deployments'] == [
         'model-qwen3-32b-instruct',
@@ -107,6 +112,7 @@ def test_build_runtime_context_contains_resolved_local_model_path(
 
     runtime_context = builder.build_runtime_context(registry, 'qwen3-chat')
 
+    assert runtime_context['app_name'] == 'infer-nexus-model-qwen3-32b-instruct'
     assert runtime_context['model_name'] == 'qwen3-32b-instruct'
     assert runtime_context['model_alias'] == 'qwen3-chat'
     assert runtime_context['resolved_model_path'].endswith('/models/Qwen/Qwen3-32B-Instruct')
@@ -169,21 +175,14 @@ def test_deployment_factory_applies_llmconfig_style_overrides() -> None:
     assert spec.ray_actor_options['num_gpus'] == 1
 
 
-def test_build_serve_application_wraps_all_model_bindings(
+def test_build_application_name_is_stable(
     registry: ModelRegistry,
     model_store: LocalModelStore,
 ) -> None:
     """Serve 应用根节点应包含全部模型 binding。"""
     builder = ServeApplicationBuilder(model_store=model_store)
 
-    app = builder.build_serve_application(registry, serve=FakeServe())
-
-    assert app['deployment_kwargs']['name'] == 'infer-nexus-root'
-    assert set(app['kwargs']) == {
-        'qwen3-32b-instruct',
-        'bge-large-zh-v1_5',
-        'bge-reranker-v2-m3',
-    }
+    assert builder.build_application_name('qwen3-32b-instruct') == 'infer-nexus-model-qwen3-32b-instruct'
 
 
 def test_require_ray_serve_raises_without_dependency(monkeypatch: pytest.MonkeyPatch) -> None:

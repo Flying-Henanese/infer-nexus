@@ -45,8 +45,10 @@ def test_dispatcher_resolves_target_with_runtime_context() -> None:
 
     assert target.model_name == 'qwen3-32b-instruct'
     assert target.model_alias == 'qwen3-chat'
+    assert target.app_name == 'infer-nexus-model-qwen3-32b-instruct'
     assert target.deployment_name == 'model-qwen3-32b-instruct'
     assert target.runtime_context['resolved_model_path'].endswith('/models/Qwen/Qwen3-32B-Instruct')
+    assert target.runtime_context['app_name'] == 'infer-nexus-model-qwen3-32b-instruct'
     assert target.runtime_context['deployment_name'] == 'model-qwen3-32b-instruct'
 
 
@@ -165,13 +167,13 @@ class FakeServe:
 
     def get_deployment_handle(self, deployment_name: str, app_name: str) -> FakeDeploymentHandle:
         """返回模拟部署句柄。"""
-        assert app_name == 'infer-nexus'
+        assert app_name.startswith('infer-nexus-model-')
         return FakeDeploymentHandle(deployment_name)
 
 
 def test_dispatch_chat_uses_serve_handle_in_serve_mode() -> None:
     """serve 模式下 chat 分发应通过 deployment handle 执行。"""
-    resolver = ServeDeploymentHandleResolver(app_name='infer-nexus', serve=FakeServe())
+    resolver = ServeDeploymentHandleResolver(serve=FakeServe())
     executor = RuntimeExecutor(mode='serve', handle_resolver=resolver)
     registry, _, dispatcher = make_dispatcher(executor)
     request = ChatCompletionsRequest(
@@ -189,7 +191,7 @@ def test_dispatch_chat_uses_serve_handle_in_serve_mode() -> None:
 
 def test_dispatch_embedding_uses_serve_handle_in_serve_mode() -> None:
     """serve 模式下 embedding 分发应通过 deployment handle 执行。"""
-    resolver = ServeDeploymentHandleResolver(app_name='infer-nexus', serve=FakeServe())
+    resolver = ServeDeploymentHandleResolver(serve=FakeServe())
     executor = RuntimeExecutor(mode='serve', handle_resolver=resolver)
     registry, _, dispatcher = make_dispatcher(executor)
     request = EmbeddingRequest(
@@ -206,7 +208,7 @@ def test_dispatch_embedding_uses_serve_handle_in_serve_mode() -> None:
 
 def test_dispatch_rerank_uses_serve_handle_in_serve_mode() -> None:
     """serve 模式下 rerank 分发应通过 deployment handle 执行。"""
-    resolver = ServeDeploymentHandleResolver(app_name='infer-nexus', serve=FakeServe())
+    resolver = ServeDeploymentHandleResolver(serve=FakeServe())
     executor = RuntimeExecutor(mode='serve', handle_resolver=resolver)
     registry, _, dispatcher = make_dispatcher(executor)
     request = RerankRequest(

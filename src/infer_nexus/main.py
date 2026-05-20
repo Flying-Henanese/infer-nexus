@@ -32,12 +32,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     serve_builder = ServeApplicationBuilder(
         model_store=model_store,
         backend_init_mode=settings.runtime.backend_init_mode,
+        service_name=settings.service.name,
     )
     serve_builder.validate_registry_runtime_configs(registry)
     handle_resolver = None
     # 4) 仅在 serve 模式下准备句柄解析器；stub 模式不依赖 Ray Serve。
     if settings.runtime.execution_mode == "serve":
-        handle_resolver = ServeDeploymentHandleResolver(app_name=settings.service.name)
+        handle_resolver = ServeDeploymentHandleResolver()
     runtime_executor = RuntimeExecutor(
         mode=settings.runtime.execution_mode,
         handle_resolver=handle_resolver,

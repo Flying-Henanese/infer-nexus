@@ -42,4 +42,3 @@ def test_app_lifespan_builds_serve_handle_resolver_in_serve_mode(
     with TestClient(app) as client:
         assert client.app.state.runtime_executor.mode == 'serve'
         assert client.app.state.runtime_executor.handle_resolver is not None
-        assert client.app.state.runtime_executor.handle_resolver.app_name == settings.service.name

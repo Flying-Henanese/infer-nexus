@@ -52,6 +52,7 @@ class RuntimeDispatcher:
             model_name=model.name,
             model_alias=model.alias,
             backend=model.backend,
+            app_name=runtime_context.get("app_name"),
             deployment_name=deployment_name,
             runtime_context=runtime_context,
         )

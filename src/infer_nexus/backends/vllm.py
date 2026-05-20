@@ -396,8 +396,15 @@ class VLLMBackend(InferenceBackend):
             SamplingParams = None  # type: ignore[assignment]
 
         if SamplingParams is not None:
+            filtered_sampling_params = self._filter_sampling_params_for_vllm(
+                sampling_params,
+                sampling_params_cls=SamplingParams,
+            )
             try:
-                return self.engine.chat(messages, sampling_params=SamplingParams(**sampling_params))
+                return self.engine.chat(
+                    messages,
+                    sampling_params=SamplingParams(**filtered_sampling_params),
+                )
             except TypeError:
                 pass
 
@@ -405,8 +412,47 @@ class VLLMBackend(InferenceBackend):
             return self.engine.chat(messages, **sampling_params)
         except TypeError:
             if SamplingParams is not None:
-                return self.engine.chat(messages, SamplingParams(**sampling_params))
+                return self.engine.chat(
+                    messages,
+                    SamplingParams(**filtered_sampling_params),
+                )
             raise
+
+    def _filter_sampling_params_for_vllm(
+        self,
+        sampling_params: dict[str, Any],
+        *,
+        sampling_params_cls: type[Any],
+    ) -> dict[str, Any]:
+        """Drop sampling params not accepted by the current vLLM SamplingParams signature."""
+        try:
+            signature = inspect.signature(sampling_params_cls.__init__)
+        except (TypeError, ValueError):
+            return dict(sampling_params)
+
+        parameters = signature.parameters
+        accepts_var_kwargs = any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        )
+        if accepts_var_kwargs:
+            return dict(sampling_params)
+
+        supported_keys = {
+            name
+            for name, parameter in parameters.items()
+            if name != "self"
+            and parameter.kind
+            in {
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            }
+        }
+        return {
+            key: value
+            for key, value in sampling_params.items()
+            if key in supported_keys
+        }
 
     def _supports_multimodal(self, runtime_context: dict[str, Any] | None = None) -> bool:
         """Return whether the current model runtime is allowed to accept image blocks."""

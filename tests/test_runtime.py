@@ -495,6 +495,34 @@ def test_vllm_backend_sampling_params_accept_mineru_http_client_fields_at_top_le
     }
 
 
+def test_vllm_backend_filters_sampling_params_by_runtime_signature() -> None:
+    """Unsupported SamplingParams kwargs should be dropped for older vLLM versions."""
+    backend = VLLMBackend({})
+
+    class FakeSamplingParams:
+        def __init__(self, temperature=None, top_p=None, max_tokens=None, top_k=None):
+            pass
+
+    filtered = backend._filter_sampling_params_for_vllm(
+        {
+            'temperature': 0.7,
+            'top_p': 1.0,
+            'max_tokens': 128,
+            'top_k': 20,
+            'skip_special_tokens': False,
+            'no_repeat_ngram_size': 16,
+        },
+        sampling_params_cls=FakeSamplingParams,
+    )
+
+    assert filtered == {
+        'temperature': 0.7,
+        'top_p': 1.0,
+        'max_tokens': 128,
+        'top_k': 20,
+    }
+
+
 def test_vllm_backend_rejects_streaming_and_multimodal_messages_for_text_only_models() -> None:
     """Streaming stays unsupported and text-only models still reject image blocks."""
     backend = VLLMBackend({})

@@ -4,10 +4,13 @@ Shared inference service factory for internal development and testing.
 
 ## Current Runtime Shape
 
-- Runtime mode: `Ray Serve + vLLM`
+- Runtime mode: `Gateway + per-model backend dispatch`
 - Gateway: `FastAPI` (`/v1/*` OpenAI-compatible + `/api/*` platform APIs)
 - Default gateway bind: `0.0.0.0:8000`
-- Current catalog focus: chat models (see `config/models.yaml`)
+- Supported task APIs: `chat`, `embeddings`, `rerank`
+- Backends:
+  - `vllm`: local Ray Serve + `LLM.chat/embed/score` path
+  - `vllm_openai_proxy`: upstream OpenAI-compatible proxy path (recommended for compatibility-sensitive models)
 
 ## Quick Start
 
@@ -22,5 +25,52 @@ For first-time Ubuntu + CUDA bring-up:
 ## Documentation Map
 
 - [ARCHITECTURE.md](./ARCHITECTURE.md): system design, boundaries, and phase goals
+- [OPENAI_PROXY_REFACTOR_PLAN.md](./OPENAI_PROXY_REFACTOR_PLAN.md): proxy-first refactor plan and rollout contract
 - [AGENT.md](./AGENT.md): implementation rules and constraints
 - [NEXT_SESSION.md](./NEXT_SESSION.md): latest handoff notes and known runtime issues
+
+## Current Status
+
+- Proxy backend (`vllm_openai_proxy`) code path is now wired for:
+  - `POST /v1/chat/completions`
+  - `POST /v1/embeddings`
+  - `POST /v1/rerank`
+- Request behavior for proxy models:
+  - Keep payload as-is except `model` remap to configured upstream model name.
+  - Return upstream payload/status as-is.
+  - `stream=true` uses SSE passthrough.
+- Validation in this environment is currently limited:
+  - Local `pytest` execution is blocked by existing environment/lockfile issues.
+  - Syntax-level validation was completed via `python3 -m compileall src tests`.
+
+## Branch Delta (`dev` vs `master`)
+
+Baseline:
+- `master`: `c5195be` (`Preserve engine_kwargs for vLLM backend`)
+- `dev`: `f423744`
+- Diff scope: `16 files changed, 375 insertions(+), 29 deletions(-)`
+
+What changed in the refactored branch:
+- Model loading path was generalized from local-path-only to `model reference` mode:
+  - `model_path` can be empty if `model_loading_config.model_id` is provided.
+  - Added `require_local_artifacts` to support remote model IDs without local artifact checks.
+  - Runtime now resolves a model reference string (local path or remote model ID) before backend init.
+- Catalog schema and routing semantics were extended toward OpenAI/vLLM style metadata:
+  - Added `model_loading_config`, `deployment_config`, `served_model_name`, `engine_kwargs` fields.
+  - `served_model_name` is now routable in registry and used by `/v1/models` and response payload fallback.
+- Ray Serve deployment config became override-friendly:
+  - `deployment_config.autoscaling_config` and `deployment_config.ray_actor_options` can override defaults.
+- vLLM backend compatibility and request fidelity were improved:
+  - Supports passing loading `revision` into `LLM(...)`.
+  - Chat sampling params now preserve more OpenAI-compatible fields (`presence_penalty`, `frequency_penalty`, `stop`, `seed`, `n`, `top_logprobs`, and selective `extra_body` passthrough such as `top_k`, `min_p`).
+  - Multimodal image `data:` URLs are normalized before sending to vLLM (whitespace, URL-safe base64, padding).
+  - Message serialization now carries `tool_call_id` when present.
+- Runtime lifecycle scripts were hardened:
+  - `start_minimal.sh` records Ray ownership/state in `.infer-nexus/ray_state.env`.
+  - `stop_minimal.sh` reads ownership state, attempts `serve.shutdown()` first, then conditionally stops Ray and cleans stray Ray/vLLM processes.
+- Default model config was tuned for a smaller/minimal deployment footprint:
+  - `config/models.yaml` shifts `mineru` toward a local mounted path and lower GPU/replica defaults.
+
+Validation coverage added by tests:
+- Added/updated tests for remote model reference resolution, deployment override behavior,
+  runtime spec metadata preservation, richer sampling params, and multimodal data URL normalization.

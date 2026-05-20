@@ -2,10 +2,13 @@
 
 import asyncio
 
+import httpx
 import pytest
 
+from infer_nexus.catalog.models import ModelCatalogFile, ModelConfig
 from infer_nexus.catalog.loader import load_model_catalog
 from infer_nexus.catalog.registry import ModelRegistry
+from infer_nexus.core.enums import BackendType, TaskType
 from infer_nexus.core.errors import RuntimeNotConnectedError
 from infer_nexus.core.schemas import ChatCompletionsRequest, EmbeddingRequest, RerankRequest
 from infer_nexus.model_store import LocalModelStore
@@ -234,3 +237,139 @@ def test_dispatch_raises_when_serve_mode_has_no_resolver() -> None:
 
     with pytest.raises(RuntimeNotConnectedError, match='no handle resolver'):
         asyncio.run(dispatcher.dispatch_chat(registry.get('qwen3-chat'), request))
+
+
+def _build_proxy_dispatcher() -> tuple[ModelRegistry, RuntimeDispatcher]:
+    model = ModelConfig(
+        name="mineru-proxy",
+        alias="mineru",
+        task=TaskType.CHAT,
+        backend=BackendType.VLLM_OPENAI_PROXY,
+        tensor_parallel_size=1,
+        cpu_per_replica=1,
+        gpu_per_replica=0,
+        min_replicas=1,
+        max_replicas=1,
+        proxy_config={
+            "upstream_base_url": "http://upstream.local/v1",
+            "upstream_model_name": "opendatalab/MinerU2.5-2509-1.2B",
+            "auth": {"mode": "none"},
+        },
+    )
+    embedding = ModelConfig(
+        name="bge-embedding-proxy",
+        alias="bge-embedding-proxy",
+        task=TaskType.EMBEDDING,
+        backend=BackendType.VLLM_OPENAI_PROXY,
+        tensor_parallel_size=1,
+        cpu_per_replica=1,
+        gpu_per_replica=0,
+        min_replicas=1,
+        max_replicas=1,
+        proxy_config={
+            "upstream_base_url": "http://upstream.local/v1",
+            "upstream_model_name": "BAAI/bge-large-zh-v1.5",
+            "auth": {"mode": "none"},
+        },
+    )
+    rerank = ModelConfig(
+        name="bge-rerank-proxy",
+        alias="bge-rerank-proxy",
+        task=TaskType.RERANK,
+        backend=BackendType.VLLM_OPENAI_PROXY,
+        tensor_parallel_size=1,
+        cpu_per_replica=1,
+        gpu_per_replica=0,
+        min_replicas=1,
+        max_replicas=1,
+        proxy_config={
+            "upstream_base_url": "http://upstream.local/v1",
+            "upstream_model_name": "BAAI/bge-reranker-v2-m3",
+            "auth": {"mode": "none"},
+        },
+    )
+    registry = ModelRegistry(ModelCatalogFile(models=[model, embedding, rerank]))
+    store = LocalModelStore("models")
+    builder = ServeApplicationBuilder(model_store=store)
+    dispatcher = RuntimeDispatcher(
+        registry=registry,
+        serve_builder=builder,
+        executor=RuntimeExecutor(),
+    )
+    return registry, dispatcher
+
+
+def test_proxy_chat_dispatch_rewrites_model_and_parses_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    registry, dispatcher = _build_proxy_dispatcher()
+    captured: dict[str, object] = {}
+
+    async def fake_request_proxy(self, *, proxy_config, path, payload):  # type: ignore[no-untyped-def]
+        captured["path"] = path
+        captured["payload"] = payload
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-proxy",
+                "object": "chat.completion",
+                "created": 123,
+                "model": "opendatalab/MinerU2.5-2509-1.2B",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    monkeypatch.setattr(RuntimeExecutor, "_request_proxy", fake_request_proxy)
+
+    request = ChatCompletionsRequest(model="mineru", messages=[{"role": "user", "content": "hello"}])
+    response = asyncio.run(dispatcher.dispatch_chat(registry.get("mineru"), request))
+
+    assert response.model == "opendatalab/MinerU2.5-2509-1.2B"
+    assert captured["path"] == "/chat/completions"
+    assert isinstance(captured["payload"], dict)
+    assert captured["payload"]["model"] == "opendatalab/MinerU2.5-2509-1.2B"
+
+
+def test_proxy_embedding_dispatch_passthrough(monkeypatch: pytest.MonkeyPatch) -> None:
+    registry, dispatcher = _build_proxy_dispatcher()
+
+    async def fake_request_proxy(self, *, proxy_config, path, payload):  # type: ignore[no-untyped-def]
+        assert path == "/embeddings"
+        assert payload["model"] == "BAAI/bge-large-zh-v1.5"
+        return httpx.Response(
+            200,
+            json={
+                "object": "list",
+                "data": [{"object": "embedding", "index": 0, "embedding": [0.1, 0.2]}],
+                "model": "BAAI/bge-large-zh-v1.5",
+                "usage": {"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1},
+            },
+        )
+
+    monkeypatch.setattr(RuntimeExecutor, "_request_proxy", fake_request_proxy)
+    request = EmbeddingRequest(model="bge-embedding-proxy", input="hello")
+    response = asyncio.run(dispatcher.dispatch_embedding(registry.get("bge-embedding-proxy"), request))
+    assert response.model == "BAAI/bge-large-zh-v1.5"
+    assert response.data[0].embedding == [0.1, 0.2]
+
+
+def test_proxy_rerank_dispatch_passthrough(monkeypatch: pytest.MonkeyPatch) -> None:
+    registry, dispatcher = _build_proxy_dispatcher()
+
+    async def fake_request_proxy(self, *, proxy_config, path, payload):  # type: ignore[no-untyped-def]
+        assert path == "/rerank"
+        assert payload["model"] == "BAAI/bge-reranker-v2-m3"
+        return httpx.Response(
+            200,
+            json={
+                "id": "rerank-1",
+                "model": "BAAI/bge-reranker-v2-m3",
+                "usage": {"total_tokens": 5},
+                "results": [{"index": 0, "document": {"text": "hello"}, "relevance_score": 0.9}],
+            },
+        )
+
+    monkeypatch.setattr(RuntimeExecutor, "_request_proxy", fake_request_proxy)
+    request = RerankRequest(model="bge-rerank-proxy", query="hello", documents=["hello"])
+    response = asyncio.run(dispatcher.dispatch_rerank(registry.get("bge-rerank-proxy"), request))
+    assert response.model == "BAAI/bge-reranker-v2-m3"
+    assert response.results[0].relevance_score == 0.9

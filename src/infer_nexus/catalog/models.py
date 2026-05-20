@@ -21,6 +21,57 @@ class DeploymentConfig(BaseModel):
     ray_actor_options: dict[str, Any] = Field(default_factory=dict)
 
 
+class ProxyAuthConfig(BaseModel):
+    """Optional upstream auth config for proxy backends."""
+
+    mode: str = "none"
+    env_var: str | None = None
+    token: str | None = None
+
+
+class ProxyTimeoutConfig(BaseModel):
+    """Proxy timeout settings in seconds."""
+
+    connect_seconds: int | float = Field(default=3, gt=0)
+    read_seconds: int | float = Field(default=180, gt=0)
+    write_seconds: int | float = Field(default=30, gt=0)
+    pool_seconds: int | float = Field(default=5, gt=0)
+
+
+class ProxyRetryConfig(BaseModel):
+    """Proxy retry settings."""
+
+    max_attempts: int = Field(default=1, ge=1)
+    backoff_ms: int = Field(default=0, ge=0)
+    retry_on_status: list[int] = Field(default_factory=lambda: [502, 503, 504])
+
+
+class ProxyStreamingConfig(BaseModel):
+    """Streaming passthrough toggles."""
+
+    enabled: bool = True
+    passthrough_sse: bool = True
+
+
+class ProxyHeadersPolicy(BaseModel):
+    """Header forwarding policy for proxy backend."""
+
+    pass_request_id: bool = True
+    forward_authorization: bool = False
+
+
+class ProxyConfig(BaseModel):
+    """Per-model upstream config for OpenAI-compatible proxy mode."""
+
+    upstream_base_url: str
+    upstream_model_name: str | None = None
+    auth: ProxyAuthConfig = Field(default_factory=ProxyAuthConfig)
+    timeout: ProxyTimeoutConfig = Field(default_factory=ProxyTimeoutConfig)
+    retry: ProxyRetryConfig = Field(default_factory=ProxyRetryConfig)
+    streaming: ProxyStreamingConfig = Field(default_factory=ProxyStreamingConfig)
+    headers_policy: ProxyHeadersPolicy = Field(default_factory=ProxyHeadersPolicy)
+
+
 class ModelConfig(BaseModel):
     """模型目录中的单个模型配置（由 ``config/models.yaml`` 加载）。"""
 
@@ -60,6 +111,7 @@ class ModelConfig(BaseModel):
     capabilities: list[str] = Field(default_factory=list)
     engine_kwargs: dict[str, Any] = Field(default_factory=dict)
     deployment_config: DeploymentConfig = Field(default_factory=DeploymentConfig)
+    proxy_config: ProxyConfig | None = None
     served_model_name: str | None = None
     require_local_artifacts: bool = True
     # 通用标签列表：用于业务分组、环境标记、A/B 实验或运营筛选。
@@ -72,6 +124,10 @@ class ModelConfig(BaseModel):
         """Ensure replica bounds are internally consistent."""
         if self.max_replicas < self.min_replicas:
             raise ValueError("max_replicas must be >= min_replicas")
+        if self.backend == BackendType.VLLM_OPENAI_PROXY:
+            if self.proxy_config is None:
+                raise ValueError("proxy_config is required for vllm_openai_proxy backend")
+            return self
         if not self.model_path and not self.model_loading_config.model_id:
             raise ValueError("either model_path or model_loading_config.model_id must be set")
         return self

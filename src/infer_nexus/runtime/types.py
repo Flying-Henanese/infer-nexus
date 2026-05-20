@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 from typing import Any
 
+from infer_nexus.core.enums import BackendType
+
 
 @dataclass(slots=True)
 class RuntimeTarget:
@@ -10,5 +12,6 @@ class RuntimeTarget:
 
     model_name: str
     model_alias: str | None
+    backend: BackendType
     deployment_name: str
     runtime_context: dict[str, Any]

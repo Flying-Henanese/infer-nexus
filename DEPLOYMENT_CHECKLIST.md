@@ -45,7 +45,8 @@ uv sync --extra serve --extra vllm --extra artifacts
 ## 3. Local Model Store
 
 - Confirm `config/settings.yaml` points `model_store.root_dir` at the correct local model directory.
-- Confirm every registered model path exists under the local model store root.
+- Confirm every `backend: vllm` model path exists under the local model store root.
+- For `backend: vllm_openai_proxy` models, local model artifacts are not required.
 - Confirm the runtime will not need to download models from the network at startup.
 
 Quick sanity check:
@@ -60,12 +61,14 @@ find models -maxdepth 3 -type d | sort
 - Confirm each enabled model has the correct:
   - `task`
   - `backend`
-  - `model_path`
+  - `model_path` (required for `backend: vllm`)
+  - `proxy_config.upstream_base_url` (required for `backend: vllm_openai_proxy`)
+  - `proxy_config.upstream_model_name` (optional, used for model remap)
   - `tensor_parallel_size`
   - `gpu_per_replica`
   - `min_replicas`
   - `max_replicas`
-- Confirm `model_path` points to a valid local path in your environment.
+- Confirm local-path validity only for `backend: vllm` models.
 - Confirm the sum of `gpu_per_replica * min_replicas` across all enabled models fits within the intended pool.
 
 ## 5. Runtime Settings
@@ -107,6 +110,11 @@ uv run pytest -q
 ```
 
 - If these tests fail, do not start debugging CUDA first. Fix the application-level issue before mixing in environment complexity.
+- If local `uv`/lockfile state blocks pytest execution in your environment snapshot, run fallback syntax checks:
+
+```bash
+python3 -m compileall src tests
+```
 
 ## 8. Start Order
 

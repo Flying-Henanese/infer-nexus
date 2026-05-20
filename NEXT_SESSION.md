@@ -2,73 +2,65 @@
 
 ## Current Snapshot (2026-05-19)
 
-The project is running in real Ray Serve + vLLM mode on Ubuntu/CUDA and is past the initial scaffolding stage.
+The codebase has started a proxy-first refactor while keeping local `vllm` backend as fallback.
 
-Current active model catalog:
-- `Qwen3-VL-8B-Instruct` (`alias: qwen3-vl-chat-8b-instruct`)
-- `Qwen3-8B` (`alias: qwen3-8b`)
+Current backend options:
+- `vllm`: local Ray Serve + `LLM.chat/embed/score`
+- `vllm_openai_proxy`: forwards `/v1/*` requests to upstream OpenAI-compatible endpoints
 
-Current startup defaults in `scripts/start_minimal.sh`:
-- `CUDA_VISIBLE_DEVICES_VALUE="1,3"`
-- Ray is started only when no existing cluster is reachable.
+Proxy path is now implemented for:
+- `POST /v1/chat/completions`
+- `POST /v1/embeddings`
+- `POST /v1/rerank`
 
-Documentation alignment completed:
-- `README.md` now documents the current runtime shape and doc entrypoints.
-- `MINIMAL_STARTUP.md` and `DEPLOYMENT_CHECKLIST.md` now treat chat as required smoke test and embeddings/rerank as optional, depending on enabled catalog models.
+## What Was Recently Changed
 
-## What Was Recently Fixed
+1. New backend type and schema
+- Added `BackendType.VLLM_OPENAI_PROXY`.
+- Added `proxy_config` model schema (`upstream_base_url`, optional model remap, timeout/retry/streaming/header policy/auth).
 
-1. vLLM 0.18.1 compatibility in backend startup
-- `src/infer_nexus/backends/vllm.py` now avoids passing unsupported `task` kwargs.
-- Task support check falls back safely across versions.
+2. Runtime dispatch split by backend
+- Proxy models no longer require local runtime spec construction.
+- Serve builder skips deployment/runtime validation for proxy models.
 
-2. Model-level memory/context knobs are now wired from config
-- `gpu_memory_utilization` added and validated in model schema.
-- `max_model_len` is now passed through runtime spec into `LLM(...)`.
-- Confirmed in logs via `non-default args` and `max_seq_len=...`.
+3. Proxy execution path in runtime executor
+- Requests are forwarded upstream with minimal transformation (`model` remap only).
+- Non-streaming responses are validated into API schemas on success.
+- Upstream 4xx/5xx are returned as-is through gateway response objects.
+- Chat stream path proxies SSE byte stream.
 
-3. Chat call compatibility across vLLM versions
-- `LLM.chat()` invocation now uses `SamplingParams`-compatible path for vLLM 0.18.1.
-- Fixes `TypeError: unexpected keyword argument 'temperature'`.
+4. API route behavior updates
+- Proxy models skip local model artifact checks.
+- Route return types now allow direct `Response` passthrough.
 
-4. Stop script hardening
-- `scripts/stop_minimal.sh` now force-stops Ray (`ray stop -f`) and improves cleanup behavior for child/stray inference processes.
+## Known Limitations / Validation Status
 
-## Current Main Runtime Problem
-
-`max_model_len` is now effective, but deployment can still fail due to GPU memory pressure during KV cache initialization:
-
-- Typical failure:
-  - `ValueError: No available memory for the cache blocks`
-  - `Available KV cache memory: <negative GiB>`
-
-This is not a config-parsing bug now. It is a scheduling/capacity issue when both models initialize under current GPU sharing behavior.
-
-## Why It Fails
-
-- Ray schedules using logical GPU resources (`gpu_per_replica`) rather than real-time free VRAM.
-- With fractional GPU requests, replicas can still land on the same physical card.
-- vLLM graph capture + weights + KV cache budget can exceed available memory on that card.
+- Full pytest suite execution is currently blocked in this workspace due to existing local environment/lockfile issues:
+  - `uv` parsing failure on current `pyproject.toml`/`uv.lock` state
+  - no local pytest runtime available via `python3 -m pytest`
+- Syntax validation was completed successfully:
+  - `python3 -m compileall src tests`
 
 ## Recommended Next Actions
 
-1. Enforce model-to-device separation for stability-first validation
-- Prefer `gpu_per_replica: 1` for both models initially.
-- Set both models to `min_replicas: 1`, `max_replicas: 1`.
-- Keep startup bounded with `--cuda-visible-devices 1,3 --num-gpus 2`.
+1. Environment repair for test execution
+- Fix local `uv.lock` merge/parse issues.
+- Restore a runnable pytest environment.
 
-2. If fractional GPU must be kept
-- Add explicit placement/resource constraints in deployment actor options (code change required).
-- Do not rely on fractional `num_gpus` alone for physical separation.
+2. Add first real proxy model in `config/models.yaml`
+- Set `backend: vllm_openai_proxy`
+- Set `proxy_config.upstream_base_url`
+- Set optional `proxy_config.upstream_model_name`
 
-3. Keep memory knobs conservative while dual-model bring-up is unstable
-- Reduce `max_model_len` first, then tune `gpu_memory_utilization`.
-- Remember: in multi-model same-host scenarios, increasing `gpu_memory_utilization` can worsen contention.
+3. Run live smoke tests against real upstream vLLM endpoint
+- `chat` non-streaming and streaming
+- `embeddings`
+- `rerank`
 
-4. Verify each rollout with log checkpoints
-- `non-default args` shows expected `max_model_len` and `gpu_memory_utilization`.
-- `max_seq_len=...` matches catalog config.
-- No `No available memory for the cache blocks` in either model replica.
+4. Harden proxy path after live validation
+- Add upstream host allowlist enforcement
+- Add per-model concurrency/timeout guardrails
+- Add metrics/logging for upstream latency and status buckets
 
 ## Fast Verification Commands
 
@@ -82,15 +74,13 @@ Model list:
 curl http://127.0.0.1:8000/v1/models
 ```
 
-Chat test (`qwen3-8b`):
+Proxy chat test:
 ```bash
 curl -X POST "http://127.0.0.1:8000/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "qwen3-8b",
-    "messages": [{"role": "user", "content": "请回复: service ready"}],
-    "temperature": 0.1,
-    "max_tokens": 32,
+    "model": "mineru",
+    "messages": [{"role": "user", "content": "hello"}],
     "stream": false
   }'
 ```
@@ -98,7 +88,8 @@ curl -X POST "http://127.0.0.1:8000/v1/chat/completions" \
 ## Files Most Likely To Touch Next
 
 - `config/models.yaml`
-- `scripts/start_minimal.sh`
-- `scripts/stop_minimal.sh`
-- `src/infer_nexus/backends/vllm.py`
-- `src/infer_nexus/runtime/deployments.py` (if adding placement constraints)
+- `src/infer_nexus/runtime/executor.py`
+- `src/infer_nexus/runtime/dispatcher.py`
+- `src/infer_nexus/api/openai_routes.py`
+- `tests/test_api.py`
+- `tests/test_dispatcher.py`

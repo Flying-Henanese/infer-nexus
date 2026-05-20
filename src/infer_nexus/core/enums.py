@@ -26,3 +26,4 @@ class BackendType(StrEnum):
     """Supported inference backend engines."""
 
     VLLM = "vllm"
+    VLLM_OPENAI_PROXY = "vllm_openai_proxy"

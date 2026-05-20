@@ -10,6 +10,7 @@ Bring up:
 
 1. a Ray Serve runtime that owns model deployments
 2. a FastAPI gateway that exposes the northbound APIs
+3. optional upstream OpenAI-compatible vLLM endpoints for proxy models
 
 The two processes are separate for now:
 
@@ -18,11 +19,14 @@ The two processes are separate for now:
 
 This is enough to validate the end-to-end control flow before doing more production packaging.
 
+For proxy models (`backend: vllm_openai_proxy`), local Ray Serve model runtime is not required for that model; the gateway forwards to configured upstream endpoints.
+
 ## Prerequisites
 
 - Ubuntu x86_64
 - NVIDIA driver and CUDA environment already working
 - local model artifacts already downloaded under `model_store.root_dir`
+  - not required for models configured with `backend: vllm_openai_proxy`
 - Python 3.11+
 - `uv` installed
 
@@ -51,6 +55,12 @@ runtime:
 ```
 
 Keep `model_store.root_dir` pointing to the local model directory.
+
+For proxy models, configure `config/models.yaml` with:
+
+- `backend: vllm_openai_proxy`
+- `proxy_config.upstream_base_url`
+- optional `proxy_config.upstream_model_name`
 
 ## Resource Pool Boundary
 
@@ -183,6 +193,8 @@ scripts/stop_minimal.sh
 - `stream=true` behavior is backend/version dependent and should be validated per model.
 - VLM remains an extension point and may need model-specific request shaping.
 - Some models may need vLLM-specific startup overrides such as score templates or `hf_overrides`.
+- Proxy path and local path can return different semantics by design; compatibility-sensitive models should prefer proxy backend.
+- In this workspace snapshot, full pytest execution may be blocked by local `uv.lock`/environment issues; run syntax checks (`python3 -m compileall src tests`) as a fallback sanity check.
 
 ## Convergence Direction
 

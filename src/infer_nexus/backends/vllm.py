@@ -371,8 +371,17 @@ class VLLMBackend(InferenceBackend):
             "prompt_logprobs",
         }
         for key in allowed_extra_keys:
-            if key in extra and extra[key] is not None:
-                params[key] = extra[key]
+            value = extra.get(key)
+            if value is None:
+                value = model_extra.get(key)
+            if value is not None:
+                params[key] = value
+
+        vllm_xargs = model_extra.get("vllm_xargs")
+        if isinstance(vllm_xargs, dict):
+            no_repeat_ngram_size = vllm_xargs.get("no_repeat_ngram_size")
+            if no_repeat_ngram_size is not None:
+                params["no_repeat_ngram_size"] = no_repeat_ngram_size
 
         return params
 

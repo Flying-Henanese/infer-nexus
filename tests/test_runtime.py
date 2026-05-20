@@ -523,6 +523,33 @@ def test_vllm_backend_filters_sampling_params_by_runtime_signature() -> None:
     }
 
 
+def test_vllm_backend_builds_sampling_params_instance_by_retrying_unsupported_kwargs() -> None:
+    """SamplingParams construction should retry after stripping unsupported kwargs from runtime errors."""
+    backend = VLLMBackend({})
+
+    class FakeSamplingParams:
+        def __init__(self, temperature=None, top_p=None, max_tokens=None, no_repeat_ngram_size=None):
+            if no_repeat_ngram_size is not None:
+                raise TypeError("Unexpected keyword argument 'no_repeat_ngram_size'")
+            self.temperature = temperature
+            self.top_p = top_p
+            self.max_tokens = max_tokens
+
+    instance = backend._build_sampling_params_instance(
+        {
+            'temperature': 0.7,
+            'top_p': 1.0,
+            'max_tokens': 128,
+            'no_repeat_ngram_size': 16,
+        },
+        sampling_params_cls=FakeSamplingParams,
+    )
+
+    assert instance.temperature == 0.7
+    assert instance.top_p == 1.0
+    assert instance.max_tokens == 128
+
+
 def test_vllm_backend_rejects_streaming_and_multimodal_messages_for_text_only_models() -> None:
     """Streaming stays unsupported and text-only models still reject image blocks."""
     backend = VLLMBackend({})

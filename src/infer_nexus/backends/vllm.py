@@ -396,14 +396,14 @@ class VLLMBackend(InferenceBackend):
             SamplingParams = None  # type: ignore[assignment]
 
         if SamplingParams is not None:
-            filtered_sampling_params = self._filter_sampling_params_for_vllm(
+            sampling_params_instance = self._build_sampling_params_instance(
                 sampling_params,
                 sampling_params_cls=SamplingParams,
             )
             try:
                 return self.engine.chat(
                     messages,
-                    sampling_params=SamplingParams(**filtered_sampling_params),
+                    sampling_params=sampling_params_instance,
                 )
             except TypeError:
                 pass
@@ -414,9 +414,38 @@ class VLLMBackend(InferenceBackend):
             if SamplingParams is not None:
                 return self.engine.chat(
                     messages,
-                    SamplingParams(**filtered_sampling_params),
+                    sampling_params_instance,
                 )
             raise
+
+    def _build_sampling_params_instance(
+        self,
+        sampling_params: dict[str, Any],
+        *,
+        sampling_params_cls: type[Any],
+    ) -> Any:
+        """Construct SamplingParams while stripping unsupported kwargs across vLLM versions."""
+        filtered_sampling_params = self._filter_sampling_params_for_vllm(
+            sampling_params,
+            sampling_params_cls=sampling_params_cls,
+        )
+        unsupported_pattern = re.compile(r"Unexpected keyword argument '([^']+)'")
+
+        while True:
+            try:
+                return sampling_params_cls(**filtered_sampling_params)
+            except TypeError as exc:
+                match = unsupported_pattern.search(str(exc))
+                if match is None:
+                    raise
+                unsupported_key = match.group(1)
+                if unsupported_key not in filtered_sampling_params:
+                    raise
+                filtered_sampling_params = {
+                    key: value
+                    for key, value in filtered_sampling_params.items()
+                    if key != unsupported_key
+                }
 
     def _filter_sampling_params_for_vllm(
         self,

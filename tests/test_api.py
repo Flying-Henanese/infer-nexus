@@ -4,7 +4,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from infer_nexus.core.errors import AdmissionRejectedError
+from infer_nexus.core.errors import AdmissionRejectedError, RuntimeExecutionError
 from infer_nexus.main import create_app
 
 
@@ -292,6 +292,29 @@ def test_chat_completions_returns_501_when_serve_handle_is_unavailable(
 
     assert response.status_code == 501
     assert response.json()['error']['code'] == 'runtime_not_connected'
+
+
+def test_chat_completions_returns_500_when_serve_execution_fails(
+    prepared_model_store: Path,
+) -> None:
+    """serve 远端执行失败时 chat 接口应返回 500 而不是 501。"""
+    app = create_app()
+    payload = {
+        'model': 'qwen3-chat',
+        'messages': [{'role': 'user', 'content': 'hello'}],
+    }
+
+    with TestClient(app) as client:
+        async def raise_runtime_execution_error(*, target, request):
+            raise RuntimeExecutionError(
+                f"Serve execution failed for deployment '{target.deployment_name}' in app '{target.app_name}'."
+            )
+
+        client.app.state.runtime_dispatcher.executor.execute_chat = raise_runtime_execution_error
+        response = client.post('/v1/chat/completions', json=payload)
+
+    assert response.status_code == 500
+    assert response.json()['error']['code'] == 'runtime_execution_failed'
 
 
 def test_embeddings_returns_stub_embedding_response_for_embedding_model(prepared_model_store: Path) -> None:

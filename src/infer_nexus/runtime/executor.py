@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import inspect
+import logging
 import os
 from time import time
 from typing import Any
@@ -15,7 +16,7 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 
 from infer_nexus.catalog.models import ProxyConfig
 from infer_nexus.core.enums import BackendType
-from infer_nexus.core.errors import RuntimeNotConnectedError
+from infer_nexus.core.errors import RuntimeExecutionError, RuntimeNotConnectedError
 from infer_nexus.core.schemas import (
     ChatCompletionChoice,
     ChatCompletionsRequest,
@@ -33,6 +34,8 @@ from infer_nexus.core.schemas import (
 from infer_nexus.runtime.deployments import ModelRuntimeReplica
 from infer_nexus.runtime.handles import ServeDeploymentHandleResolver
 from infer_nexus.runtime.types import RuntimeTarget
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -170,9 +173,15 @@ class RuntimeExecutor:
         except RuntimeNotConnectedError:
             raise
         except Exception as exc:
-            raise RuntimeNotConnectedError(
-                f"Serve execution failed for deployment '{target.deployment_name}' method '{method_name}': "
-                f"{exc}"
+            logger.exception(
+                "Serve execution failed for deployment '%s' in app '%s' method '%s'.",
+                target.deployment_name,
+                target.app_name,
+                method_name,
+            )
+            raise RuntimeExecutionError(
+                f"Serve execution failed for deployment '{target.deployment_name}' "
+                f"in app '{target.app_name}' method '{method_name}': {exc}"
             ) from exc
 
     async def _await_handle_response(self, response: Any) -> Any:

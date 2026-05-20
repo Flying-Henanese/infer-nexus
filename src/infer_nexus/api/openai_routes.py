@@ -1,5 +1,7 @@
 """OpenAI 兼容接口路由。"""
 
+import logging
+
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 from starlette.responses import Response
@@ -18,6 +20,7 @@ from infer_nexus.core.errors import (
     BackendRequestValidationError,
     ModelArtifactMissingError,
     ModelNotFoundError,
+    RuntimeExecutionError,
     RuntimeNotConnectedError,
 )
 from infer_nexus.core.schemas import (
@@ -37,6 +40,7 @@ from infer_nexus.runtime.dispatcher import RuntimeDispatcher
 
 router = APIRouter(prefix="/v1", tags=["openai"])
 compat_router = APIRouter(tags=["openai"])
+logger = logging.getLogger(__name__)
 
 
 def openai_error_response(
@@ -129,6 +133,14 @@ async def create_chat_completion(
             error_type="not_implemented_error",
             code=exc.code,
         )
+    except RuntimeExecutionError as exc:
+        logger.exception("Chat completion runtime execution failed for model '%s'.", request.model)
+        return openai_error_response(
+            500,
+            str(exc),
+            error_type="internal_server_error",
+            code=exc.code,
+        )
     except BackendRequestValidationError as exc:
         return openai_error_response(
             400,
@@ -193,6 +205,14 @@ async def create_embedding(
             error_type="not_implemented_error",
             code=exc.code,
         )
+    except RuntimeExecutionError as exc:
+        logger.exception("Embedding runtime execution failed for model '%s'.", request.model)
+        return openai_error_response(
+            500,
+            str(exc),
+            error_type="internal_server_error",
+            code=exc.code,
+        )
     except BackendRequestValidationError as exc:
         return openai_error_response(
             400,
@@ -254,6 +274,14 @@ async def _create_rerank_impl(
             501,
             str(exc),
             error_type="not_implemented_error",
+            code=exc.code,
+        )
+    except RuntimeExecutionError as exc:
+        logger.exception("Rerank runtime execution failed for model '%s'.", request.model)
+        return openai_error_response(
+            500,
+            str(exc),
+            error_type="internal_server_error",
             code=exc.code,
         )
     except BackendRequestValidationError as exc:

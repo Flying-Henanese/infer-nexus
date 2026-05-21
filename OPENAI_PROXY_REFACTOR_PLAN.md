@@ -1,5 +1,51 @@
 # infer-nexus OpenAI Proxy Refactor Plan
 
+## Current Branch Status Snapshot
+
+Snapshot basis:
+- Branch/worktree inspected on `2026-05-21`
+- This section tracks implementation status relative to this plan
+- Status meanings:
+  - `Implemented`: the planned behavior is already present in the current branch
+  - `Partially Implemented`: core path exists, but production hardening or full contract coverage is incomplete
+  - `Not Implemented`: not found in the current branch, or still only described in docs
+
+| Plan Area | Status | Notes |
+| --- | --- | --- |
+| Goal / proxy-first direction | Partially Implemented | Proxy backend exists and is wired into runtime dispatch, but the branch is not yet fully operating as a single production proxy gateway for all target models. |
+| Scope: per-model backend routing | Implemented | `vllm` and `vllm_openai_proxy` routing both exist in runtime and API flow. |
+| Scope: `chat/completions` proxy path | Implemented | Non-streaming and streaming chat proxy paths are implemented. |
+| Scope: per-model upstream config | Partially Implemented | `proxy_config` schema exists. Current production model entries may intentionally remain on local `vllm` when Ray Serve owns the model runtime. |
+| Scope: non-streaming passthrough | Implemented | Upstream requests are forwarded with minimal transformation and upstream response bytes/status/content type are returned without schema revalidation. |
+| Scope: streaming passthrough | Implemented | SSE path proxies raw bytes through `StreamingResponse`. |
+| Scope: error/status passthrough | Implemented | Upstream status/body/content type are preserved; only gateway-stage failures are converted to infer-nexus OpenAI-style errors. |
+| Current gap summary | Still Relevant | The architectural motivation is still valid: local `vllm` semantics can diverge from official upstream OpenAI-compatible behavior. |
+| Target architecture | Partially Implemented | Backend split and proxy dispatch exist, but migration to proxy-first production operation is still incomplete. |
+| Model config design | Partially Implemented | Schema exists, but the example target state is not yet reflected in `config/models.yaml`. |
+| New schema contract | Partially Implemented | `ProxyConfig` fields and required `proxy_config` validation exist; allowlist validation and the phase-1 `task == chat` restriction are not implemented. |
+| Request passthrough contract | Partially Implemented | `model` rewrite only is implemented; headers/body passthrough is not fully contract-complete. |
+| Header policy | Partially Implemented | Request ID and auth injection exist; `forward_authorization` policy is defined in schema but not fully realized as documented. |
+| Non-streaming response contract | Implemented | Status/body/content type are preserved and `X-Infer-Nexus-Request-ID` is added for observability. |
+| Streaming response contract | Implemented | Raw SSE byte passthrough is present and content type is preserved from upstream response headers. |
+| Error policy | Partially Implemented | Unknown model/task mismatch and proxy timeout mappings exist; broader gateway error taxonomy can still be refined. |
+| Routing and fallback strategy | Implemented | Proxy and local backends are explicitly separated, and there is no automatic proxy-to-local fallback. |
+| Observability and SLO metrics | Not Implemented | Full per-model metrics, latency histograms, and stream counters described here are not yet evident in the branch. |
+| Security controls | Partially Implemented | Per-model auth from env/static token exists; strict upstream allowlist, body size limits, and stream duration guardrails are not yet evident. |
+| Incremental delivery plan | Partially Implemented | Phase 0-2 core mechanics are largely present; Phase 3-4 hardening and migration remain incomplete. |
+| Test matrix | Partially Implemented | Proxy dispatcher tests cover model rewrite and basic passthrough for chat/embeddings/rerank, but consistency, allowlist, disconnect propagation, and chaos-style tests are not complete. |
+| Acceptance criteria | Partially Implemented | Some criteria are mechanically satisfied, but real `mineru` config migration and production-equivalent validation are still incomplete. |
+| Open decisions | Mostly Superseded | One decision is effectively resolved in code: proxy support already extends beyond chat-only to embeddings and rerank. |
+
+## Current Branch Status by Phase
+
+| Phase | Status | Notes |
+| --- | --- | --- |
+| Phase 0: schema/config prep | Implemented | `vllm_openai_proxy` and `proxy_config` schema are in place. |
+| Phase 1: MinerU non-streaming proxy | Partially Implemented | Runtime support exists, but `mineru` is not yet switched to proxy in `config/models.yaml`. |
+| Phase 2: SSE passthrough | Partially Implemented | SSE passthrough exists, but the metrics/cancellation-hardening parts are not fully evident. |
+| Phase 3: hardening | Partially Implemented | Retry and auth pieces exist; allowlist, request-size limits, and full consistency/chaos validation are not complete. |
+| Phase 4: migration | Not Implemented | The config and rollout state do not yet show broad migration of multimodal models to proxy backend. |
+
 ## 1. Goal
 
 Make `infer-nexus` behave like a model service provider gateway:
@@ -23,7 +69,7 @@ In scope:
 
 Out of scope (first iteration):
 - Dynamic model registration
-- Global smart load balancing across multiple upstreams for one model
+- Gateway-managed upstream instance pools for one model. Replica pooling, health, and autoscaling are owned by the upstream serving layer such as Ray Serve.
 - Full `responses` API support
 
 ## 3. Current Gap Summary
@@ -116,6 +162,10 @@ Validation rules:
 - `task` must be `chat` in phase 1 proxy rollout.
 - `upstream_base_url` must be in trusted host allowlist.
 
+Scope note:
+- `proxy_config` describes a single upstream OpenAI-compatible endpoint.
+- If that endpoint is backed by Ray Serve, Ray Serve owns replica pools, autoscaling, and replica health. The gateway should not duplicate that instance-pool logic in this phase.
+
 ## 7. Request/Response Passthrough Contract
 
 ### 7.1 Request handling
@@ -176,6 +226,11 @@ Backend dispatch matrix:
 - `backend = vllm_openai_proxy` -> proxy executor path
 - `backend = vllm` -> existing local backend path
 
+Proxy routing:
+- A proxy model forwards to exactly one configured `upstream_base_url`.
+- Gateway-managed multi-upstream routing, circuit breaking, and per-instance ejection are intentionally out of scope for this phase.
+- When the upstream endpoint is Ray Serve-backed, Ray Serve handles model replica routing, health, and autoscaling behind that endpoint.
+
 Fallback policy:
 - default no automatic fallback from proxy to local backend (avoid semantic surprise)
 - rollback via config switch (`backend` toggle)
@@ -225,7 +280,7 @@ Log fields:
 - add stream metrics and cancellation handling
 
 ### Phase 3: hardening
-- retries, allowlist, auth policy, request size limits
+- retries against the same upstream endpoint, allowlist, auth policy, request size limits
 - run consistency and chaos tests
 
 ### Phase 4: migration

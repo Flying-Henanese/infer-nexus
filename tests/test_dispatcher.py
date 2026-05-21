@@ -1,9 +1,11 @@
 """运行时分发器测试。"""
 
 import asyncio
+import json
 
 import httpx
 import pytest
+from starlette.responses import Response
 
 from infer_nexus.catalog.models import ModelCatalogFile, ModelConfig
 from infer_nexus.catalog.loader import load_model_catalog
@@ -301,15 +303,19 @@ def _build_proxy_dispatcher() -> tuple[ModelRegistry, RuntimeDispatcher]:
     return registry, dispatcher
 
 
-def test_proxy_chat_dispatch_rewrites_model_and_parses_response(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_proxy_chat_dispatch_rewrites_only_model_and_passthrough_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     registry, dispatcher = _build_proxy_dispatcher()
     captured: dict[str, object] = {}
 
-    async def fake_request_proxy(self, *, proxy_config, path, payload):  # type: ignore[no-untyped-def]
+    async def fake_request_proxy(self, *, proxy_config, path, payload, request_id):  # type: ignore[no-untyped-def]
         captured["path"] = path
         captured["payload"] = payload
+        captured["request_id"] = request_id
         return httpx.Response(
             200,
+            headers={"content-type": "application/json"},
             json={
                 "id": "chatcmpl-proxy",
                 "object": "chat.completion",
@@ -322,23 +328,37 @@ def test_proxy_chat_dispatch_rewrites_model_and_parses_response(monkeypatch: pyt
 
     monkeypatch.setattr(RuntimeExecutor, "_request_proxy", fake_request_proxy)
 
-    request = ChatCompletionsRequest(model="mineru", messages=[{"role": "user", "content": "hello"}])
+    request = ChatCompletionsRequest(
+        model="mineru",
+        messages=[{"role": "user", "content": "hello"}],
+        temperature=0.2,
+        extra_body={"no_repeat_ngram_size": 16},
+    )
     response = asyncio.run(dispatcher.dispatch_chat(registry.get("mineru"), request))
 
-    assert response.model == "opendatalab/MinerU2.5-2509-1.2B"
+    assert isinstance(response, Response)
+    body = json.loads(response.body)
+    assert body["model"] == "opendatalab/MinerU2.5-2509-1.2B"
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/json"
+    assert response.headers["X-Infer-Nexus-Request-ID"] == captured["request_id"]
     assert captured["path"] == "/chat/completions"
     assert isinstance(captured["payload"], dict)
     assert captured["payload"]["model"] == "opendatalab/MinerU2.5-2509-1.2B"
+    assert captured["payload"]["messages"] == [{"role": "user", "content": "hello"}]
+    assert captured["payload"]["temperature"] == 0.2
+    assert captured["payload"]["extra_body"] == {"no_repeat_ngram_size": 16}
 
 
 def test_proxy_embedding_dispatch_passthrough(monkeypatch: pytest.MonkeyPatch) -> None:
     registry, dispatcher = _build_proxy_dispatcher()
 
-    async def fake_request_proxy(self, *, proxy_config, path, payload):  # type: ignore[no-untyped-def]
+    async def fake_request_proxy(self, *, proxy_config, path, payload, request_id):  # type: ignore[no-untyped-def]
         assert path == "/embeddings"
         assert payload["model"] == "BAAI/bge-large-zh-v1.5"
         return httpx.Response(
             200,
+            headers={"content-type": "application/json"},
             json={
                 "object": "list",
                 "data": [{"object": "embedding", "index": 0, "embedding": [0.1, 0.2]}],
@@ -350,18 +370,21 @@ def test_proxy_embedding_dispatch_passthrough(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(RuntimeExecutor, "_request_proxy", fake_request_proxy)
     request = EmbeddingRequest(model="bge-embedding-proxy", input="hello")
     response = asyncio.run(dispatcher.dispatch_embedding(registry.get("bge-embedding-proxy"), request))
-    assert response.model == "BAAI/bge-large-zh-v1.5"
-    assert response.data[0].embedding == [0.1, 0.2]
+    assert isinstance(response, Response)
+    body = json.loads(response.body)
+    assert body["model"] == "BAAI/bge-large-zh-v1.5"
+    assert body["data"][0]["embedding"] == [0.1, 0.2]
 
 
 def test_proxy_rerank_dispatch_passthrough(monkeypatch: pytest.MonkeyPatch) -> None:
     registry, dispatcher = _build_proxy_dispatcher()
 
-    async def fake_request_proxy(self, *, proxy_config, path, payload):  # type: ignore[no-untyped-def]
+    async def fake_request_proxy(self, *, proxy_config, path, payload, request_id):  # type: ignore[no-untyped-def]
         assert path == "/rerank"
         assert payload["model"] == "BAAI/bge-reranker-v2-m3"
         return httpx.Response(
             200,
+            headers={"content-type": "application/json"},
             json={
                 "id": "rerank-1",
                 "model": "BAAI/bge-reranker-v2-m3",
@@ -373,5 +396,28 @@ def test_proxy_rerank_dispatch_passthrough(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(RuntimeExecutor, "_request_proxy", fake_request_proxy)
     request = RerankRequest(model="bge-rerank-proxy", query="hello", documents=["hello"])
     response = asyncio.run(dispatcher.dispatch_rerank(registry.get("bge-rerank-proxy"), request))
-    assert response.model == "BAAI/bge-reranker-v2-m3"
-    assert response.results[0].relevance_score == 0.9
+    assert isinstance(response, Response)
+    body = json.loads(response.body)
+    assert body["model"] == "BAAI/bge-reranker-v2-m3"
+    assert body["results"][0]["relevance_score"] == 0.9
+
+
+def test_proxy_upstream_error_is_passthrough(monkeypatch: pytest.MonkeyPatch) -> None:
+    registry, dispatcher = _build_proxy_dispatcher()
+    upstream_error = b'{"error":{"message":"bad upstream request","code":"bad_request"}}'
+
+    async def fake_request_proxy(self, *, proxy_config, path, payload, request_id):  # type: ignore[no-untyped-def]
+        return httpx.Response(
+            400,
+            content=upstream_error,
+            headers={"content-type": "application/json"},
+        )
+
+    monkeypatch.setattr(RuntimeExecutor, "_request_proxy", fake_request_proxy)
+    request = ChatCompletionsRequest(model="mineru", messages=[{"role": "user", "content": "hello"}])
+    response = asyncio.run(dispatcher.dispatch_chat(registry.get("mineru"), request))
+
+    assert isinstance(response, Response)
+    assert response.status_code == 400
+    assert response.body == upstream_error
+    assert response.headers["content-type"] == "application/json"

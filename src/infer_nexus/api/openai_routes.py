@@ -58,6 +58,17 @@ def openai_error_response(
     return JSONResponse(status_code=status_code, content=payload.model_dump())
 
 
+def runtime_not_connected_status(code: str) -> tuple[int, str]:
+    """Map gateway-stage runtime errors to stable OpenAI-style response classes."""
+    if code == "upstream_timeout":
+        return 504, "service_unavailable_error"
+    if code == "backend_misconfigured":
+        return 500, "internal_server_error"
+    if code == "unsupported_parameter":
+        return 400, "invalid_request_error"
+    return 501, "not_implemented_error"
+
+
 @router.get("/models", response_model=ModelListResponse)
 async def list_models(registry: ModelRegistry = Depends(get_registry)) -> ModelListResponse:
     """列出对外可见模型清单（以 alias 优先作为展示 ID）。"""
@@ -132,10 +143,11 @@ async def create_chat_completion(
             code=exc.code,
         )
     except RuntimeNotConnectedError as exc:
+        status_code, error_type = runtime_not_connected_status(exc.code)
         return openai_error_response(
-            501,
+            status_code,
             str(exc),
-            error_type="not_implemented_error",
+            error_type=error_type,
             code=exc.code,
         )
     except RuntimeExecutionError as exc:
@@ -204,10 +216,11 @@ async def create_embedding(
             code=exc.code,
         )
     except RuntimeNotConnectedError as exc:
+        status_code, error_type = runtime_not_connected_status(exc.code)
         return openai_error_response(
-            501,
+            status_code,
             str(exc),
-            error_type="not_implemented_error",
+            error_type=error_type,
             code=exc.code,
         )
     except RuntimeExecutionError as exc:
@@ -275,10 +288,11 @@ async def _create_rerank_impl(
             code=exc.code,
         )
     except RuntimeNotConnectedError as exc:
+        status_code, error_type = runtime_not_connected_status(exc.code)
         return openai_error_response(
-            501,
+            status_code,
             str(exc),
-            error_type="not_implemented_error",
+            error_type=error_type,
             code=exc.code,
         )
     except RuntimeExecutionError as exc:

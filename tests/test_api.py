@@ -4,7 +4,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from infer_nexus.core.errors import AdmissionRejectedError, RuntimeExecutionError
+from infer_nexus.core.errors import AdmissionRejectedError, RuntimeExecutionError, RuntimeNotConnectedError
 from infer_nexus.main import create_app
 
 
@@ -292,6 +292,28 @@ def test_chat_completions_returns_501_when_serve_handle_is_unavailable(
 
     assert response.status_code == 501
     assert response.json()['error']['code'] == 'runtime_not_connected'
+
+
+def test_chat_completions_maps_proxy_upstream_timeout_to_504(
+    prepared_model_store: Path,
+) -> None:
+    """Gateway-stage upstream timeouts should use a stable 504 error response."""
+    app = create_app()
+    payload = {
+        'model': 'qwen3-chat',
+        'messages': [{'role': 'user', 'content': 'hello'}],
+    }
+
+    with TestClient(app) as client:
+        async def raise_upstream_timeout(*, target, request):
+            raise RuntimeNotConnectedError('upstream timed out', code='upstream_timeout')
+
+        client.app.state.runtime_dispatcher.executor.execute_chat = raise_upstream_timeout
+        response = client.post('/v1/chat/completions', json=payload)
+
+    assert response.status_code == 504
+    assert response.json()['error']['type'] == 'service_unavailable_error'
+    assert response.json()['error']['code'] == 'upstream_timeout'
 
 
 def test_chat_completions_returns_500_when_serve_execution_fails(

@@ -27,7 +27,6 @@ For first-time Ubuntu + CUDA bring-up:
 - [ARCHITECTURE.md](./ARCHITECTURE.md): system design, boundaries, and phase goals
 - [OPENAI_PROXY_REFACTOR_PLAN.md](./OPENAI_PROXY_REFACTOR_PLAN.md): proxy-first refactor plan and rollout contract
 - [AGENT.md](./AGENT.md): implementation rules and constraints
-- [NEXT_SESSION.md](./NEXT_SESSION.md): latest handoff notes and known runtime issues
 
 ## Current Status
 
@@ -39,6 +38,7 @@ For first-time Ubuntu + CUDA bring-up:
   - Keep payload as-is except `model` remap to configured upstream model name.
   - Return upstream payload/status as-is.
   - `stream=true` uses SSE passthrough.
+  - The gateway targets one configured `upstream_base_url` per proxy model; if that endpoint is Ray Serve-backed, Ray Serve owns replica pooling, health, and autoscaling behind it.
 - Validation in this environment is currently limited:
   - Local `pytest` execution is blocked by existing environment/lockfile issues.
   - Syntax-level validation was completed via `python3 -m compileall src tests`.

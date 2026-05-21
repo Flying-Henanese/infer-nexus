@@ -12,7 +12,7 @@ from typing import Any
 from uuid import uuid4
 
 import httpx
-from starlette.responses import JSONResponse, Response, StreamingResponse
+from starlette.responses import Response, StreamingResponse
 
 from infer_nexus.catalog.models import ProxyConfig
 from infer_nexus.core.enums import BackendType
@@ -202,13 +202,13 @@ class RuntimeExecutor:
                 code="backend_misconfigured",
             ) from exc
 
-    def _build_proxy_headers(self, proxy_config: ProxyConfig) -> dict[str, str]:
+    def _build_proxy_headers(self, proxy_config: ProxyConfig, *, request_id: str) -> dict[str, str]:
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
         if proxy_config.headers_policy.pass_request_id:
-            headers["X-Request-ID"] = uuid4().hex
+            headers["X-Request-ID"] = request_id
         if proxy_config.auth.mode == "static_bearer" and proxy_config.auth.token:
             headers["Authorization"] = f"Bearer {proxy_config.auth.token}"
         if proxy_config.auth.mode == "bearer_env":
@@ -232,6 +232,7 @@ class RuntimeExecutor:
         proxy_config: ProxyConfig,
         path: str,
         payload: dict[str, Any],
+        request_id: str,
     ) -> httpx.Response:
         upstream = proxy_config.upstream_base_url.rstrip("/")
         timeout = httpx.Timeout(
@@ -241,7 +242,7 @@ class RuntimeExecutor:
             pool=proxy_config.timeout.pool_seconds,
         )
         url = f"{upstream}/{path.lstrip('/')}"
-        headers = self._build_proxy_headers(proxy_config)
+        headers = self._build_proxy_headers(proxy_config, request_id=request_id)
         attempts = max(1, proxy_config.retry.max_attempts)
         backoff = proxy_config.retry.backoff_ms / 1000.0
         last_exc: Exception | None = None
@@ -272,12 +273,16 @@ class RuntimeExecutor:
         request_payload["model"] = proxy_config.upstream_model_name or model_name
         return request_payload
 
-    def _to_json_response(self, response: httpx.Response) -> JSONResponse:
-        try:
-            body = response.json()
-        except ValueError:
-            body = {"error": {"message": response.text or "upstream returned non-json error"}}
-        return JSONResponse(status_code=response.status_code, content=body)
+    def _to_proxy_response(self, response: httpx.Response, *, request_id: str) -> Response:
+        headers = {"X-Infer-Nexus-Request-ID": request_id}
+        content_type = response.headers.get("content-type")
+        if content_type:
+            headers["content-type"] = content_type
+        return Response(
+            content=response.content,
+            status_code=response.status_code,
+            headers=headers,
+        )
 
     async def _execute_proxy_chat(
         self,
@@ -286,6 +291,7 @@ class RuntimeExecutor:
         request: ChatCompletionsRequest,
     ) -> ChatCompletionsResponse | Response:
         proxy_config = self._parse_proxy_config(target)
+        request_id = uuid4().hex
         payload = self._proxy_payload(
             model_name=request.model,
             payload=request.model_dump(mode="json"),
@@ -297,15 +303,19 @@ class RuntimeExecutor:
                     "proxy model does not allow stream passthrough",
                     code="unsupported_parameter",
                 )
-            return await self._execute_proxy_stream(proxy_config=proxy_config, path="/chat/completions", payload=payload)
+            return await self._execute_proxy_stream(
+                proxy_config=proxy_config,
+                path="/chat/completions",
+                payload=payload,
+                request_id=request_id,
+            )
         response = await self._request_proxy(
             proxy_config=proxy_config,
             path="/chat/completions",
             payload=payload,
+            request_id=request_id,
         )
-        if response.status_code >= 400:
-            return self._to_json_response(response)
-        return ChatCompletionsResponse.model_validate(response.json())
+        return self._to_proxy_response(response, request_id=request_id)
 
     async def _execute_proxy_stream(
         self,
@@ -313,6 +323,7 @@ class RuntimeExecutor:
         proxy_config: ProxyConfig,
         path: str,
         payload: dict[str, Any],
+        request_id: str,
     ) -> Response:
         upstream = proxy_config.upstream_base_url.rstrip("/")
         timeout = httpx.Timeout(
@@ -322,7 +333,7 @@ class RuntimeExecutor:
             pool=proxy_config.timeout.pool_seconds,
         )
         url = f"{upstream}/{path.lstrip('/')}"
-        headers = self._build_proxy_headers(proxy_config)
+        headers = self._build_proxy_headers(proxy_config, request_id=request_id)
         client = httpx.AsyncClient(timeout=timeout)
         request = client.build_request("POST", url, json=payload, headers=headers)
         response = await client.send(request, stream=True)
@@ -330,7 +341,7 @@ class RuntimeExecutor:
             await response.aread()
             await response.aclose()
             await client.aclose()
-            return self._to_json_response(response)
+            return self._to_proxy_response(response, request_id=request_id)
 
         async def iterator() -> Any:
             try:
@@ -342,8 +353,9 @@ class RuntimeExecutor:
 
         return StreamingResponse(
             iterator(),
-            media_type=response.headers.get("content-type", "text/event-stream"),
             status_code=response.status_code,
+            media_type=response.headers.get("content-type", "text/event-stream"),
+            headers={"X-Infer-Nexus-Request-ID": request_id},
         )
 
     async def _execute_proxy_embedding(
@@ -353,6 +365,7 @@ class RuntimeExecutor:
         request: EmbeddingRequest,
     ) -> EmbeddingResponse | Response:
         proxy_config = self._parse_proxy_config(target)
+        request_id = uuid4().hex
         response = await self._request_proxy(
             proxy_config=proxy_config,
             path="/embeddings",
@@ -361,10 +374,9 @@ class RuntimeExecutor:
                 payload=request.model_dump(mode="json"),
                 proxy_config=proxy_config,
             ),
+            request_id=request_id,
         )
-        if response.status_code >= 400:
-            return self._to_json_response(response)
-        return EmbeddingResponse.model_validate(response.json())
+        return self._to_proxy_response(response, request_id=request_id)
 
     async def _execute_proxy_rerank(
         self,
@@ -373,6 +385,7 @@ class RuntimeExecutor:
         request: RerankRequest,
     ) -> RerankResponse | Response:
         proxy_config = self._parse_proxy_config(target)
+        request_id = uuid4().hex
         response = await self._request_proxy(
             proxy_config=proxy_config,
             path="/rerank",
@@ -381,10 +394,9 @@ class RuntimeExecutor:
                 payload=request.model_dump(mode="json"),
                 proxy_config=proxy_config,
             ),
+            request_id=request_id,
         )
-        if response.status_code >= 400:
-            return self._to_json_response(response)
-        return RerankResponse.model_validate(response.json())
+        return self._to_proxy_response(response, request_id=request_id)
 
     def _build_chat_response_from_payload(
         self,

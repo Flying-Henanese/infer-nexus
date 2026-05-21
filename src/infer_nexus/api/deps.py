@@ -11,6 +11,10 @@ from infer_nexus.runtime.dispatcher import RuntimeDispatcher
 
 def get_registry(request: Request) -> ModelRegistry:
     """返回模型注册表。"""
+    # 这里涉及到fastapi中的依赖注入（可以这么叫吧）
+    # 这个request.app是fastapi中的一个全局对象，代表当前的应用实例
+    # 应用启动时将ModelRegistry实例赋值给了app.state.registry
+    # 后面的几个函数也是类似的逻辑，都是从app.state中取出对应的组件实例
     return request.app.state.registry
 
 

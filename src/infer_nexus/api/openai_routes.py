@@ -87,6 +87,7 @@ async def create_chat_completion(
     # 第一步：检查请求模型是否已注册。
     try:
         model = registry.get(request.model)
+    # 如果找不到模型，则向接口返回 OpenAI 兼容的 404 错误响应
     except ModelNotFoundError:
         return openai_error_response(
             404,
@@ -96,7 +97,8 @@ async def create_chat_completion(
             code="model_not_found",
         )
 
-    # 第二步：检查模型任务类型，防止把 embedding/rerank 模型误用于 chat 接口。
+    # 第二步：检查模型任务类型
+    # 防止把 embedding/rerank 模型误用于当前链路中的chat 接口。
     if model.task is not TaskType.CHAT:
         return openai_error_response(
             400,
@@ -108,6 +110,9 @@ async def create_chat_completion(
 
     # 第三步：检查模型文件是否存在，并通过准入控制后进入运行时执行。
     try:
+        # 对于非 VLLM_OPENAI_PROXY 后端的模型，才检查模型文件路径是否存在。
+        # 因为 VLLM_OPENAI_PROXY 后端的模型是通过代理转发到外部 OpenAI API 的，
+        # 不涉及本地模型文件，所以不需要检查模型路径。
         if model.backend != BackendType.VLLM_OPENAI_PROXY:
             model_store.require_model_path(model)
         admission.check_model_request(model)

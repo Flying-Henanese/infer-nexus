@@ -178,15 +178,18 @@ class RuntimeExecutor:
             raise
         except Exception as exc:
             code = self._extract_execution_error_code(exc)
+            message = self._extract_execution_error_message(exc)
             logger.exception(
                 "Serve execution failed for deployment '%s' in app '%s' method '%s'.",
                 target.deployment_name,
                 target.app_name,
                 method_name,
             )
+            if code in {"unsupported_parameter", "unsupported_message_content", "invalid_input"}:
+                raise RuntimeExecutionError(message, code=code) from exc
             raise RuntimeExecutionError(
                 f"Serve execution failed for deployment '{target.deployment_name}' "
-                f"in app '{target.app_name}' method '{method_name}': {exc}",
+                f"in app '{target.app_name}' method '{method_name}': {message}",
                 code=code,
             ) from exc
 
@@ -391,6 +394,25 @@ class RuntimeExecutor:
             return "unsupported_parameter"
 
         return "runtime_execution_failed"
+
+    def _extract_execution_error_message(self, exc: Exception) -> str:
+        candidates = [str(exc)]
+        for attr in ("cause", "__cause__"):
+            nested = getattr(exc, attr, None)
+            if nested is not None:
+                candidates.append(str(nested))
+
+        prefixes = (
+            "RuntimeExecutionError: ",
+            "BackendRequestValidationError: ",
+            "RuntimeNotConnectedError: ",
+        )
+        for text in candidates:
+            for prefix in prefixes:
+                if prefix in text:
+                    return text.split(prefix, 1)[1].strip()
+
+        return str(exc)
 
     async def _execute_proxy_embedding(
         self,

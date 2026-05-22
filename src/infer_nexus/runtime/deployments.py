@@ -65,21 +65,27 @@ class ModelRuntimeReplica:
     async def embedding(self, payload: dict[str, Any]) -> dict[str, Any]:
         """处理 embedding 负载。"""
         request = EmbeddingRequest.model_validate(payload)
-        response = await self.backend.embedding(
-            self.runtime_context["runtime_spec"],
-            request,
-            self.runtime_context,
-        )
+        try:
+            response = await self.backend.embedding(
+                self.runtime_context["runtime_spec"],
+                request,
+                self.runtime_context,
+            )
+        except BackendRequestValidationError as exc:
+            raise RuntimeExecutionError(str(exc), code=exc.code) from exc
         return {"status": "ok", **response}
 
     async def rerank(self, payload: dict[str, Any]) -> dict[str, Any]:
         """处理 rerank 负载。"""
         request = RerankRequest.model_validate(payload)
-        response = await self.backend.rerank(
-            self.runtime_context["runtime_spec"],
-            request,
-            self.runtime_context,
-        )
+        try:
+            response = await self.backend.rerank(
+                self.runtime_context["runtime_spec"],
+                request,
+                self.runtime_context,
+            )
+        except BackendRequestValidationError as exc:
+            raise RuntimeExecutionError(str(exc), code=exc.code) from exc
         return {"status": "ok", **response}
 
     async def __call__(self, request: Any) -> dict[str, Any]:

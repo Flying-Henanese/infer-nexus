@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import sys
 
@@ -51,11 +52,8 @@ def main() -> int:
 
     llm_kwargs = {
         "model": args.model,
-        "task": "score",
         "dtype": args.dtype,
         "tensor_parallel_size": args.tensor_parallel_size,
-        "max_model_len": args.max_model_len,
-        "gpu_memory_utilization": args.gpu_memory_utilization,
         "chat_template": args.chat_template,
         "hf_overrides": {
             "architectures": ["Qwen3ForSequenceClassification"],
@@ -63,6 +61,19 @@ def main() -> int:
             "is_original_qwen3_reranker": True,
         },
     }
+
+    llm_signature = inspect.signature(LLM.__init__)
+    llm_init_args = llm_signature.parameters
+    accepts_var_kwargs = any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in llm_init_args.values()
+    )
+    if "task" in llm_init_args or accepts_var_kwargs:
+        llm_kwargs["task"] = "score"
+    if "max_model_len" in llm_init_args or accepts_var_kwargs:
+        llm_kwargs["max_model_len"] = args.max_model_len
+    if "gpu_memory_utilization" in llm_init_args or accepts_var_kwargs:
+        llm_kwargs["gpu_memory_utilization"] = args.gpu_memory_utilization
 
     print("llm_kwargs=" + json.dumps(llm_kwargs, ensure_ascii=False, indent=2))
 

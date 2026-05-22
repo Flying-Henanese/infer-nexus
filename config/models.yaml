@@ -97,6 +97,7 @@ models:
     max_replicas: 1
     vllm:
       engine_kwargs:
+        chat_template: config/chat_templates/qwen3_reranker.jinja
         hf_overrides:
           architectures:
             - Qwen3ForSequenceClassification

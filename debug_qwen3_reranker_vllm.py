@@ -68,7 +68,7 @@ def main() -> int:
         parameter.kind == inspect.Parameter.VAR_KEYWORD
         for parameter in llm_init_args.values()
     )
-    if "task" in llm_init_args or accepts_var_kwargs:
+    if "task" in llm_init_args:
         llm_kwargs["task"] = "score"
     if "max_model_len" in llm_init_args or accepts_var_kwargs:
         llm_kwargs["max_model_len"] = args.max_model_len

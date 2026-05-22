@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import inspect
+import json
 import logging
 import os
 from time import time
@@ -54,19 +55,22 @@ class RuntimeExecutor:
         """执行聊天请求并转换为统一响应结构。"""
         if target.backend == BackendType.VLLM_OPENAI_PROXY:
             return await self._execute_proxy_chat(target=target, request=request)
+        backend_request = request.model_copy(update={"stream": False}) if request.stream else request
         # serve 模式走远程句柄；stub 模式本地实例化副本，便于本地开发与测试。
         if self.mode == "serve":
             payload = await self._invoke_handle(
                 target=target,
                 method_name="chat_completion",
-                payload=request.model_dump(mode="json"),
+                payload=backend_request.model_dump(mode="json"),
             )
         else:
             payload = await self._invoke_local_replica(
                 target=target,
                 method_name="chat_completion",
-                payload=request.model_dump(mode="json"),
+                payload=backend_request.model_dump(mode="json"),
             )
+        if request.stream:
+            return self._build_chat_stream_response(request, target, payload)
         return self._build_chat_response_from_payload(request, target, payload)
 
     async def execute_embedding(
@@ -173,6 +177,7 @@ class RuntimeExecutor:
         except RuntimeNotConnectedError:
             raise
         except Exception as exc:
+            code = self._extract_execution_error_code(exc)
             logger.exception(
                 "Serve execution failed for deployment '%s' in app '%s' method '%s'.",
                 target.deployment_name,
@@ -181,7 +186,8 @@ class RuntimeExecutor:
             )
             raise RuntimeExecutionError(
                 f"Serve execution failed for deployment '{target.deployment_name}' "
-                f"in app '{target.app_name}' method '{method_name}': {exc}"
+                f"in app '{target.app_name}' method '{method_name}': {exc}",
+                code=code,
             ) from exc
 
     async def _await_handle_response(self, response: Any) -> Any:
@@ -358,6 +364,34 @@ class RuntimeExecutor:
             headers={"X-Infer-Nexus-Request-ID": request_id},
         )
 
+    def _extract_execution_error_code(self, exc: Exception) -> str:
+        candidates = [
+            exc,
+            getattr(exc, "cause", None),
+            getattr(exc, "__cause__", None),
+        ]
+        for candidate in candidates:
+            code = getattr(candidate, "code", None)
+            if isinstance(code, str) and code:
+                return code
+
+        message = str(exc)
+        validation_signatures = (
+            "BackendRequestValidationError",
+            "RuntimeExecutionError: This model does not allow",
+            "RuntimeExecutionError: Streaming chat completions are not supported",
+            "RuntimeExecutionError: This model does not support multimodal chat content",
+            "RuntimeExecutionError: Multimodal chat content must include",
+        )
+        if any(signature in message for signature in validation_signatures):
+            if "multimodal chat content" in message:
+                return "unsupported_message_content"
+            if "must include at least one content block" in message:
+                return "invalid_input"
+            return "unsupported_parameter"
+
+        return "runtime_execution_failed"
+
     async def _execute_proxy_embedding(
         self,
         *,
@@ -437,6 +471,70 @@ class RuntimeExecutor:
                     },
                 )
             ),
+        )
+
+    def _build_chat_stream_response(
+        self,
+        request: ChatCompletionsRequest,
+        target: RuntimeTarget,
+        payload: dict[str, Any],
+    ) -> StreamingResponse:
+        created = payload.get("created", int(time()))
+        response_id = payload.get("id", f"chatcmpl-{uuid4().hex}")
+        model = payload.get(
+            "model",
+            target.runtime_context.get("served_model_name", request.model),
+        )
+        content = payload.get(
+            "content",
+            f"serve chat response from deployment '{target.deployment_name}' "
+            f"for model '{target.model_name}'",
+        )
+        finish_reason = payload.get("finish_reason", "stop")
+        request_id = uuid4().hex
+
+        def chunk_bytes(chunk_payload: dict[str, Any]) -> bytes:
+            return f"data: {json.dumps(chunk_payload, ensure_ascii=False)}\n\n".encode("utf-8")
+
+        async def iterator() -> Any:
+            first_chunk = {
+                "id": response_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "content": content,
+                        },
+                        "finish_reason": None,
+                    }
+                ],
+            }
+            yield chunk_bytes(first_chunk)
+
+            final_chunk = {
+                "id": response_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": finish_reason,
+                    }
+                ],
+            }
+            yield chunk_bytes(final_chunk)
+            yield b"data: [DONE]\n\n"
+
+        return StreamingResponse(
+            iterator(),
+            media_type="text/event-stream",
+            headers={"X-Infer-Nexus-Request-ID": request_id},
         )
 
     def _build_embedding_response_from_payload(

@@ -68,8 +68,13 @@ def main() -> int:
         parameter.kind == inspect.Parameter.VAR_KEYWORD
         for parameter in llm_init_args.values()
     )
-    if "task" in llm_init_args or accepts_var_kwargs:
+    # Older vLLM builds may accept **kwargs at LLM.__init__ level but still reject
+    # "task" when forwarding into EngineArgs, so only pass task when it is an
+    # explicit constructor parameter.
+    if "task" in llm_init_args:
         llm_kwargs["task"] = "score"
+    elif "runner" in llm_init_args or accepts_var_kwargs:
+        llm_kwargs["runner"] = "pooling"
     if "max_model_len" in llm_init_args or accepts_var_kwargs:
         llm_kwargs["max_model_len"] = args.max_model_len
     if "gpu_memory_utilization" in llm_init_args or accepts_var_kwargs:
@@ -86,7 +91,17 @@ def main() -> int:
     print(f"supported_tasks={getattr(llm, 'supported_tasks', None)}")
 
     try:
-        outputs = llm.score(args.query, args.documents)
+        score_kwargs = {}
+        score_signature = inspect.signature(llm.score)
+        score_args = score_signature.parameters
+        score_accepts_var_kwargs = any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in score_args.values()
+        )
+        if "chat_template" in score_args or score_accepts_var_kwargs:
+            score_kwargs["chat_template"] = args.chat_template
+
+        outputs = llm.score(args.query, args.documents, **score_kwargs)
     except Exception as exc:  # pragma: no cover - debug script
         print(f"score_failed: {exc}", file=sys.stderr)
         return 3

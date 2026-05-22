@@ -7,6 +7,7 @@ from infer_nexus.backends.base import InferenceBackend
 from infer_nexus.backends.vllm import VLLMBackend
 from infer_nexus.core.schemas import ChatCompletionsRequest, EmbeddingRequest, RerankRequest
 from infer_nexus.catalog.models import ModelConfig
+from infer_nexus.core.errors import BackendRequestValidationError, RuntimeExecutionError
 
 
 @dataclass(slots=True)
@@ -51,11 +52,14 @@ class ModelRuntimeReplica:
     async def chat_completion(self, payload: dict[str, Any]) -> dict[str, Any]:
         """处理 chat completion 负载。"""
         request = ChatCompletionsRequest.model_validate(payload)
-        response = await self.backend.chat_completion(
-            self.runtime_context["runtime_spec"],
-            request,
-            self.runtime_context,
-        )
+        try:
+            response = await self.backend.chat_completion(
+                self.runtime_context["runtime_spec"],
+                request,
+                self.runtime_context,
+            )
+        except BackendRequestValidationError as exc:
+            raise RuntimeExecutionError(str(exc), code=exc.code) from exc
         return {"status": "ok", **response}
 
     async def embedding(self, payload: dict[str, Any]) -> dict[str, Any]:

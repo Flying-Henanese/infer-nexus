@@ -6,6 +6,7 @@ import json
 import httpx
 import pytest
 from starlette.responses import Response
+from starlette.responses import StreamingResponse
 
 from infer_nexus.catalog.models import ModelCatalogFile, ModelConfig
 from infer_nexus.catalog.loader import load_model_catalog
@@ -69,6 +70,32 @@ def test_dispatch_chat_returns_stub_chat_completion() -> None:
     assert response.choices[0].message.role == 'assistant'
     assert 'backend stub response from vllm' in str(response.choices[0].message.content)
     assert 'model-qwen3-32b-instruct' in str(response.choices[0].message.content)
+
+
+def test_dispatch_chat_returns_sse_stream_when_requested() -> None:
+    """stub 模式下 stream=True 应返回 OpenAI-style SSE 响应。"""
+    registry, _, dispatcher = make_dispatcher()
+    request = ChatCompletionsRequest(
+        model='qwen3-chat',
+        messages=[{'role': 'user', 'content': 'hello'}],
+        stream=True,
+    )
+
+    response = asyncio.run(dispatcher.dispatch_chat(registry.get('qwen3-chat'), request))
+
+    assert isinstance(response, StreamingResponse)
+
+    async def collect() -> bytes:
+        chunks = []
+        async for chunk in response.body_iterator:
+            chunks.append(chunk)
+        return b''.join(chunks)
+
+    body = asyncio.run(collect())
+    assert response.media_type == 'text/event-stream'
+    assert b'chat.completion.chunk' in body
+    assert b'backend stub response from vllm' in body
+    assert body.endswith(b'data: [DONE]\n\n')
 
 
 def test_dispatch_embedding_returns_stub_embedding_response() -> None:

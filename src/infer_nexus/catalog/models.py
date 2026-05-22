@@ -72,51 +72,47 @@ class ProxyConfig(BaseModel):
     headers_policy: ProxyHeadersPolicy = Field(default_factory=ProxyHeadersPolicy)
 
 
-class ModelConfig(BaseModel):
-    """模型目录中的单个模型配置（由 ``config/models.yaml`` 加载）。"""
+class VLLMRequestPolicy(BaseModel):
+    """Per-model request passthrough policy for local vLLM backends."""
 
-    # 模型在系统内的唯一标识名称，用于注册、查询和路由匹配。
+    allow_tools: bool = False
+    allow_reasoning: bool = False
+    passthrough_unknown_openai_fields: bool = False
+
+
+class VLLMConfig(BaseModel):
+    """Backend-scoped local vLLM configuration."""
+
+    engine_kwargs: dict[str, Any] = Field(default_factory=dict)
+    request_defaults: dict[str, Any] = Field(default_factory=dict)
+    request_policy: VLLMRequestPolicy = Field(default_factory=VLLMRequestPolicy)
+
+
+class ModelConfig(BaseModel):
+    """One declarative model entry loaded from ``config/models.yaml``."""
+
     name: str
-    # 模型别名（可选）：用于兼容旧名称、对外展示或简化调用。
-    # 为空时通常回退使用 ``name``。
     alias: str | None = None
-    # 模型支持的任务类型（如文本生成、分类等），用于请求分发与能力校验。
     task: TaskType
-    # 推理后端类型，决定模型实例由哪种引擎承载（默认 VLLM）。
     backend: BackendType = BackendType.VLLM
-    # 模型权重或模型资源路径（本地路径/挂载路径/远程已同步路径）。
     model_path: str | None = None
     model_loading_config: ModelLoadingConfig = Field(default_factory=ModelLoadingConfig)
-    # 推理数据类型（可选），如 fp16/bf16/fp32；为空时由后端自动推断或使用默认值。
     dtype: str | None = None
-    # 张量并行度（Tensor Parallelism）大小，必须 >= 1。
-    # 值越大通常可利用更多 GPU 共同承载单模型，但会增加通信开销。
     tensor_parallel_size: int = Field(ge=1)
-    # 模型可处理的最大上下文长度（token 数，可选）。
-    # 未设置时由后端或模型配置默认值决定。
     max_model_len: int | None = None
-    # 每个副本分配的 CPU 资源，必须 > 0，可为整数或小数（表示核数）。
     cpu_per_replica: int | float = Field(gt=0)
-    # 每个副本分配的 GPU 资源，必须 >= 0，可为小数（按 GPU 分片比例）。
     gpu_per_replica: int | float = Field(ge=0)
-    # 单副本可使用的 GPU 显存利用率上限（0, 1]，可选）。
-    # 例如 0.9 表示最多使用 90% 显存，用于降低 OOM 风险。
     gpu_memory_utilization: float | None = Field(default=None, gt=0, le=1)
-    # 自动伸缩最小副本数，必须 >= 0；0 表示允许缩容至无副本（冷启动模式）。
     min_replicas: int = Field(ge=0)
-    # 自动伸缩最大副本数，必须 >= 1，且需满足 >= ``min_replicas``。
     max_replicas: int = Field(ge=1)
-    # 能力标签列表：用于声明模型具备的具体能力特征（如函数调用、多模态等）。
-    # 常用于策略匹配、路由筛选与前端能力展示。
     capabilities: list[str] = Field(default_factory=list)
     engine_kwargs: dict[str, Any] = Field(default_factory=dict)
+    vllm: VLLMConfig = Field(default_factory=VLLMConfig)
     deployment_config: DeploymentConfig = Field(default_factory=DeploymentConfig)
     proxy_config: ProxyConfig | None = None
     served_model_name: str | None = None
     require_local_artifacts: bool = True
-    # 通用标签列表：用于业务分组、环境标记、A/B 实验或运营筛选。
     labels: list[str] = Field(default_factory=list)
-    # 模型状态（如可用/下线/未知），用于控制是否参与调度及展示状态。
     status: ModelStatus = ModelStatus.UNKNOWN
 
     @model_validator(mode="after")
@@ -124,17 +120,23 @@ class ModelConfig(BaseModel):
         """Ensure replica bounds are internally consistent."""
         if self.max_replicas < self.min_replicas:
             raise ValueError("max_replicas must be >= min_replicas")
+
+        merged_engine_kwargs = dict(self.engine_kwargs)
+        merged_engine_kwargs.update(self.vllm.engine_kwargs)
+        self.vllm.engine_kwargs = merged_engine_kwargs
+        self.engine_kwargs = dict(merged_engine_kwargs)
+
         if self.backend == BackendType.VLLM_OPENAI_PROXY:
             if self.proxy_config is None:
                 raise ValueError("proxy_config is required for vllm_openai_proxy backend")
             return self
+
         if not self.model_path and not self.model_loading_config.model_id:
             raise ValueError("either model_path or model_loading_config.model_id must be set")
         return self
 
 
 class ModelCatalogFile(BaseModel):
-    """模型目录配置文件的顶层结构。"""
+    """Top-level model catalog file."""
 
-    # 模型配置列表：每一项对应一个可注册的模型声明。
     models: list[ModelConfig]

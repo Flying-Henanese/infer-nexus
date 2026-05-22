@@ -1,4 +1,6 @@
-"""vLLM 后端适配实现。"""
+"""vLLM backend adapter implementation."""
+
+from __future__ import annotations
 
 import base64
 import inspect
@@ -15,27 +17,59 @@ from infer_nexus.core.schemas import ChatCompletionsRequest, EmbeddingRequest, R
 
 
 class VLLMBackend(InferenceBackend):
-    """vLLM 后端适配器，负责 runtime spec 校验、引擎生命周期与请求转换。"""
+    """Adapt local vLLM engine lifecycle and request handling."""
 
     TASK_TO_MODE = {
         "chat": "generate",
         "embedding": "embed",
         "rerank": "score",
     }
+    REQUEST_DEFAULT_SAMPLING_KEYS = {
+        "best_of",
+        "frequency_penalty",
+        "ignore_eos",
+        "include_stop_str_in_output",
+        "logprobs",
+        "max_completion_tokens",
+        "max_tokens",
+        "min_p",
+        "min_tokens",
+        "n",
+        "presence_penalty",
+        "prompt_logprobs",
+        "repetition_penalty",
+        "seed",
+        "skip_special_tokens",
+        "spaces_between_special_tokens",
+        "stop",
+        "temperature",
+        "top_k",
+        "top_logprobs",
+        "top_p",
+        "truncate_prompt_tokens",
+        "vllm_xargs",
+    }
+    TOOL_REQUEST_KEYS = {"parallel_tool_calls"}
+    REASONING_REQUEST_KEYS = {
+        "chat_template",
+        "chat_template_kwargs",
+        "enable_reasoning",
+        "enable_thinking",
+        "reasoning",
+        "reasoning_effort",
+        "thinking",
+    }
+    UNSUPPORTED_KWARG_PATTERN = re.compile(r"Unexpected keyword argument '([^']+)'")
 
     def __init__(self, runtime_spec: dict[str, Any]) -> None:
-        """初始化后端实例。"""
         self.runtime_spec = runtime_spec
         self.engine: Any | None = None
         self.engine_state: str = "created"
 
     def validate_runtime_spec(self, runtime_spec: dict[str, Any], runtime_context: dict[str, Any]) -> None:
-        """校验模型任务与 runtime spec 的后端参数一致性。"""
         task = getattr(runtime_context.get("task"), "value", runtime_context.get("task"))
         if task not in self.TASK_TO_MODE:
-            raise BackendConfigurationError(
-                f"vLLM backend does not support task '{task}'."
-            )
+            raise BackendConfigurationError(f"vLLM backend does not support task '{task}'.")
 
         expected_mode = self.TASK_TO_MODE[task]
         actual_mode = runtime_spec.get("task_mode")
@@ -52,7 +86,6 @@ class VLLMBackend(InferenceBackend):
             )
 
     def startup(self) -> None:
-        """启动 vLLM 引擎；stub 模式下不加载真实模型。"""
         init_mode = self.runtime_spec.get("backend_init_mode", "stub")
         if init_mode != "real":
             self.engine = None
@@ -79,8 +112,6 @@ class VLLMBackend(InferenceBackend):
         max_model_len = self.runtime_spec.get("max_model_len")
         requested_mode = self.runtime_spec.get("task_mode")
 
-        # 核心兼容逻辑：
-        # 不同 vLLM 版本构造参数不一致，仅在当前版本签名支持时才传入对应参数。
         try:
             llm_signature = inspect.signature(LLM.__init__)
             llm_init_args = llm_signature.parameters
@@ -95,12 +126,9 @@ class VLLMBackend(InferenceBackend):
                 llm_kwargs["gpu_memory_utilization"] = gpu_memory_utilization
             if max_model_len is not None and ("max_model_len" in llm_init_args or accepts_var_kwargs):
                 llm_kwargs["max_model_len"] = max_model_len
-            # Keep task strict: vLLM 0.18.1 forwards unknown kwargs and
-            # EngineArgs will reject unsupported `task`.
             if "task" in llm_init_args:
                 llm_kwargs["task"] = requested_mode or "auto"
         except (TypeError, ValueError):
-            # If introspection fails, avoid passing version-sensitive args.
             pass
 
         self.engine = LLM(**llm_kwargs)
@@ -117,12 +145,10 @@ class VLLMBackend(InferenceBackend):
         self.engine_state = "ready"
 
     def shutdown(self) -> None:
-        """关闭引擎并清理状态。"""
         self.engine = None
         self.engine_state = "stopped"
 
     def build_runtime_spec(self, model: ModelConfig, resolved_model_reference: str) -> dict[str, Any]:
-        """将模型声明转换为 vLLM 可消费的 runtime spec。"""
         task_mode = self.TASK_TO_MODE.get(model.task.value)
         if task_mode is None:
             raise BackendConfigurationError(
@@ -140,13 +166,22 @@ class VLLMBackend(InferenceBackend):
             "cpu_per_replica": model.cpu_per_replica,
             "task_mode": task_mode,
             "capabilities": list(model.capabilities),
-            "engine_kwargs": dict(model.engine_kwargs),
+            "engine_kwargs": dict(model.vllm.engine_kwargs),
+            "request_defaults": dict(model.vllm.request_defaults),
+            "request_policy": model.vllm.request_policy.model_dump(mode="json"),
             "model_loading_config": model.model_loading_config.model_dump(mode="json"),
             "served_model_name": model.served_model_name or model.alias or model.name,
         }
 
+    def _request_defaults(self, runtime_spec: dict[str, Any] | None = None) -> dict[str, Any]:
+        spec = runtime_spec or self.runtime_spec
+        return dict(spec.get("request_defaults") or {})
+
+    def _request_policy(self, runtime_spec: dict[str, Any] | None = None) -> dict[str, Any]:
+        spec = runtime_spec or self.runtime_spec
+        return dict(spec.get("request_policy") or {})
+
     def _normalize_embedding_inputs(self, request: EmbeddingRequest) -> list[str]:
-        """归一化 embedding 输入为字符串列表。"""
         inputs = request.input if isinstance(request.input, list) else [request.input]
         if not inputs:
             raise BackendRequestValidationError(
@@ -156,7 +191,6 @@ class VLLMBackend(InferenceBackend):
         return inputs
 
     def _encode_embedding_base64(self, embedding: list[float]) -> str:
-        """将浮点向量编码为 OpenAI 兼容 base64 格式。"""
         packed = struct.pack(f"<{len(embedding)}f", *embedding)
         return base64.b64encode(packed).decode("ascii")
 
@@ -167,7 +201,6 @@ class VLLMBackend(InferenceBackend):
         runtime_context: dict[str, Any],
         inputs: list[str],
     ) -> dict[str, Any]:
-        """构建 embedding 的 stub 响应。"""
         data = []
         for index, item in enumerate(inputs):
             embedding = [
@@ -205,7 +238,6 @@ class VLLMBackend(InferenceBackend):
         runtime_context: dict[str, Any],
         result: Any,
     ) -> dict[str, Any]:
-        """将 vLLM embedding 原始结果转换为 API 响应。"""
         if not result:
             raise RuntimeError("vLLM embed returned no result")
 
@@ -241,7 +273,6 @@ class VLLMBackend(InferenceBackend):
         }
 
     def _normalize_rerank_documents(self, request: RerankRequest) -> list[str]:
-        """归一化 rerank 文档输入为字符串列表。"""
         documents = request.documents if isinstance(request.documents, list) else [request.documents]
         if not documents:
             raise BackendRequestValidationError(
@@ -251,7 +282,6 @@ class VLLMBackend(InferenceBackend):
         return documents
 
     def _score_stub_document(self, query: str, document: str) -> float:
-        """基于词项重叠计算简单 stub 相关度分数。"""
         query_terms = {term for term in query.lower().split() if term}
         document_terms = {term for term in document.lower().split() if term}
         overlap = len(query_terms & document_terms)
@@ -265,7 +295,6 @@ class VLLMBackend(InferenceBackend):
         runtime_context: dict[str, Any],
         documents: list[str],
     ) -> dict[str, Any]:
-        """构建 rerank 的 stub 响应。"""
         scored = [
             {
                 "index": index,
@@ -300,7 +329,6 @@ class VLLMBackend(InferenceBackend):
         documents: list[str],
         result: Any,
     ) -> dict[str, Any]:
-        """将 vLLM score 原始结果转换为 rerank 响应。"""
         if not result:
             raise RuntimeError("vLLM score returned no result")
 
@@ -333,16 +361,36 @@ class VLLMBackend(InferenceBackend):
             "deployment": runtime_context["deployment_name"],
         }
 
-    def _build_sampling_params(self, request: ChatCompletionsRequest) -> dict[str, Any]:
-        """从 chat 请求提取采样参数并补充默认值。"""
-        extra = dict(request.extra_body or {})
+    def _merge_request_extras(
+        self,
+        request: ChatCompletionsRequest,
+        *,
+        runtime_spec: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        merged = dict(self._request_defaults(runtime_spec))
         model_extra = getattr(request, "model_extra", None) or {}
-        max_tokens = request.max_tokens or extra.pop("max_tokens", None) or model_extra.get(
-            "max_completion_tokens"
-        ) or 512
+        merged.update(model_extra)
+        merged.update(request.extra_body or {})
+        return merged
+
+    def _build_sampling_params(
+        self,
+        request: ChatCompletionsRequest,
+        *,
+        runtime_spec: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        merged = self._merge_request_extras(request, runtime_spec=runtime_spec)
+        max_tokens = (
+            request.max_tokens
+            or merged.pop("max_tokens", None)
+            or merged.get("max_completion_tokens")
+            or 512
+        )
         params: dict[str, Any] = {
-            "temperature": request.temperature if request.temperature is not None else 0.7,
-            "top_p": request.top_p if request.top_p is not None else 1.0,
+            "temperature": (
+                request.temperature if request.temperature is not None else merged.get("temperature", 0.7)
+            ),
+            "top_p": request.top_p if request.top_p is not None else merged.get("top_p", 1.0),
             "max_tokens": max_tokens,
         }
         optional_params = {
@@ -355,29 +403,20 @@ class VLLMBackend(InferenceBackend):
             "logprobs": request.top_logprobs if request.logprobs else None,
         }
         for key, value in optional_params.items():
+            fallback = merged.get(key)
             if value is not None:
                 params[key] = value
+            elif fallback is not None:
+                params[key] = fallback
 
-        allowed_extra_keys = {
-            "best_of",
-            "top_k",
-            "min_p",
-            "min_tokens",
-            "ignore_eos",
-            "skip_special_tokens",
-            "spaces_between_special_tokens",
-            "include_stop_str_in_output",
-            "truncate_prompt_tokens",
-            "prompt_logprobs",
-        }
-        for key in allowed_extra_keys:
-            value = extra.get(key)
-            if value is None:
-                value = model_extra.get(key)
-            if value is not None:
+        for key in self.REQUEST_DEFAULT_SAMPLING_KEYS:
+            if key in {"max_tokens", "max_completion_tokens", "temperature", "top_p", "vllm_xargs"}:
+                continue
+            value = merged.get(key)
+            if value is not None and key not in params:
                 params[key] = value
 
-        vllm_xargs = model_extra.get("vllm_xargs")
+        vllm_xargs = merged.get("vllm_xargs")
         if isinstance(vllm_xargs, dict):
             no_repeat_ngram_size = vllm_xargs.get("no_repeat_ngram_size")
             if no_repeat_ngram_size is not None:
@@ -385,38 +424,72 @@ class VLLMBackend(InferenceBackend):
 
         return params
 
-    def _invoke_vllm_chat(self, messages: list[dict[str, Any]], sampling_params: dict[str, Any]) -> Any:
-        """Call vLLM chat across versions with different method signatures."""
-        if self.engine is None:
-            raise RuntimeError("vLLM engine is not initialized")
+    def _build_chat_kwargs(
+        self,
+        request: ChatCompletionsRequest,
+        *,
+        runtime_spec: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        merged = self._merge_request_extras(request, runtime_spec=runtime_spec)
+        policy = self._request_policy(runtime_spec)
+        allow_tools = bool(policy.get("allow_tools"))
+        allow_reasoning = bool(policy.get("allow_reasoning"))
+        passthrough_unknown = bool(policy.get("passthrough_unknown_openai_fields"))
 
-        try:
-            from vllm import SamplingParams
-        except ImportError:
-            SamplingParams = None  # type: ignore[assignment]
-
-        if SamplingParams is not None:
-            sampling_params_instance = self._build_sampling_params_instance(
-                sampling_params,
-                sampling_params_cls=SamplingParams,
+        if not allow_tools and (request.tools is not None or request.tool_choice is not None):
+            raise BackendRequestValidationError(
+                "This model does not allow tool-calling request fields.",
+                code="unsupported_parameter",
             )
-            try:
-                return self.engine.chat(
-                    messages,
-                    sampling_params=sampling_params_instance,
-                )
-            except TypeError:
-                pass
 
-        try:
-            return self.engine.chat(messages, **sampling_params)
-        except TypeError:
-            if SamplingParams is not None:
-                return self.engine.chat(
-                    messages,
-                    sampling_params_instance,
-                )
-            raise
+        reasoning_keys_present = [
+            key for key in self.REASONING_REQUEST_KEYS if merged.get(key) is not None
+        ]
+        if not allow_reasoning and reasoning_keys_present:
+            raise BackendRequestValidationError(
+                "This model does not allow reasoning request fields.",
+                code="unsupported_parameter",
+            )
+
+        chat_kwargs: dict[str, Any] = {}
+        if request.tools is not None:
+            chat_kwargs["tools"] = request.tools
+        elif allow_tools and merged.get("tools") is not None:
+            chat_kwargs["tools"] = merged.get("tools")
+
+        if request.tool_choice is not None:
+            chat_kwargs["tool_choice"] = request.tool_choice
+        elif allow_tools and merged.get("tool_choice") is not None:
+            chat_kwargs["tool_choice"] = merged.get("tool_choice")
+
+        if request.response_format is not None:
+            chat_kwargs["response_format"] = request.response_format
+
+        if allow_tools:
+            for key in self.TOOL_REQUEST_KEYS:
+                value = merged.get(key)
+                if value is not None:
+                    chat_kwargs[key] = value
+
+        if allow_reasoning:
+            for key in self.REASONING_REQUEST_KEYS:
+                value = merged.get(key)
+                if value is not None:
+                    chat_kwargs[key] = value
+
+        if passthrough_unknown:
+            excluded_keys = (
+                self.REQUEST_DEFAULT_SAMPLING_KEYS
+                | self.TOOL_REQUEST_KEYS
+                | self.REASONING_REQUEST_KEYS
+                | {"response_format", "tool_choice", "tools"}
+            )
+            for key, value in merged.items():
+                if value is None or key in excluded_keys:
+                    continue
+                chat_kwargs.setdefault(key, value)
+
+        return chat_kwargs
 
     def _build_sampling_params_instance(
         self,
@@ -424,18 +497,16 @@ class VLLMBackend(InferenceBackend):
         *,
         sampling_params_cls: type[Any],
     ) -> Any:
-        """Construct SamplingParams while stripping unsupported kwargs across vLLM versions."""
         filtered_sampling_params = self._filter_sampling_params_for_vllm(
             sampling_params,
             sampling_params_cls=sampling_params_cls,
         )
-        unsupported_pattern = re.compile(r"Unexpected keyword argument '([^']+)'")
 
         while True:
             try:
                 return sampling_params_cls(**filtered_sampling_params)
             except TypeError as exc:
-                match = unsupported_pattern.search(str(exc))
+                match = self.UNSUPPORTED_KWARG_PATTERN.search(str(exc))
                 if match is None:
                     raise
                 unsupported_key = match.group(1)
@@ -453,7 +524,6 @@ class VLLMBackend(InferenceBackend):
         *,
         sampling_params_cls: type[Any],
     ) -> dict[str, Any]:
-        """Drop sampling params not accepted by the current vLLM SamplingParams signature."""
         try:
             signature = inspect.signature(sampling_params_cls.__init__)
         except (TypeError, ValueError):
@@ -483,15 +553,117 @@ class VLLMBackend(InferenceBackend):
             if key in supported_keys
         }
 
+    def _filter_chat_kwargs_for_vllm(self, chat_kwargs: dict[str, Any]) -> dict[str, Any]:
+        if self.engine is None:
+            return dict(chat_kwargs)
+        try:
+            signature = inspect.signature(self.engine.chat)
+        except (TypeError, ValueError):
+            return dict(chat_kwargs)
+
+        parameters = signature.parameters
+        accepts_var_kwargs = any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        )
+        if accepts_var_kwargs:
+            return dict(chat_kwargs)
+
+        supported_keys = {
+            name
+            for name, parameter in parameters.items()
+            if parameter.kind
+            in {
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            }
+        }
+        supported_keys.discard("self")
+        supported_keys.discard("messages")
+        return {
+            key: value
+            for key, value in chat_kwargs.items()
+            if key in supported_keys
+        }
+
+    def _invoke_chat_callable(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        sampling_params_instance: Any | None,
+        sampling_params: dict[str, Any],
+        chat_kwargs: dict[str, Any],
+    ) -> Any:
+        if self.engine is None:
+            raise RuntimeError("vLLM engine is not initialized")
+        current_chat_kwargs = self._filter_chat_kwargs_for_vllm(chat_kwargs)
+
+        while True:
+            try:
+                if sampling_params_instance is not None:
+                    return self.engine.chat(
+                        messages,
+                        sampling_params=sampling_params_instance,
+                        **current_chat_kwargs,
+                    )
+                return self.engine.chat(messages, **sampling_params, **current_chat_kwargs)
+            except TypeError as exc:
+                match = self.UNSUPPORTED_KWARG_PATTERN.search(str(exc))
+                if match is None:
+                    raise
+                unsupported_key = match.group(1)
+                if unsupported_key not in current_chat_kwargs:
+                    raise
+                current_chat_kwargs = {
+                    key: value
+                    for key, value in current_chat_kwargs.items()
+                    if key != unsupported_key
+                }
+
+    def _invoke_vllm_chat(
+        self,
+        messages: list[dict[str, Any]],
+        sampling_params: dict[str, Any],
+        *,
+        chat_kwargs: dict[str, Any],
+    ) -> Any:
+        if self.engine is None:
+            raise RuntimeError("vLLM engine is not initialized")
+
+        try:
+            from vllm import SamplingParams
+        except ImportError:
+            SamplingParams = None  # type: ignore[assignment]
+
+        if SamplingParams is not None:
+            sampling_params_instance = self._build_sampling_params_instance(
+                sampling_params,
+                sampling_params_cls=SamplingParams,
+            )
+            try:
+                return self._invoke_chat_callable(
+                    messages,
+                    sampling_params_instance=sampling_params_instance,
+                    sampling_params=sampling_params,
+                    chat_kwargs=chat_kwargs,
+                )
+            except TypeError:
+                pass
+
+        return self._invoke_chat_callable(
+            messages,
+            sampling_params_instance=None,
+            sampling_params=sampling_params,
+            chat_kwargs=chat_kwargs,
+        )
+
     def _supports_multimodal(self, runtime_context: dict[str, Any] | None = None) -> bool:
-        """Return whether the current model runtime is allowed to accept image blocks."""
         capabilities = self.runtime_spec.get("capabilities")
         if capabilities is None and runtime_context is not None:
             capabilities = runtime_context.get("capabilities", [])
         return "vision" in (capabilities or [])
 
     def _normalize_data_url(self, url: str) -> str:
-        """Normalize base64 data URLs into the stricter form expected by vLLM."""
         if not url.startswith("data:") or ";base64," not in url:
             return url
 
@@ -504,7 +676,6 @@ class VLLMBackend(InferenceBackend):
         return f"{prefix},{normalized}"
 
     def _serialize_content_block(self, block: Any) -> dict[str, Any]:
-        """Serialize one multimodal content block with minimal normalization."""
         payload = block.model_dump(mode="json", exclude_none=True)
         if payload.get("type") == "image_url":
             image_url = payload.get("image_url") or {}
@@ -519,7 +690,6 @@ class VLLMBackend(InferenceBackend):
         *,
         allow_multimodal: bool,
     ) -> str | list[dict[str, Any]]:
-        """Normalize text or multimodal content into the payload expected by vLLM."""
         if isinstance(content, str):
             return content
 
@@ -543,7 +713,6 @@ class VLLMBackend(InferenceBackend):
         *,
         runtime_context: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
-        """将 chat 消息转换为 vLLM 输入格式，并校验阶段一约束。"""
         if request.stream:
             raise BackendRequestValidationError(
                 "Streaming chat completions are not supported in Phase 1.",
@@ -573,8 +742,8 @@ class VLLMBackend(InferenceBackend):
         runtime_spec: dict[str, Any],
         runtime_context: dict[str, Any],
         sampling_params: dict[str, Any],
+        chat_kwargs: dict[str, Any],
     ) -> dict[str, Any]:
-        """构建 chat 的 stub 响应。"""
         content = (
             f"backend stub response from {runtime_spec['backend']} "
             f"for deployment '{runtime_context['deployment_name']}' "
@@ -601,6 +770,7 @@ class VLLMBackend(InferenceBackend):
             "raw": {
                 "messages": self._build_chat_messages(request, runtime_context=runtime_context),
                 "sampling_params": sampling_params,
+                "chat_kwargs": chat_kwargs,
             },
         }
 
@@ -612,8 +782,8 @@ class VLLMBackend(InferenceBackend):
         runtime_context: dict[str, Any],
         result: Any,
         sampling_params: dict[str, Any],
+        chat_kwargs: dict[str, Any],
     ) -> dict[str, Any]:
-        """将 vLLM chat 原始结果转换为 OpenAI 风格响应。"""
         if not result:
             raise RuntimeError("vLLM chat returned no result")
 
@@ -640,6 +810,7 @@ class VLLMBackend(InferenceBackend):
             "deployment": runtime_context["deployment_name"],
             "raw": {
                 "sampling_params": sampling_params,
+                "chat_kwargs": chat_kwargs,
             },
         }
 
@@ -649,25 +820,30 @@ class VLLMBackend(InferenceBackend):
         request: ChatCompletionsRequest,
         runtime_context: dict[str, Any],
     ) -> dict[str, Any]:
-        """执行 chat completion。"""
-        # 先做请求归一化和参数确定，再根据引擎是否就绪选择真实推理或 stub 降级。
         messages = self._build_chat_messages(request, runtime_context=runtime_context)
-        sampling_params = self._build_sampling_params(request)
+        sampling_params = self._build_sampling_params(request, runtime_spec=runtime_spec)
+        chat_kwargs = self._build_chat_kwargs(request, runtime_spec=runtime_spec)
         if self.engine is None:
             return self._build_chat_stub_response(
                 request,
                 runtime_spec,
                 runtime_context,
                 sampling_params,
+                chat_kwargs,
             )
 
-        result = self._invoke_vllm_chat(messages, sampling_params)
+        result = self._invoke_vllm_chat(
+            messages,
+            sampling_params,
+            chat_kwargs=chat_kwargs,
+        )
         return self._convert_chat_result(
             request=request,
             runtime_spec=runtime_spec,
             runtime_context=runtime_context,
             result=result,
             sampling_params=sampling_params,
+            chat_kwargs=chat_kwargs,
         )
 
     async def embedding(
@@ -676,7 +852,6 @@ class VLLMBackend(InferenceBackend):
         request: EmbeddingRequest,
         runtime_context: dict[str, Any],
     ) -> dict[str, Any]:
-        """执行 embedding。"""
         inputs = self._normalize_embedding_inputs(request)
         if self.engine is None:
             return self._build_embedding_stub_response(
@@ -700,7 +875,6 @@ class VLLMBackend(InferenceBackend):
         request: RerankRequest,
         runtime_context: dict[str, Any],
     ) -> dict[str, Any]:
-        """执行 rerank。"""
         documents = self._normalize_rerank_documents(request)
         if self.engine is None:
             return self._build_rerank_stub_response(

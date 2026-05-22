@@ -52,6 +52,7 @@ class CatalogModelResponse(BaseModel):
     max_replicas: int = Field(ge=1)
     capabilities: list[str] = Field(default_factory=list)
     engine_kwargs: dict[str, Any] = Field(default_factory=dict)
+    vllm: dict[str, Any] = Field(default_factory=dict)
     deployment_config: dict[str, Any] = Field(default_factory=dict)
     served_model_name: str | None = None
     require_local_artifacts: bool = True

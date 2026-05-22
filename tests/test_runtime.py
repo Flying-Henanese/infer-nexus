@@ -372,6 +372,35 @@ def test_vllm_backend_build_runtime_spec_preserves_engine_kwargs(tmp_path) -> No
     }
 
 
+def test_model_config_merges_legacy_engine_kwargs_into_backend_scoped_vllm() -> None:
+    """Legacy top-level engine kwargs should remain compatible with the new vllm block."""
+    model = ModelConfig(
+        name='qwen3-tools',
+        alias='qwen3-tools',
+        task=TaskType.CHAT,
+        model_path='Qwen/Qwen3-8B',
+        tensor_parallel_size=1,
+        cpu_per_replica=4,
+        gpu_per_replica=1,
+        min_replicas=1,
+        max_replicas=1,
+        engine_kwargs={'trust_remote_code': True},
+        vllm={
+            'engine_kwargs': {'enable_auto_tool_choice': True},
+            'request_defaults': {'temperature': 0.2, 'tool_choice': 'auto'},
+            'request_policy': {'allow_tools': True},
+        },
+    )
+
+    assert model.engine_kwargs == {
+        'trust_remote_code': True,
+        'enable_auto_tool_choice': True,
+    }
+    assert model.vllm.engine_kwargs == model.engine_kwargs
+    assert model.vllm.request_defaults == {'temperature': 0.2, 'tool_choice': 'auto'}
+    assert model.vllm.request_policy.allow_tools is True
+
+
 def test_vllm_backend_build_runtime_spec_uses_served_model_name_and_loading_config() -> None:
     """Runtime spec should preserve official-style loading metadata."""
     backend = VLLMBackend({})
@@ -394,6 +423,41 @@ def test_vllm_backend_build_runtime_spec_uses_served_model_name_and_loading_conf
     assert runtime_spec['model_path'] == 'opendatalab/MinerU2.5-2509-1.2B'
     assert runtime_spec['served_model_name'] == 'mineru-chat'
     assert runtime_spec['model_loading_config']['model_id'] == 'opendatalab/MinerU2.5-2509-1.2B'
+
+
+def test_vllm_backend_build_runtime_spec_includes_request_defaults_and_policy() -> None:
+    """Runtime spec should carry request defaults and passthrough policy for local chat handling."""
+    backend = VLLMBackend({})
+    model = ModelConfig(
+        name='qwen3-tools',
+        alias='qwen3-tools',
+        task=TaskType.CHAT,
+        model_path='Qwen/Qwen3-8B',
+        tensor_parallel_size=1,
+        cpu_per_replica=4,
+        gpu_per_replica=1,
+        min_replicas=1,
+        max_replicas=1,
+        vllm={
+            'engine_kwargs': {'enable_auto_tool_choice': True},
+            'request_defaults': {'temperature': 0.2, 'tool_choice': 'auto'},
+            'request_policy': {
+                'allow_tools': True,
+                'allow_reasoning': True,
+                'passthrough_unknown_openai_fields': False,
+            },
+        },
+    )
+
+    runtime_spec = backend.build_runtime_spec(model, 'Qwen/Qwen3-8B')
+
+    assert runtime_spec['engine_kwargs'] == {'enable_auto_tool_choice': True}
+    assert runtime_spec['request_defaults'] == {'temperature': 0.2, 'tool_choice': 'auto'}
+    assert runtime_spec['request_policy'] == {
+        'allow_tools': True,
+        'allow_reasoning': True,
+        'passthrough_unknown_openai_fields': False,
+    }
 
 
 def test_vllm_backend_startup_forwards_engine_kwargs(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -523,6 +587,34 @@ def test_vllm_backend_filters_sampling_params_by_runtime_signature() -> None:
     }
 
 
+def test_vllm_backend_sampling_params_apply_request_defaults() -> None:
+    """Per-model request defaults should seed chat sampling params without overriding explicit request fields."""
+    backend = VLLMBackend(
+        {
+            'request_defaults': {
+                'temperature': 0.2,
+                'top_p': 0.8,
+                'max_tokens': 256,
+                'top_k': 20,
+            }
+        }
+    )
+    request = ChatCompletionsRequest(
+        model='qwen3-tools',
+        messages=[{'role': 'user', 'content': 'hello'}],
+        top_p=0.95,
+    )
+
+    sampling = backend._build_sampling_params(request)
+
+    assert sampling == {
+        'temperature': 0.2,
+        'top_p': 0.95,
+        'max_tokens': 256,
+        'top_k': 20,
+    }
+
+
 def test_vllm_backend_builds_sampling_params_instance_by_retrying_unsupported_kwargs() -> None:
     """SamplingParams construction should retry after stripping unsupported kwargs from runtime errors."""
     backend = VLLMBackend({})
@@ -568,6 +660,118 @@ def test_vllm_backend_rejects_streaming_and_multimodal_messages_for_text_only_mo
 
     with pytest.raises(BackendRequestValidationError, match='does not support multimodal'):
         backend._build_chat_messages(multimodal)
+
+
+def test_vllm_backend_rejects_tool_calling_when_policy_is_disabled() -> None:
+    """Local vLLM backend should reject tool-call request fields unless explicitly enabled."""
+    backend = VLLMBackend({'request_policy': {'allow_tools': False}})
+    request = ChatCompletionsRequest(
+        model='qwen3-tools',
+        messages=[{'role': 'user', 'content': 'hello'}],
+        tools=[{'type': 'function', 'function': {'name': 'lookup', 'parameters': {'type': 'object'}}}],
+    )
+
+    with pytest.raises(BackendRequestValidationError, match='tool-calling'):
+        backend._build_chat_kwargs(request)
+
+
+def test_vllm_backend_builds_chat_kwargs_for_tools_and_reasoning() -> None:
+    """Enabled request policy should pass through tool-calling and reasoning request fields."""
+    backend = VLLMBackend(
+        {
+            'request_defaults': {
+                'tool_choice': 'auto',
+                'parallel_tool_calls': True,
+                'reasoning': {'enabled': True},
+            },
+            'request_policy': {
+                'allow_tools': True,
+                'allow_reasoning': True,
+            },
+        }
+    )
+    request = ChatCompletionsRequest(
+        model='qwen3-tools',
+        messages=[{'role': 'user', 'content': 'hello'}],
+        tools=[{'type': 'function', 'function': {'name': 'lookup', 'parameters': {'type': 'object'}}}],
+    )
+
+    chat_kwargs = backend._build_chat_kwargs(request)
+
+    assert chat_kwargs == {
+        'tools': [{'type': 'function', 'function': {'name': 'lookup', 'parameters': {'type': 'object'}}}],
+        'tool_choice': 'auto',
+        'parallel_tool_calls': True,
+        'reasoning': {'enabled': True},
+    }
+
+
+def test_vllm_backend_chat_invocation_forwards_tool_kwargs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Local engine.chat should receive tool-calling kwargs when the runtime policy enables them."""
+    captured: dict[str, object] = {}
+
+    class FakeSamplingParams:
+        def __init__(self, temperature=None, top_p=None, max_tokens=None):
+            self.temperature = temperature
+            self.top_p = top_p
+            self.max_tokens = max_tokens
+
+    class FakeLLM:
+        supported_tasks = ['generate']
+
+        def chat(self, messages, sampling_params=None, tools=None, tool_choice=None, parallel_tool_calls=None):
+            captured['messages'] = messages
+            captured['sampling_params'] = sampling_params
+            captured['tools'] = tools
+            captured['tool_choice'] = tool_choice
+            captured['parallel_tool_calls'] = parallel_tool_calls
+            return [
+                types.SimpleNamespace(
+                    prompt_token_ids=[1, 2],
+                    outputs=[
+                        types.SimpleNamespace(
+                            text='ok',
+                            finish_reason='stop',
+                            token_ids=[3],
+                        )
+                    ],
+                )
+            ]
+
+    fake_vllm = types.SimpleNamespace(SamplingParams=FakeSamplingParams)
+    monkeypatch.setitem(sys.modules, 'vllm', fake_vllm)
+
+    backend = VLLMBackend(
+        {
+            'request_defaults': {'tool_choice': 'auto', 'parallel_tool_calls': True},
+            'request_policy': {'allow_tools': True},
+        }
+    )
+    backend.engine = FakeLLM()
+    backend.engine_state = 'ready'
+    request = ChatCompletionsRequest(
+        model='qwen3-tools',
+        messages=[{'role': 'user', 'content': 'hello'}],
+        tools=[{'type': 'function', 'function': {'name': 'lookup', 'parameters': {'type': 'object'}}}],
+    )
+
+    response = asyncio.run(
+        backend.chat_completion(
+            {
+                'backend': 'vllm',
+                'request_defaults': {'tool_choice': 'auto', 'parallel_tool_calls': True},
+                'request_policy': {'allow_tools': True},
+            },
+            request,
+            {'deployment_name': 'model-qwen3-tools'},
+        )
+    )
+
+    assert captured['messages'] == [{'role': 'user', 'content': 'hello'}]
+    assert captured['tool_choice'] == 'auto'
+    assert captured['parallel_tool_calls'] is True
+    assert captured['tools'] == [{'type': 'function', 'function': {'name': 'lookup', 'parameters': {'type': 'object'}}}]
+    assert response['content'] == 'ok'
 
 
 def test_vllm_backend_normalizes_embedding_inputs_and_rejects_empty() -> None:

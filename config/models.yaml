@@ -7,9 +7,9 @@ models:
     dtype: bfloat16
     tensor_parallel_size: 1
     max_model_len: 4096
-    cpu_per_replica: 4
-    gpu_per_replica: 0.6
-    gpu_memory_utilization: 0.40
+    cpu_per_replica: 2
+    gpu_per_replica: 0.4
+    gpu_memory_utilization: 0.35
     min_replicas: 1
     max_replicas: 2
     capabilities:
@@ -18,17 +18,17 @@ models:
       - internal
       - llm
 
-  - name: Qwen3-8B
-    alias: qwen3-8b
+  - name: Qwen3-32B
+    alias: qwen3-32b
     task: chat
     backend: vllm
-    model_path: /nas_data/models/Qwen/Qwen3-8B
-    dtype: bfloat16
+    model_path: /nas_data/models/Qwen/Qwen3-32B
+    dtype: auto
     tensor_parallel_size: 1
     max_model_len: 8192
     cpu_per_replica: 4
-    gpu_per_replica: 0.6
-    gpu_memory_utilization: 0.4
+    gpu_per_replica: 0.7
+    gpu_memory_utilization: 0.75
     min_replicas: 1
     max_replicas: 2
     labels:
@@ -44,8 +44,8 @@ models:
     tensor_parallel_size: 1
     max_model_len: 8192
     cpu_per_replica: 4
-    gpu_per_replica: 0.4
-    gpu_memory_utilization: 0.4
+    gpu_per_replica: 0.35
+    gpu_memory_utilization: 0.3
     min_replicas: 1
     max_replicas: 1
     capabilities:
@@ -59,6 +59,39 @@ models:
       - ocr
       - llm
 
+  - name: qwen3-embedding-8b
+    alias: qwen3-embedding-8b
+    task: embedding
+    backend: vllm
+    model_path: /nas_data/models/Qwen/Qwen3-Embedding-8B
+    dtype: bfloat16
+    tensor_parallel_size: 1
+    max_model_len: 8192
+    cpu_per_replica: 4
+    gpu_per_replica: 0.3
+    gpu_memory_utilization: 0.3
+    min_replicas: 1
+    max_replicas: 2
+    labels:
+      - internal
+      - embedding
+
+  - name: qwen3-reranker-8b
+    alias: qwen3-rerank
+    task: rerank
+    backend: vllm
+    model_path: /nas_data/models/Qwen/Qwen3-Reranker-8B
+    dtype: bfloat16
+    tensor_parallel_size: 1
+    max_model_len: 4096
+    cpu_per_replica: 4
+    gpu_per_replica: 0.3
+    gpu_memory_utilization: 0.3
+    min_replicas: 1
+    max_replicas: 1
+    labels:
+      - internal
+      - rerank
   # - name: bge-reranker-v2-m3
   #   alias: bge-rerank
   #   task: rerank

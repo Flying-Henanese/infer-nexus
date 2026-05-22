@@ -1,80 +1,86 @@
 models:
-  - name: Qwen3-VL-8B-Instruct
-    alias: qwen3-vl-chat-8b-instruct
-    task: chat
-    backend: vllm
-    model_path: /nas_data/zhousj/qwen-vl
-    dtype: bfloat16
-    tensor_parallel_size: 1
-    max_model_len: 4096
-    cpu_per_replica: 2
-    gpu_per_replica: 0.4
-    gpu_memory_utilization: 0.35
-    min_replicas: 1
-    max_replicas: 2
-    capabilities:
-      - vision
-    labels:
-      - internal
-      - llm
+  # - name: Qwen3-VL-8B-Instruct
+  #   alias: qwen3-vl-chat-8b-instruct
+  #   task: chat
+  #   backend: vllm
+  #   model_path: /nas_data/zhousj/qwen-vl
+  #   dtype: bfloat16
+  #   tensor_parallel_size: 1
+  #   max_model_len: 4096
+  #   cpu_per_replica: 2
+  #   gpu_per_replica: 0.4
+  #   gpu_memory_utilization: 0.35
+  #   min_replicas: 1
+  #   max_replicas: 1
+  #   capabilities:
+  #     - vision
+  #   labels:
+  #     - internal
+  #     - llm
 
-  - name: Qwen3-32B
-    alias: qwen3-32b
-    task: chat
-    backend: vllm
-    model_path: /nas_data/models/Qwen/Qwen3-32B
-    dtype: auto
-    tensor_parallel_size: 1
-    max_model_len: 8192
-    cpu_per_replica: 4
-    gpu_per_replica: 0.7
-    gpu_memory_utilization: 0.75
-    min_replicas: 1
-    max_replicas: 2
-    labels:
-      - internal
-      - llm
+  # - name: Qwen3-32B
+  #   alias: qwen3-32b
+  #   task: chat
+  #   backend: vllm
+  #   model_path: /nas_data/models/Qwen/Qwen3-32B
+  #   dtype: auto
+  #   tensor_parallel_size: 1
+  #   max_model_len: 4096
+  #   cpu_per_replica: 4
+  #   gpu_per_replica: 0.9
+  #   gpu_memory_utilization: 0.9
+  #   min_replicas: 1
+  #   max_replicas: 1
+  #   vllm:
+  #     request_defaults:
+  #       chat_template_kwargs:
+  #         enable_thinking: false
+  #     request_policy:
+  #       allow_reasoning: true
+  #   labels:
+  #     - internal
+  #     - llm
       
-  - name: MinerU2.5-2509-1.2B
-    alias: mineru
-    task: chat
-    backend: vllm
-    model_path: /nas_data/zhousj/mineru
-    dtype: auto
-    tensor_parallel_size: 1
-    max_model_len: 8192
-    cpu_per_replica: 4
-    gpu_per_replica: 0.35
-    gpu_memory_utilization: 0.3
-    min_replicas: 1
-    max_replicas: 1
-    capabilities:
-      - vision
-    engine_kwargs:
-      trust_remote_code: true
-      limit_mm_per_prompt:
-        image: 10
-    labels:
-      - multimodal
-      - ocr
-      - llm
+  # - name: MinerU2.5-2509-1.2B
+  #   alias: mineru
+  #   task: chat
+  #   backend: vllm
+  #   model_path: /nas_data/zhousj/mineru
+  #   dtype: auto
+  #   tensor_parallel_size: 1
+  #   max_model_len: 8192
+  #   cpu_per_replica: 4
+  #   gpu_per_replica: 0.35
+  #   gpu_memory_utilization: 0.3
+  #   min_replicas: 1
+  #   max_replicas: 2
+  #   capabilities:
+  #     - vision
+  #   engine_kwargs:
+  #     trust_remote_code: true
+  #     limit_mm_per_prompt:
+  #       image: 10
+  #   labels:
+  #     - multimodal
+  #     - ocr
+  #     - llm
 
-  - name: qwen3-embedding-8b
-    alias: qwen3-embedding-8b
-    task: embedding
-    backend: vllm
-    model_path: /nas_data/models/Qwen/Qwen3-Embedding-8B
-    dtype: bfloat16
-    tensor_parallel_size: 1
-    max_model_len: 8192
-    cpu_per_replica: 4
-    gpu_per_replica: 0.3
-    gpu_memory_utilization: 0.3
-    min_replicas: 1
-    max_replicas: 2
-    labels:
-      - internal
-      - embedding
+  # - name: qwen3-embedding-8b
+  #   alias: qwen3-embedding-8b
+  #   task: embedding
+  #   backend: vllm
+  #   model_path: /nas_data/models/Qwen/Qwen3-Embedding-8B
+  #   dtype: bfloat16
+  #   tensor_parallel_size: 1
+  #   max_model_len: 8192
+  #   cpu_per_replica: 4
+  #   gpu_per_replica: 0.3
+  #   gpu_memory_utilization: 0.3
+  #   min_replicas: 1
+  #   max_replicas: 1
+  #   labels:
+  #     - internal
+  #     - embedding
 
   - name: qwen3-reranker-8b
     alias: qwen3-rerank
@@ -89,9 +95,19 @@ models:
     gpu_memory_utilization: 0.3
     min_replicas: 1
     max_replicas: 1
+    vllm:
+      engine_kwargs:
+        hf_overrides:
+          architectures:
+            - Qwen3ForSequenceClassification
+          classifier_from_token:
+            - "no"
+            - "yes"
+          is_original_qwen3_reranker: true
     labels:
       - internal
       - rerank
+
   # - name: bge-reranker-v2-m3
   #   alias: bge-rerank
   #   task: rerank

@@ -133,7 +133,35 @@ class OpenAIServingEngineClientCompatProxy:
         for candidate in [self._client, *self._fallback_clients]:
             method = getattr(candidate, "generate", None)
             if callable(method):
-                result = method(*args, **kwargs)
+                call_kwargs = kwargs
+                try:
+                    signature = inspect.signature(method)
+                except (TypeError, ValueError):
+                    signature = None
+
+                if signature is not None:
+                    parameters = signature.parameters
+                    accepts_var_kwargs = any(
+                        parameter.kind == inspect.Parameter.VAR_KEYWORD
+                        for parameter in parameters.values()
+                    )
+                    if not accepts_var_kwargs:
+                        allowed_names = {
+                            name
+                            for name, parameter in parameters.items()
+                            if parameter.kind
+                            in (
+                                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                                inspect.Parameter.KEYWORD_ONLY,
+                            )
+                        }
+                        call_kwargs = {
+                            key: value
+                            for key, value in kwargs.items()
+                            if key in allowed_names
+                        }
+
+                result = method(*args, **call_kwargs)
                 if hasattr(result, "__aiter__"):
                     return result
                 if inspect.isawaitable(result):

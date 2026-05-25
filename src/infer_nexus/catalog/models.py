@@ -80,12 +80,21 @@ class VLLMRequestPolicy(BaseModel):
     passthrough_unknown_openai_fields: bool = False
 
 
+class VLLMOpenAIServingConfig(BaseModel):
+    """Configuration for vLLM OpenAI-compatible serving semantics inside Ray Serve."""
+
+    enabled: bool = False
+    enable_reasoning: bool = False
+    reasoning_parser: str | None = None
+
+
 class VLLMConfig(BaseModel):
     """Backend-scoped local vLLM configuration."""
 
     engine_kwargs: dict[str, Any] = Field(default_factory=dict)
     request_defaults: dict[str, Any] = Field(default_factory=dict)
     request_policy: VLLMRequestPolicy = Field(default_factory=VLLMRequestPolicy)
+    openai_serving: VLLMOpenAIServingConfig = Field(default_factory=VLLMOpenAIServingConfig)
 
 
 class ModelConfig(BaseModel):

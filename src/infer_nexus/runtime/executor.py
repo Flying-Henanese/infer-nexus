@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass
 import inspect
 import json
@@ -13,7 +14,7 @@ from typing import Any
 from uuid import uuid4
 
 import httpx
-from starlette.responses import Response, StreamingResponse
+from starlette.responses import JSONResponse, Response, StreamingResponse
 
 from infer_nexus.catalog.models import ProxyConfig
 from infer_nexus.core.enums import BackendType
@@ -55,23 +56,45 @@ class RuntimeExecutor:
         """执行聊天请求并转换为统一响应结构。"""
         if target.backend == BackendType.VLLM_OPENAI_PROXY:
             return await self._execute_proxy_chat(target=target, request=request)
-        backend_request = request.model_copy(update={"stream": False}) if request.stream else request
+        if request.stream:
+            return await self._execute_chat_stream(target=target, request=request)
+
         # serve 模式走远程句柄；stub 模式本地实例化副本，便于本地开发与测试。
         if self.mode == "serve":
             payload = await self._invoke_handle(
                 target=target,
                 method_name="chat_completion",
-                payload=backend_request.model_dump(mode="json"),
+                payload=request.model_dump(mode="json"),
             )
         else:
             payload = await self._invoke_local_replica(
                 target=target,
                 method_name="chat_completion",
-                payload=backend_request.model_dump(mode="json"),
+                payload=request.model_dump(mode="json"),
             )
-        if request.stream:
-            return self._build_chat_stream_response(request, target, payload)
+        if self._is_openai_chat_payload(payload):
+            return JSONResponse(content=self._strip_internal_status(payload))
         return self._build_chat_response_from_payload(request, target, payload)
+
+    async def _execute_chat_stream(
+        self,
+        *,
+        target: RuntimeTarget,
+        request: ChatCompletionsRequest,
+    ) -> StreamingResponse:
+        if self.mode == "serve":
+            chunks = await self._invoke_handle_stream(
+                target=target,
+                method_name="chat_completion_stream",
+                payload=request.model_dump(mode="json"),
+            )
+        else:
+            chunks = await self._invoke_local_replica_stream(
+                target=target,
+                method_name="chat_completion_stream",
+                payload=request.model_dump(mode="json"),
+            )
+        return self._build_chat_stream_response(request, target, chunks)
 
     async def execute_embedding(
         self,
@@ -131,6 +154,18 @@ class RuntimeExecutor:
         replica = ModelRuntimeReplica(target.runtime_context)
         method = getattr(replica, method_name)
         return await method(payload)
+
+    async def _invoke_local_replica_stream(
+        self,
+        *,
+        target: RuntimeTarget,
+        method_name: str,
+        payload: dict[str, Any],
+    ) -> AsyncIterator[dict[str, Any] | bytes | str]:
+        """在本地进程内调用副本 streaming 方法（stub/dev 路径）。"""
+        replica = ModelRuntimeReplica(target.runtime_context)
+        method = getattr(replica, method_name)
+        return self._normalize_stream_result(method(payload))
 
     async def _invoke_handle(
         self,
@@ -193,6 +228,66 @@ class RuntimeExecutor:
                 code=code,
             ) from exc
 
+    async def _invoke_handle_stream(
+        self,
+        *,
+        target: RuntimeTarget,
+        method_name: str,
+        payload: dict[str, Any],
+    ) -> AsyncIterator[dict[str, Any] | bytes | str]:
+        """通过 Ray Serve deployment handle 调用远程 streaming 副本方法。"""
+        if self.handle_resolver is None:
+            raise RuntimeNotConnectedError(
+                f"Runtime executor is configured for serve mode but no handle resolver is available "
+                f"for deployment '{target.deployment_name}'."
+            )
+
+        try:
+            if not target.app_name:
+                raise RuntimeNotConnectedError(
+                    f"Runtime target for deployment '{target.deployment_name}' does not define a Serve app name.",
+                    code="backend_misconfigured",
+                )
+            handle = self.handle_resolver.get_handle(
+                target.deployment_name,
+                app_name=target.app_name,
+            )
+        except RuntimeNotConnectedError:
+            raise
+        except Exception as exc:
+            raise RuntimeNotConnectedError(
+                f"Failed to resolve Serve handle for deployment '{target.deployment_name}': {exc}"
+            ) from exc
+
+        remote_method = getattr(handle, method_name, None)
+        if remote_method is None or not hasattr(remote_method, "remote"):
+            raise RuntimeNotConnectedError(
+                f"Serve handle for deployment '{target.deployment_name}' does not expose "
+                f"'{method_name}.remote(...)'."
+            )
+
+        try:
+            response = remote_method.remote(payload)
+            return self._normalize_stream_result(response)
+        except RuntimeNotConnectedError:
+            raise
+        except Exception as exc:
+            code = self._extract_execution_error_code(exc)
+            message = self._extract_execution_error_message(exc)
+            logger.exception(
+                "Serve streaming execution failed for deployment '%s' in app '%s' method '%s'.",
+                target.deployment_name,
+                target.app_name,
+                method_name,
+            )
+            if code in {"unsupported_parameter", "unsupported_message_content", "invalid_input"}:
+                raise RuntimeExecutionError(message, code=code) from exc
+            raise RuntimeExecutionError(
+                f"Serve streaming execution failed for deployment '{target.deployment_name}' "
+                f"in app '{target.app_name}' method '{method_name}': {message}",
+                code=code,
+            ) from exc
+
     async def _await_handle_response(self, response: Any) -> Any:
         """Normalize different Ray/Serve return shapes into awaited payload."""
         if inspect.isawaitable(response):
@@ -200,6 +295,32 @@ class RuntimeExecutor:
         if hasattr(response, "result"):
             return response.result()
         return response
+
+    async def _normalize_stream_result(self, response: Any) -> AsyncIterator[dict[str, Any] | bytes | str]:
+        """Normalize local, fake, and Serve streaming return shapes into an async iterator."""
+        if inspect.isawaitable(response):
+            response = await response
+        if hasattr(response, "result") and not hasattr(response, "__aiter__"):
+            response = response.result()
+
+        if hasattr(response, "__aiter__"):
+            async for chunk in response:
+                yield chunk
+            return
+
+        if isinstance(response, (bytes, str, dict)):
+            yield response
+            return
+
+        if isinstance(response, Iterable):
+            for chunk in response:
+                yield chunk
+            return
+
+        raise RuntimeExecutionError(
+            f"Streaming method returned unsupported payload type '{type(response).__name__}'.",
+            code="runtime_execution_failed",
+        )
 
     def _parse_proxy_config(self, target: RuntimeTarget) -> ProxyConfig:
         raw = target.runtime_context.get("proxy_config") or {}
@@ -303,7 +424,7 @@ class RuntimeExecutor:
         request_id = uuid4().hex
         payload = self._proxy_payload(
             model_name=request.model,
-            payload=request.model_dump(mode="json"),
+            payload=request.model_dump(mode="json", exclude_none=True),
             proxy_config=proxy_config,
         )
         if request.stream:
@@ -427,7 +548,7 @@ class RuntimeExecutor:
             path="/embeddings",
             payload=self._proxy_payload(
                 model_name=request.model,
-                payload=request.model_dump(mode="json"),
+                payload=request.model_dump(mode="json", exclude_none=True),
                 proxy_config=proxy_config,
             ),
             request_id=request_id,
@@ -447,7 +568,7 @@ class RuntimeExecutor:
             path="/rerank",
             payload=self._proxy_payload(
                 model_name=request.model,
-                payload=request.model_dump(mode="json"),
+                payload=request.model_dump(mode="json", exclude_none=True),
                 proxy_config=proxy_config,
             ),
             request_id=request_id,
@@ -479,6 +600,8 @@ class RuntimeExecutor:
                             f"serve chat response from deployment '{target.deployment_name}' "
                             f"for model '{target.model_name}'",
                         ),
+                        reasoning_content=payload.get("reasoning_content"),
+                        reasoning=payload.get("reasoning"),
                     ),
                     finish_reason=payload.get("finish_reason", 'stop'),
                 )
@@ -495,12 +618,34 @@ class RuntimeExecutor:
             ),
         )
 
+    def _is_openai_chat_payload(self, payload: dict[str, Any]) -> bool:
+        return payload.get("object") == "chat.completion" and isinstance(payload.get("choices"), list)
+
+    def _strip_internal_status(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload.get("status") != "ok":
+            return dict(payload)
+        return {key: value for key, value in payload.items() if key != "status"}
+
+    def _encode_sse_chunk(self, chunk_payload: dict[str, Any]) -> bytes:
+        return f"data: {json.dumps(chunk_payload, ensure_ascii=False)}\n\n".encode("utf-8")
+
+    def _is_done_sse_chunk(self, chunk: bytes | str) -> bool:
+        if isinstance(chunk, bytes):
+            text = chunk.decode("utf-8", errors="ignore")
+        else:
+            text = chunk
+        return "data: [DONE]" in text
+
     def _build_chat_stream_response(
         self,
         request: ChatCompletionsRequest,
         target: RuntimeTarget,
-        payload: dict[str, Any],
+        chunks: dict[str, Any] | AsyncIterator[dict[str, Any] | bytes | str],
     ) -> StreamingResponse:
+        if not isinstance(chunks, dict):
+            return self._build_passthrough_stream_response(chunks)
+
+        payload = chunks
         created = payload.get("created", int(time()))
         response_id = payload.get("id", f"chatcmpl-{uuid4().hex}")
         model = payload.get(
@@ -515,10 +660,23 @@ class RuntimeExecutor:
         finish_reason = payload.get("finish_reason", "stop")
         request_id = uuid4().hex
 
-        def chunk_bytes(chunk_payload: dict[str, Any]) -> bytes:
-            return f"data: {json.dumps(chunk_payload, ensure_ascii=False)}\n\n".encode("utf-8")
-
         async def iterator() -> Any:
+            stream_chunks = payload.get("stream_chunks")
+            if isinstance(stream_chunks, list):
+                saw_done = False
+                for stream_chunk in stream_chunks:
+                    if isinstance(stream_chunk, bytes):
+                        saw_done = saw_done or self._is_done_sse_chunk(stream_chunk)
+                        yield stream_chunk
+                    elif isinstance(stream_chunk, str):
+                        saw_done = saw_done or self._is_done_sse_chunk(stream_chunk)
+                        yield stream_chunk.encode("utf-8")
+                    elif isinstance(stream_chunk, dict):
+                        yield self._encode_sse_chunk(stream_chunk)
+                if not saw_done:
+                    yield b"data: [DONE]\n\n"
+                return
+
             first_chunk = {
                 "id": response_id,
                 "object": "chat.completion.chunk",
@@ -535,7 +693,7 @@ class RuntimeExecutor:
                     }
                 ],
             }
-            yield chunk_bytes(first_chunk)
+            yield self._encode_sse_chunk(first_chunk)
 
             final_chunk = {
                 "id": response_id,
@@ -550,8 +708,34 @@ class RuntimeExecutor:
                     }
                 ],
             }
-            yield chunk_bytes(final_chunk)
+            yield self._encode_sse_chunk(final_chunk)
             yield b"data: [DONE]\n\n"
+
+        return StreamingResponse(
+            iterator(),
+            media_type="text/event-stream",
+            headers={"X-Infer-Nexus-Request-ID": request_id},
+        )
+
+    def _build_passthrough_stream_response(
+        self,
+        chunks: AsyncIterator[dict[str, Any] | bytes | str],
+    ) -> StreamingResponse:
+        request_id = uuid4().hex
+
+        async def iterator() -> Any:
+            saw_done = False
+            async for chunk in chunks:
+                if isinstance(chunk, bytes):
+                    saw_done = saw_done or self._is_done_sse_chunk(chunk)
+                    yield chunk
+                elif isinstance(chunk, str):
+                    saw_done = saw_done or self._is_done_sse_chunk(chunk)
+                    yield chunk.encode("utf-8")
+                elif isinstance(chunk, dict):
+                    yield self._encode_sse_chunk(chunk)
+            if not saw_done:
+                yield b"data: [DONE]\n\n"
 
         return StreamingResponse(
             iterator(),

@@ -121,10 +121,16 @@ ChatContentPart: TypeAlias = Annotated[
 class ChatMessage(BaseModel):
     """Chat message unit used in OpenAI-compatible chat APIs."""
 
+    model_config = ConfigDict(extra="allow")
+
     role: Literal["system", "user", "assistant", "tool"]
-    content: str | list[ChatContentPart]
+    content: str | list[ChatContentPart] | None = None
+    reasoning_content: str | None = None
+    reasoning: str | None = None
     name: str | None = None
     tool_call_id: str | None = None
+    tool_calls: list[dict[str, Any]] | None = None
+    function_call: dict[str, Any] | None = None
 
 
 class ChatCompletionsRequest(BaseModel):
@@ -150,6 +156,9 @@ class ChatCompletionsRequest(BaseModel):
     extra_body: dict[str, Any] | None = None
     user: str | None = None
     max_tokens: int | None = Field(default=None, ge=1)
+    max_completion_tokens: int | None = Field(default=None, ge=1)
+    parallel_tool_calls: bool | None = None
+    stream_options: dict[str, Any] | None = None
     stream: bool = False
 
 

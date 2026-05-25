@@ -3,17 +3,101 @@
 from __future__ import annotations
 
 import base64
+import importlib
 import inspect
 import re
 import struct
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from time import time
-from typing import Any
+from typing import Any, Protocol
 from uuid import uuid4
 
 from infer_nexus.backends.base import InferenceBackend
 from infer_nexus.catalog.models import ModelConfig
 from infer_nexus.core.errors import BackendConfigurationError, BackendRequestValidationError
 from infer_nexus.core.schemas import ChatCompletionsRequest, EmbeddingRequest, RerankRequest
+
+
+class OpenAIChatServingAdapter(Protocol):
+    """Backend-local contract for vLLM OpenAI serving passthrough."""
+
+    async def chat_completion(self, request_payload: dict[str, Any]) -> dict[str, Any]:
+        """Return a full OpenAI-compatible chat completion payload."""
+
+    async def chat_completion_stream(
+        self,
+        request_payload: dict[str, Any],
+    ) -> AsyncIterator[dict[str, Any] | bytes | str]:
+        """Yield OpenAI-compatible chat completion chunks."""
+
+
+@dataclass(frozen=True)
+class ResolvedOpenAIServingImports:
+    """Resolved vLLM serving imports for one supported internal layout."""
+
+    chat_request_cls: type[Any]
+    serving_chat_cls: type[Any]
+    serving_models_cls: type[Any]
+    base_model_path_cls: type[Any]
+    serving_render_cls: type[Any] | None = None
+
+
+class DynamicVLLMOpenAIChatServingAdapter:
+    """Wrap native vLLM serving objects behind the local adapter contract."""
+
+    def __init__(
+        self,
+        *,
+        chat_request_cls: type[Any],
+        serving_chat: Any,
+    ) -> None:
+        self.chat_request_cls = chat_request_cls
+        self.serving_chat = serving_chat
+
+    def _build_request(self, request_payload: dict[str, Any]) -> Any:
+        if hasattr(self.chat_request_cls, "model_validate"):
+            return self.chat_request_cls.model_validate(request_payload)
+        return self.chat_request_cls(**request_payload)
+
+    def _normalize_payload(self, payload: Any) -> dict[str, Any] | bytes | str:
+        if isinstance(payload, dict | bytes | str):
+            return payload
+        if hasattr(payload, "model_dump"):
+            return payload.model_dump(mode="json", exclude_none=True)
+        return payload
+
+    async def chat_completion(self, request_payload: dict[str, Any]) -> dict[str, Any]:
+        request = self._build_request(request_payload)
+        result = self.serving_chat.create_chat_completion(request, raw_request=None)
+        if inspect.isawaitable(result):
+            result = await result
+        if hasattr(result, "__aiter__"):
+            raise RuntimeError(
+                "vLLM OpenAI serving returned a stream for a non-streaming chat request."
+            )
+        normalized = self._normalize_payload(result)
+        if not isinstance(normalized, dict):
+            raise RuntimeError(
+                "vLLM OpenAI serving returned an unexpected non-streaming chat payload type."
+            )
+        return normalized
+
+    async def chat_completion_stream(
+        self,
+        request_payload: dict[str, Any],
+    ) -> AsyncIterator[dict[str, Any] | bytes | str]:
+        request = self._build_request(request_payload)
+        result = self.serving_chat.create_chat_completion(request, raw_request=None)
+        if inspect.isawaitable(result):
+            result = await result
+
+        if hasattr(result, "__aiter__"):
+            async for chunk in result:
+                yield self._normalize_payload(chunk)
+            return
+
+        yield self._normalize_payload(result)
 
 
 class VLLMBackend(InferenceBackend):
@@ -64,6 +148,8 @@ class VLLMBackend(InferenceBackend):
     def __init__(self, runtime_spec: dict[str, Any]) -> None:
         self.runtime_spec = runtime_spec
         self.engine: Any | None = None
+        self.openai_serving_chat_adapter: OpenAIChatServingAdapter | None = None
+        self.openai_serving_adapter_init_error: str | None = None
         self.engine_state: str = "created"
 
     def validate_runtime_spec(self, runtime_spec: dict[str, Any], runtime_context: dict[str, Any]) -> None:
@@ -89,6 +175,8 @@ class VLLMBackend(InferenceBackend):
         init_mode = self.runtime_spec.get("backend_init_mode", "stub")
         if init_mode != "real":
             self.engine = None
+            self.openai_serving_chat_adapter = None
+            self.openai_serving_adapter_init_error = None
             self.engine_state = "stub"
             return
 
@@ -149,10 +237,13 @@ class VLLMBackend(InferenceBackend):
                 f"Loaded vLLM model does not support requested task_mode '{requested_mode}'. "
                 f"Supported tasks: {sorted(supported_tasks)}."
             )
+        self.openai_serving_chat_adapter = self._initialize_openai_serving_chat_adapter()
         self.engine_state = "ready"
 
     def shutdown(self) -> None:
         self.engine = None
+        self.openai_serving_chat_adapter = None
+        self.openai_serving_adapter_init_error = None
         self.engine_state = "stopped"
 
     def build_runtime_spec(self, model: ModelConfig, resolved_model_reference: str) -> dict[str, Any]:
@@ -161,6 +252,13 @@ class VLLMBackend(InferenceBackend):
             raise BackendConfigurationError(
                 f"vLLM backend does not support model task '{model.task.value}' for model '{model.name}'."
             )
+        openai_serving_config = model.vllm.openai_serving.model_dump(mode="json")
+        engine_kwargs = dict(model.vllm.engine_kwargs)
+        if openai_serving_config.get("enabled"):
+            if openai_serving_config.get("reasoning_parser"):
+                engine_kwargs.setdefault("reasoning_parser", openai_serving_config["reasoning_parser"])
+            if openai_serving_config.get("enable_reasoning"):
+                engine_kwargs.setdefault("enable_reasoning", True)
 
         return {
             "backend": "vllm",
@@ -173,9 +271,10 @@ class VLLMBackend(InferenceBackend):
             "cpu_per_replica": model.cpu_per_replica,
             "task_mode": task_mode,
             "capabilities": list(model.capabilities),
-            "engine_kwargs": dict(model.vllm.engine_kwargs),
+            "engine_kwargs": engine_kwargs,
             "request_defaults": dict(model.vllm.request_defaults),
             "request_policy": model.vllm.request_policy.model_dump(mode="json"),
+            "openai_serving": openai_serving_config,
             "model_loading_config": model.model_loading_config.model_dump(mode="json"),
             "served_model_name": model.served_model_name or model.alias or model.name,
         }
@@ -390,6 +489,7 @@ class VLLMBackend(InferenceBackend):
         max_tokens = (
             request.max_tokens
             or merged.pop("max_tokens", None)
+            or request.max_completion_tokens
             or merged.get("max_completion_tokens")
             or 512
         )
@@ -473,6 +573,8 @@ class VLLMBackend(InferenceBackend):
             chat_kwargs["response_format"] = request.response_format
 
         if allow_tools:
+            if request.parallel_tool_calls is not None:
+                chat_kwargs["parallel_tool_calls"] = request.parallel_tool_calls
             for key in self.TOOL_REQUEST_KEYS:
                 value = merged.get(key)
                 if value is not None:
@@ -720,12 +822,6 @@ class VLLMBackend(InferenceBackend):
         *,
         runtime_context: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
-        if request.stream:
-            raise BackendRequestValidationError(
-                "Streaming chat completions are not supported in Phase 1.",
-                code="unsupported_parameter",
-            )
-
         allow_multimodal = self._supports_multimodal(runtime_context)
         messages: list[dict[str, Any]] = []
         for message in request.messages:
@@ -740,8 +836,308 @@ class VLLMBackend(InferenceBackend):
                 payload["name"] = message.name
             if message.tool_call_id:
                 payload["tool_call_id"] = message.tool_call_id
+            if message.tool_calls is not None:
+                payload["tool_calls"] = message.tool_calls
+            if message.function_call is not None:
+                payload["function_call"] = message.function_call
             messages.append(payload)
         return messages
+
+    def _should_use_openai_serving_adapter(
+        self,
+        runtime_spec: dict[str, Any] | None = None,
+    ) -> bool:
+        spec = runtime_spec or self.runtime_spec
+        openai_serving = spec.get("openai_serving") or {}
+        return spec.get("task_mode") == "generate" and bool(openai_serving.get("enabled"))
+
+    def _import_vllm_symbol(self, module_path: str, symbol_name: str) -> Any:
+        module = importlib.import_module(module_path)
+        return getattr(module, symbol_name)
+
+    def _resolve_openai_serving_imports(self) -> ResolvedOpenAIServingImports:
+        candidates = [
+            {
+                "chat_request": (
+                    "vllm.entrypoints.openai.chat_completion.protocol",
+                    "ChatCompletionRequest",
+                ),
+                "serving_chat": (
+                    "vllm.entrypoints.openai.chat_completion.serving",
+                    "OpenAIServingChat",
+                ),
+                "serving_models": (
+                    "vllm.entrypoints.openai.models.serving",
+                    "OpenAIServingModels",
+                ),
+                "base_model_path": (
+                    "vllm.entrypoints.openai.models.protocol",
+                    "BaseModelPath",
+                ),
+                "serving_render": (
+                    "vllm.entrypoints.serve.render.serving",
+                    "OpenAIServingRender",
+                ),
+            },
+            {
+                "chat_request": ("vllm.entrypoints.openai.protocol", "ChatCompletionRequest"),
+                "serving_chat": ("vllm.entrypoints.openai.serving_chat", "OpenAIServingChat"),
+                "serving_models": ("vllm.entrypoints.openai.serving_models", "OpenAIServingModels"),
+                "base_model_path": ("vllm.entrypoints.openai.serving_models", "BaseModelPath"),
+                "serving_render": None,
+            },
+        ]
+
+        last_error: Exception | None = None
+        for candidate in candidates:
+            try:
+                serving_render_cls = None
+                if candidate["serving_render"] is not None:
+                    serving_render_cls = self._import_vllm_symbol(*candidate["serving_render"])
+                return ResolvedOpenAIServingImports(
+                    chat_request_cls=self._import_vllm_symbol(*candidate["chat_request"]),
+                    serving_chat_cls=self._import_vllm_symbol(*candidate["serving_chat"]),
+                    serving_models_cls=self._import_vllm_symbol(*candidate["serving_models"]),
+                    base_model_path_cls=self._import_vllm_symbol(*candidate["base_model_path"]),
+                    serving_render_cls=serving_render_cls,
+                )
+            except (ImportError, AttributeError) as exc:
+                last_error = exc
+
+        if last_error is None:
+            raise ImportError("No supported vLLM OpenAI serving import layout was found.")
+        raise ImportError(
+            f"Unable to resolve supported vLLM OpenAI serving imports: {last_error}"
+        ) from last_error
+
+    def _resolve_openai_serving_engine_client(self) -> Any | None:
+        candidates = [
+            getattr(self.engine, "engine_client", None),
+            getattr(self.engine, "async_engine_client", None),
+            getattr(self.engine, "llm_engine", None),
+            getattr(self.engine, "engine", None),
+            getattr(self.engine, "_engine", None),
+            self.engine,
+        ]
+        for candidate in candidates:
+            if candidate is not None:
+                return candidate
+        return None
+
+    def _build_openai_serving_base_model_path(self, base_model_path_cls: type[Any]) -> Any:
+        served_model_name = (
+            self.runtime_spec.get("served_model_name")
+            or self.runtime_spec.get("model_name")
+            or self.runtime_spec.get("model_path")
+        )
+        model_path = self.runtime_spec["model_path"]
+        kwargs: dict[str, Any] = {}
+        try:
+            signature = inspect.signature(base_model_path_cls)
+        except (TypeError, ValueError):
+            signature = None
+
+        if signature is None:
+            return base_model_path_cls(name=served_model_name, model_path=model_path)
+
+        for parameter_name in signature.parameters:
+            if parameter_name == "self":
+                continue
+            if parameter_name == "name":
+                kwargs[parameter_name] = served_model_name
+            elif parameter_name in {"model_path", "path", "root"}:
+                kwargs[parameter_name] = model_path
+
+        return base_model_path_cls(**kwargs)
+
+    def _build_openai_serving_models(
+        self,
+        *,
+        serving_models_cls: type[Any],
+        base_model_path_cls: type[Any],
+        engine_client: Any,
+    ) -> Any:
+        return serving_models_cls(
+            engine_client,
+            [self._build_openai_serving_base_model_path(base_model_path_cls)],
+        )
+
+    def _build_openai_serving_render(
+        self,
+        *,
+        serving_render_cls: type[Any],
+        engine_client: Any,
+        serving_models: Any,
+    ) -> Any:
+        model_registry = getattr(serving_models, "registry", None)
+        if model_registry is None:
+            raise RuntimeError("OpenAIServingModels did not expose a model registry.")
+
+        return serving_render_cls(
+            model_config=getattr(engine_client, "model_config"),
+            renderer=getattr(engine_client, "renderer"),
+            io_processor=getattr(engine_client, "io_processor"),
+            model_registry=model_registry,
+            request_logger=None,
+            chat_template=None,
+            chat_template_content_format="auto",
+            trust_request_chat_template=False,
+            default_chat_template_kwargs=self._request_defaults().get("chat_template_kwargs"),
+        )
+
+    def _build_openai_serving_chat(
+        self,
+        *,
+        serving_chat_cls: type[Any],
+        engine_client: Any,
+        serving_models: Any,
+        serving_render: Any | None,
+    ) -> Any:
+        openai_serving_config = self.runtime_spec.get("openai_serving") or {}
+        init_signature = inspect.signature(serving_chat_cls)
+        parameters = init_signature.parameters
+        kwargs: dict[str, Any] = {}
+        args: list[Any] = []
+
+        if "engine_client" in parameters:
+            args.append(engine_client)
+        if "model_config" in parameters:
+            args.append(getattr(engine_client, "model_config"))
+        if "models" in parameters:
+            args.append(serving_models)
+        if "response_role" in parameters:
+            args.append("assistant")
+
+        optional_kwargs = {
+            "openai_serving_render": serving_render,
+            "request_logger": None,
+            "chat_template": None,
+            "chat_template_content_format": "auto",
+            "trust_request_chat_template": False,
+            "return_tokens_as_token_ids": False,
+            "reasoning_parser": openai_serving_config.get("reasoning_parser") or "",
+            "default_chat_template_kwargs": self._request_defaults().get("chat_template_kwargs"),
+        }
+        for key, value in optional_kwargs.items():
+            if key in parameters:
+                kwargs[key] = value
+
+        return serving_chat_cls(*args, **kwargs)
+
+    def _initialize_openai_serving_chat_adapter(self) -> OpenAIChatServingAdapter | None:
+        if not self._should_use_openai_serving_adapter():
+            self.openai_serving_adapter_init_error = None
+            return None
+        if self.engine is None:
+            self.openai_serving_adapter_init_error = (
+                "vLLM engine is not initialized, so OpenAI serving cannot be constructed."
+            )
+            return None
+
+        try:
+            imports = self._resolve_openai_serving_imports()
+            engine_client = self._resolve_openai_serving_engine_client()
+            if engine_client is None:
+                raise RuntimeError("No compatible engine client was found on the initialized vLLM engine.")
+            serving_models = self._build_openai_serving_models(
+                serving_models_cls=imports.serving_models_cls,
+                base_model_path_cls=imports.base_model_path_cls,
+                engine_client=engine_client,
+            )
+            serving_render = None
+            if imports.serving_render_cls is not None:
+                serving_render = self._build_openai_serving_render(
+                    serving_render_cls=imports.serving_render_cls,
+                    engine_client=engine_client,
+                    serving_models=serving_models,
+                )
+            serving_chat = self._build_openai_serving_chat(
+                serving_chat_cls=imports.serving_chat_cls,
+                engine_client=engine_client,
+                serving_models=serving_models,
+                serving_render=serving_render,
+            )
+        except Exception as exc:
+            self.openai_serving_adapter_init_error = str(exc)
+            return None
+
+        self.openai_serving_adapter_init_error = None
+        return DynamicVLLMOpenAIChatServingAdapter(
+            chat_request_cls=imports.chat_request_cls,
+            serving_chat=serving_chat,
+        )
+
+    def _build_openai_serving_request_payload(
+        self,
+        request: ChatCompletionsRequest,
+        *,
+        runtime_spec: dict[str, Any],
+        runtime_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        payload = request.model_dump(
+            mode="json",
+            exclude_none=True,
+            exclude={"extra_body", "messages"},
+        )
+
+        serialized_messages: list[dict[str, Any]] = []
+        allow_multimodal = self._supports_multimodal(runtime_context)
+        for message in request.messages:
+            serialized = message.model_dump(mode="json", exclude_none=True)
+            if message.content is None:
+                serialized["content"] = None
+            else:
+                serialized["content"] = self._serialize_message_content(
+                    message.content,
+                    allow_multimodal=allow_multimodal,
+                )
+            serialized_messages.append(serialized)
+
+        payload["messages"] = serialized_messages
+        payload["model"] = (
+            runtime_context.get("served_model_name")
+            or runtime_spec.get("served_model_name")
+            or request.model
+        )
+        payload.update(request.extra_body or {})
+        return payload
+
+    async def _call_openai_serving_chat_completion(
+        self,
+        request_payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        adapter = self.openai_serving_chat_adapter
+        if adapter is None:
+            raise RuntimeError("vLLM OpenAI serving adapter is not initialized")
+
+        result = adapter.chat_completion(request_payload)
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+
+    async def _iter_openai_serving_stream(
+        self,
+        request_payload: dict[str, Any],
+    ) -> AsyncIterator[dict[str, Any] | bytes | str]:
+        adapter = self.openai_serving_chat_adapter
+        if adapter is None:
+            raise RuntimeError("vLLM OpenAI serving adapter is not initialized")
+
+        stream = adapter.chat_completion_stream(request_payload)
+        if inspect.isawaitable(stream):
+            stream = await stream
+
+        if hasattr(stream, "__aiter__"):
+            async for chunk in stream:
+                yield chunk
+            return
+
+        if isinstance(stream, bytes | str | dict):
+            yield stream
+            return
+
+        for chunk in stream:
+            yield chunk
 
     def _build_chat_stub_response(
         self,
@@ -780,6 +1176,56 @@ class VLLMBackend(InferenceBackend):
                 "chat_kwargs": chat_kwargs,
             },
         }
+
+    def _build_chat_stub_stream_chunks(
+        self,
+        request: ChatCompletionsRequest,
+        runtime_spec: dict[str, Any],
+        runtime_context: dict[str, Any],
+        sampling_params: dict[str, Any],
+        chat_kwargs: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        response = self._build_chat_stub_response(
+            request,
+            runtime_spec,
+            runtime_context,
+            sampling_params,
+            chat_kwargs,
+        )
+        created = response["created"]
+        response_id = response["id"]
+        model = response["model"]
+        return [
+            {
+                "id": response_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "content": response["content"],
+                        },
+                        "finish_reason": None,
+                    }
+                ],
+            },
+            {
+                "id": response_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": response["finish_reason"],
+                    }
+                ],
+            },
+        ]
 
     def _convert_chat_result(
         self,
@@ -827,6 +1273,14 @@ class VLLMBackend(InferenceBackend):
         request: ChatCompletionsRequest,
         runtime_context: dict[str, Any],
     ) -> dict[str, Any]:
+        if self.openai_serving_chat_adapter is not None:
+            request_payload = self._build_openai_serving_request_payload(
+                request,
+                runtime_spec=runtime_spec,
+                runtime_context=runtime_context,
+            )
+            return await self._call_openai_serving_chat_completion(request_payload)
+
         messages = self._build_chat_messages(request, runtime_context=runtime_context)
         sampling_params = self._build_sampling_params(request, runtime_spec=runtime_spec)
         chat_kwargs = self._build_chat_kwargs(request, runtime_spec=runtime_spec)
@@ -852,6 +1306,44 @@ class VLLMBackend(InferenceBackend):
             sampling_params=sampling_params,
             chat_kwargs=chat_kwargs,
         )
+
+    async def chat_completion_stream(
+        self,
+        runtime_spec: dict[str, Any],
+        request: ChatCompletionsRequest,
+        runtime_context: dict[str, Any],
+    ) -> AsyncIterator[dict[str, Any] | bytes | str]:
+        if self.openai_serving_chat_adapter is not None:
+            request_payload = self._build_openai_serving_request_payload(
+                request,
+                runtime_spec=runtime_spec,
+                runtime_context=runtime_context,
+            )
+            async for chunk in self._iter_openai_serving_stream(request_payload):
+                yield chunk
+            return
+
+        messages = self._build_chat_messages(request, runtime_context=runtime_context)
+        sampling_params = self._build_sampling_params(request, runtime_spec=runtime_spec)
+        chat_kwargs = self._build_chat_kwargs(request, runtime_spec=runtime_spec)
+        if self.engine is None:
+            for chunk in self._build_chat_stub_stream_chunks(
+                request,
+                runtime_spec,
+                runtime_context,
+                sampling_params,
+                chat_kwargs,
+            ):
+                yield chunk
+            return
+
+        message = (
+            "Streaming chat completions require the vLLM OpenAI serving adapter, "
+            "which is not initialized yet."
+        )
+        if self.openai_serving_adapter_init_error:
+            message = f"{message} Initialization error: {self.openai_serving_adapter_init_error}"
+        raise BackendRequestValidationError(message, code="backend_misconfigured")
 
     async def embedding(
         self,

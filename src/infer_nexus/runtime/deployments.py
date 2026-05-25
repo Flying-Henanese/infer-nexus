@@ -1,5 +1,6 @@
 """Ray Serve deployment building blocks and per-model deployment specs."""
 
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -60,7 +61,26 @@ class ModelRuntimeReplica:
             )
         except BackendRequestValidationError as exc:
             raise RuntimeExecutionError(str(exc), code=exc.code) from exc
+        if self._is_openai_chat_response(response):
+            return response
         return {"status": "ok", **response}
+
+    async def chat_completion_stream(self, payload: dict[str, Any]) -> AsyncIterator[dict[str, Any] | bytes | str]:
+        """处理 streaming chat completion 负载。"""
+        request = ChatCompletionsRequest.model_validate(payload)
+        try:
+            async for chunk in self.backend.chat_completion_stream(
+                self.runtime_context["runtime_spec"],
+                request,
+                self.runtime_context,
+            ):
+                yield chunk
+        except BackendRequestValidationError as exc:
+            raise RuntimeExecutionError(str(exc), code=exc.code) from exc
+
+    def _is_openai_chat_response(self, payload: dict[str, Any]) -> bool:
+        """Detect full OpenAI chat responses that should pass through unchanged."""
+        return payload.get("object") == "chat.completion" and isinstance(payload.get("choices"), list)
 
     async def embedding(self, payload: dict[str, Any]) -> dict[str, Any]:
         """处理 embedding 负载。"""

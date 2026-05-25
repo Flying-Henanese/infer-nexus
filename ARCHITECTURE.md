@@ -320,6 +320,23 @@ Implementation notes:
 - Keep backend abstraction thin to avoid hard-coupling gateway logic to one runtime.
 - For compatibility-sensitive multimodal models, prefer `vllm_openai_proxy`.
 - Keep local `LLM.chat()` path as fallback, not universal default.
+- The local `vllm` backend now has a replica-local OpenAI-serving integration
+  path under active development. When enabled, the backend attempts to use
+  vLLM's OpenAI serving internals for chat payload passthrough and streaming
+  instead of rebuilding everything from `LLM.chat()`.
+- A Ray Serve LLM based option was considered: `from ray.serve.llm import
+  LLMConfig, build_openai_app`. This could provide a more native Ray Serve
+  wrapper around vLLM's OpenAI-compatible behavior. However, the API is still
+  treated as beta-stage surface area, and the generated OpenAI application
+  overlaps with the existing `infer-nexus` gateway responsibilities such as
+  authentication, catalog resolution, alias rewriting, admission control, and
+  platform-native APIs.
+- If adopted later, Ray Serve LLM should be integrated behind the gateway as an
+  internal upstream or backend implementation, not as a replacement for the
+  gateway. The gateway may rewrite the client-facing `model` field and forward
+  OpenAI-compatible requests to a Ray Serve LLM application, preserving the
+  current control-plane boundary while delegating vLLM protocol fidelity to Ray
+  Serve LLM.
 - Header forwarding policy should remain explicit and model-scoped.
 - If `forward_authorization` is enabled for a proxy model, the gateway should forward the inbound client `Authorization` header to the configured upstream service (`待实现`).
 - If proxy auth is also configured through static or environment-derived bearer tokens, precedence rules must be defined explicitly before enabling `forward_authorization` (`待实现`).
@@ -360,10 +377,10 @@ Required in Phase 1:
 - `GET /v1/models`
 - `POST /v1/chat/completions`
 - `POST /v1/embeddings`
+- `POST /v1/rerank`
 
 Recommended later:
 - `POST /v1/responses`
-- `POST /v1/rerank` or a clearly documented internal-compatible rerank endpoint
 
 ### Behavior expectations
 - The `model` field is resolved through the catalog
@@ -373,7 +390,9 @@ Recommended later:
 - For proxy-backed models, upstream status code, body, and content type should be preserved where the failure occurs upstream rather than in the gateway
 - Proxy-backed embeddings and rerank requests are supported by the current implementation even though the original proxy rollout was described as chat-first
 - Streaming support for chat completions should be considered part of the design, even if implemented after the first non-streaming version
-  - local `vllm` path streaming: `待实现`
+  - local `vllm` path streaming plumbing exists end to end
+  - real local-engine streaming still depends on successful initialization of the
+    replica-local vLLM OpenAI serving adapter
   - proxy stream cancellation and disconnect hardening: `待实现`
 
 ## 6.2 Native platform APIs
@@ -429,7 +448,9 @@ Returns a more static or planning-oriented view of cluster resources and configu
 Liveness probe for the API process.
 
 #### `GET /readyz`
-Readiness probe indicating the gateway, catalog, and runtime integrations are ready (`待实现`).
+Readiness probe endpoint exists in the current implementation, but it is still a
+placeholder and currently returns the same success response as `healthz`.
+Dependency-aware readiness checks remain `待实现`.
 
 ## 7. Request Lifecycle
 
@@ -605,6 +626,9 @@ A relative path under the configured model store root is preferred over a machin
 
 Current implementation note:
 - proxy runtime support exists in code, but the checked-in `config/models.yaml` still primarily uses local `vllm` backends; broad proxy migration remains `待实现`
+- local `vllm` models now also support backend-scoped request behavior in
+  configuration, including `vllm.request_defaults`, `vllm.request_policy`, and
+  `vllm.openai_serving`
 
 ### Runtime implications
 At runtime, `infer-nexus` should:
@@ -852,6 +876,7 @@ src/
       openai_routes.py
       platform_routes.py
       health_routes.py
+      deps.py
     auth/
       api_keys.py
     backends/
@@ -869,7 +894,11 @@ src/
       policies.py
     runtime/
       deployments.py
+      dispatcher.py
+      executor.py
+      handles.py
       serve_app.py
+      types.py
     observability/
       metrics.py
       logging.py
@@ -901,7 +930,7 @@ Phase 1 should implement only the minimum platform needed to replace ad hoc pers
 ### Must-have
 - file-based pre-registered model catalog
 - one deployment per local model
-- OpenAI-compatible chat and embeddings APIs
+- OpenAI-compatible chat, embeddings, and rerank APIs
 - native model discovery APIs
 - native load inspection APIs
 - basic admission control (`待实现`)
@@ -910,8 +939,8 @@ Phase 1 should implement only the minimum platform needed to replace ad hoc pers
 - API key authentication (`待实现`)
 
 ### Nice-to-have but not required for Phase 1
-- streaming chat completions if non-streaming lands first
-- rerank endpoint if chat and embeddings are already stable
+- full local vLLM OpenAI-serving parity for streaming chat completions
+- native `responses` API support
 - config reload and deployment reconcile without full process restart
 
 ## 18. Future Extensions

@@ -9,6 +9,7 @@ import pytest
 from infer_nexus.catalog.loader import load_model_catalog
 from infer_nexus.catalog.models import ModelCatalogFile, ModelConfig
 from infer_nexus.catalog.registry import ModelRegistry
+from infer_nexus.backends.vllm import DynamicVLLMOpenAIChatServingAdapter
 from infer_nexus.core.errors import BackendConfigurationError, BackendRequestValidationError
 from infer_nexus.core.enums import TaskType
 from infer_nexus.core.schemas import ChatCompletionsRequest, EmbeddingRequest, RerankRequest
@@ -57,6 +58,136 @@ class FakeServe:
             return FakeBoundDeployment(kwargs, replica_cls)
 
         return wrapper
+
+
+class FakeOpenAIChatServingAdapter:
+    """模拟 vLLM OpenAI serving adapter。"""
+
+    def __init__(
+        self,
+        *,
+        response: dict | None = None,
+        stream_chunks: list[dict | bytes | str] | None = None,
+    ) -> None:
+        self.response = response or {}
+        self.stream_chunks = stream_chunks or []
+        self.requests: list[dict] = []
+
+    async def chat_completion(self, request_payload: dict[str, object]) -> dict:
+        self.requests.append(request_payload)
+        return self.response
+
+    async def chat_completion_stream(self, request_payload: dict[str, object]):
+        self.requests.append(request_payload)
+        for chunk in self.stream_chunks:
+            yield chunk
+
+
+class FakeServingRequest:
+    """模拟 vLLM 的 ChatCompletionRequest。"""
+
+    def __init__(self, **payload) -> None:
+        self.payload = payload
+        self.stream = payload.get('stream')
+
+    @classmethod
+    def model_validate(cls, payload: dict[str, object]) -> 'FakeServingRequest':
+        return cls(**payload)
+
+
+class FakeServingResponse:
+    """模拟 vLLM serving response Pydantic model。"""
+
+    def __init__(self, payload: dict[str, object]) -> None:
+        self.payload = payload
+
+    def model_dump(self, *, mode: str = 'json', exclude_none: bool = True) -> dict[str, object]:
+        return dict(self.payload)
+
+
+class FakeBaseModelPath:
+    """模拟 vLLM BaseModelPath。"""
+
+    def __init__(self, name: str, model_path: str) -> None:
+        self.name = name
+        self.model_path = model_path
+
+
+class FakeOpenAIServingModelsNative:
+    """模拟新布局的 OpenAIServingModels。"""
+
+    def __init__(self, engine_client: object, base_model_paths: list[FakeBaseModelPath], *, lora_modules=None):
+        self.engine_client = engine_client
+        self.base_model_paths = base_model_paths
+        self.registry = {'base_model_paths': base_model_paths}
+
+
+class FakeOpenAIServingRender:
+    """模拟新布局的 OpenAIServingRender。"""
+
+    def __init__(
+        self,
+        model_config: object,
+        renderer: object,
+        io_processor: object,
+        model_registry: object,
+        *,
+        request_logger: object,
+        chat_template: object,
+        chat_template_content_format: str,
+        trust_request_chat_template: bool = False,
+        default_chat_template_kwargs: dict | None = None,
+        **_: object,
+    ) -> None:
+        self.model_config = model_config
+        self.renderer = renderer
+        self.io_processor = io_processor
+        self.model_registry = model_registry
+        self.request_logger = request_logger
+        self.chat_template = chat_template
+        self.chat_template_content_format = chat_template_content_format
+        self.trust_request_chat_template = trust_request_chat_template
+        self.default_chat_template_kwargs = default_chat_template_kwargs
+
+
+class FakeOpenAIServingChatNative:
+    """模拟新布局的 OpenAIServingChat。"""
+
+    def __init__(
+        self,
+        engine_client: object,
+        models: FakeOpenAIServingModelsNative,
+        response_role: str,
+        *,
+        openai_serving_render: FakeOpenAIServingRender,
+        request_logger: object,
+        chat_template: object,
+        chat_template_content_format: str,
+        reasoning_parser: str = '',
+        default_chat_template_kwargs: dict | None = None,
+        **_: object,
+    ) -> None:
+        self.engine_client = engine_client
+        self.models = models
+        self.response_role = response_role
+        self.openai_serving_render = openai_serving_render
+        self.request_logger = request_logger
+        self.chat_template = chat_template
+        self.chat_template_content_format = chat_template_content_format
+        self.reasoning_parser = reasoning_parser
+        self.default_chat_template_kwargs = default_chat_template_kwargs
+        self.requests: list[FakeServingRequest] = []
+
+    async def create_chat_completion(self, request: FakeServingRequest, raw_request=None):
+        self.requests.append(request)
+        return FakeServingResponse(
+            {
+                'id': 'chatcmpl-native',
+                'object': 'chat.completion',
+                'model': request.payload['model'],
+                'choices': [{'index': 0, 'message': {'role': 'assistant', 'content': 'native'}}],
+            }
+        )
 
 
 def test_serve_builder_plan_contains_all_registered_models(
@@ -460,6 +591,40 @@ def test_vllm_backend_build_runtime_spec_includes_request_defaults_and_policy() 
     }
 
 
+def test_vllm_backend_build_runtime_spec_includes_openai_serving_reasoning_config() -> None:
+    """OpenAI serving config should be explicit and mirrored into engine kwargs."""
+    backend = VLLMBackend({})
+    model = ModelConfig(
+        name='qwen3-reasoning',
+        alias='qwen3-reasoning',
+        task=TaskType.CHAT,
+        model_path='Qwen/Qwen3-32B',
+        tensor_parallel_size=1,
+        cpu_per_replica=4,
+        gpu_per_replica=1,
+        min_replicas=1,
+        max_replicas=1,
+        vllm={
+            'openai_serving': {
+                'enabled': True,
+                'enable_reasoning': True,
+                'reasoning_parser': 'qwen3',
+            },
+            'request_policy': {'allow_reasoning': True},
+        },
+    )
+
+    runtime_spec = backend.build_runtime_spec(model, 'Qwen/Qwen3-32B')
+
+    assert runtime_spec['openai_serving'] == {
+        'enabled': True,
+        'enable_reasoning': True,
+        'reasoning_parser': 'qwen3',
+    }
+    assert runtime_spec['engine_kwargs']['enable_reasoning'] is True
+    assert runtime_spec['engine_kwargs']['reasoning_parser'] == 'qwen3'
+
+
 def test_vllm_backend_startup_forwards_engine_kwargs(monkeypatch: pytest.MonkeyPatch) -> None:
     """Catalog-provided engine kwargs should be forwarded to vLLM LLM."""
     captured_kwargs: dict[str, object] = {}
@@ -642,8 +807,8 @@ def test_vllm_backend_builds_sampling_params_instance_by_retrying_unsupported_kw
     assert instance.max_tokens == 128
 
 
-def test_vllm_backend_rejects_streaming_and_multimodal_messages_for_text_only_models() -> None:
-    """Streaming stays unsupported and text-only models still reject image blocks."""
+def test_vllm_backend_accepts_streaming_messages_and_rejects_text_only_multimodal() -> None:
+    """Streaming uses the same message normalization while text-only models still reject image blocks."""
     backend = VLLMBackend({})
     streaming = ChatCompletionsRequest(
         model='qwen3-chat',
@@ -655,8 +820,7 @@ def test_vllm_backend_rejects_streaming_and_multimodal_messages_for_text_only_mo
         messages=[{'role': 'user', 'content': [{'type': 'text', 'text': 'hello'}]}],
     )
 
-    with pytest.raises(BackendRequestValidationError, match='Streaming chat completions'):
-        backend._build_chat_messages(streaming)
+    assert backend._build_chat_messages(streaming) == [{'role': 'user', 'content': 'hello'}]
 
     with pytest.raises(BackendRequestValidationError, match='does not support multimodal'):
         backend._build_chat_messages(multimodal)
@@ -854,6 +1018,277 @@ def test_vllm_backend_rejects_runtime_spec_task_mode_mismatch() -> None:
 
     with pytest.raises(BackendConfigurationError, match='task_mode mismatch'):
         backend.validate_runtime_spec(runtime_spec, runtime_context)
+
+
+def test_vllm_backend_chat_completion_passthroughs_openai_serving_payload() -> None:
+    """OpenAI serving adapter should receive a native OpenAI-style request payload."""
+    runtime_spec = {
+        'backend': 'vllm',
+        'task_mode': 'generate',
+        'request_defaults': {},
+        'request_policy': {
+            'allow_tools': True,
+            'allow_reasoning': True,
+            'passthrough_unknown_openai_fields': True,
+        },
+        'openai_serving': {'enabled': True},
+        'served_model_name': 'qwen3-chat',
+        'capabilities': [],
+    }
+    runtime_context = {
+        'deployment_name': 'model-qwen3-32b-instruct',
+        'served_model_name': 'qwen3-chat',
+    }
+    expected_response = {
+        'id': 'chatcmpl-serving',
+        'object': 'chat.completion',
+        'created': 123,
+        'model': 'qwen3-chat',
+        'choices': [
+            {
+                'index': 0,
+                'message': {'role': 'assistant', 'content': 'hello from serving'},
+                'finish_reason': 'stop',
+            }
+        ],
+        'usage': {'prompt_tokens': 3, 'completion_tokens': 4, 'total_tokens': 7},
+    }
+    adapter = FakeOpenAIChatServingAdapter(response=expected_response)
+    backend = VLLMBackend(runtime_spec)
+    backend.openai_serving_chat_adapter = adapter
+
+    response = asyncio.run(
+        backend.chat_completion(
+            runtime_spec,
+            ChatCompletionsRequest(
+                model='qwen3-chat',
+                messages=[
+                    {'role': 'system', 'content': 'be concise'},
+                    {'role': 'user', 'content': 'hello'},
+                ],
+                max_completion_tokens=32,
+                parallel_tool_calls=False,
+                extra_body={'top_k': 50, 'min_p': 0.1},
+            ),
+            runtime_context,
+        )
+    )
+
+    assert response == expected_response
+    assert adapter.requests == [
+        {
+            'model': 'qwen3-chat',
+            'messages': [
+                {'role': 'system', 'content': 'be concise'},
+                {'role': 'user', 'content': 'hello'},
+            ],
+            'max_completion_tokens': 32,
+            'parallel_tool_calls': False,
+            'stream': False,
+            'top_k': 50,
+            'min_p': 0.1,
+        }
+    ]
+
+
+def test_vllm_backend_chat_completion_stream_passthroughs_openai_serving_chunks() -> None:
+    """OpenAI serving adapter stream chunks should be forwarded without rewriting."""
+    runtime_spec = {
+        'backend': 'vllm',
+        'task_mode': 'generate',
+        'request_defaults': {},
+        'request_policy': {
+            'allow_tools': True,
+            'allow_reasoning': True,
+            'passthrough_unknown_openai_fields': True,
+        },
+        'openai_serving': {'enabled': True},
+        'served_model_name': 'qwen3-chat',
+        'capabilities': [],
+    }
+    runtime_context = {
+        'deployment_name': 'model-qwen3-32b-instruct',
+        'served_model_name': 'qwen3-chat',
+    }
+    expected_chunks = [
+        {
+            'id': 'chatcmpl-serving',
+            'object': 'chat.completion.chunk',
+            'created': 123,
+            'model': 'qwen3-chat',
+            'choices': [
+                {
+                    'index': 0,
+                    'delta': {'role': 'assistant', 'reasoning_content': '先想'},
+                    'finish_reason': None,
+                }
+            ],
+        },
+        b'data: [DONE]\n\n',
+    ]
+    adapter = FakeOpenAIChatServingAdapter(stream_chunks=expected_chunks)
+    backend = VLLMBackend(runtime_spec)
+    backend.openai_serving_chat_adapter = adapter
+
+    async def collect() -> list[dict | bytes | str]:
+        return [
+            chunk
+            async for chunk in backend.chat_completion_stream(
+                runtime_spec,
+                ChatCompletionsRequest(
+                    model='qwen3-chat',
+                    messages=[
+                        {
+                            'role': 'assistant',
+                            'content': None,
+                            'tool_calls': [
+                                {
+                                    'id': 'call_1',
+                                    'type': 'function',
+                                    'function': {'name': 'lookup', 'arguments': '{}'},
+                                }
+                            ],
+                        }
+                    ],
+                    stream=True,
+                    stream_options={'include_usage': True},
+                ),
+                runtime_context,
+            )
+        ]
+
+    chunks = asyncio.run(collect())
+
+    assert chunks == expected_chunks
+    assert adapter.requests == [
+        {
+            'model': 'qwen3-chat',
+            'messages': [
+                {
+                    'role': 'assistant',
+                    'content': None,
+                    'tool_calls': [
+                        {
+                            'id': 'call_1',
+                            'type': 'function',
+                            'function': {'name': 'lookup', 'arguments': '{}'},
+                        }
+                    ],
+                }
+            ],
+            'stream': True,
+            'stream_options': {'include_usage': True},
+        }
+    ]
+
+
+def test_vllm_backend_initializes_openai_serving_adapter_via_dynamic_imports(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dynamic import + constructor path should build a native serving adapter when symbols exist."""
+    runtime_spec = {
+        'backend': 'vllm',
+        'task_mode': 'generate',
+        'model_path': '/models/Qwen/Qwen3',
+        'request_defaults': {'chat_template_kwargs': {'enable_thinking': False}},
+        'openai_serving': {
+            'enabled': True,
+            'reasoning_parser': 'qwen3',
+        },
+        'served_model_name': 'qwen3-chat',
+    }
+    backend = VLLMBackend(runtime_spec)
+    engine_client = types.SimpleNamespace(
+        model_config='model-config',
+        renderer='renderer',
+        io_processor='io-processor',
+    )
+    backend.engine = types.SimpleNamespace(llm_engine=engine_client)
+
+    module_map = {
+        'vllm.entrypoints.openai.chat_completion.protocol': types.SimpleNamespace(
+            ChatCompletionRequest=FakeServingRequest
+        ),
+        'vllm.entrypoints.openai.chat_completion.serving': types.SimpleNamespace(
+            OpenAIServingChat=FakeOpenAIServingChatNative
+        ),
+        'vllm.entrypoints.openai.models.serving': types.SimpleNamespace(
+            OpenAIServingModels=FakeOpenAIServingModelsNative
+        ),
+        'vllm.entrypoints.openai.models.protocol': types.SimpleNamespace(
+            BaseModelPath=FakeBaseModelPath
+        ),
+        'vllm.entrypoints.serve.render.serving': types.SimpleNamespace(
+            OpenAIServingRender=FakeOpenAIServingRender
+        ),
+    }
+
+    def fake_import_module(name: str):
+        if name not in module_map:
+            raise ImportError(name)
+        return module_map[name]
+
+    monkeypatch.setattr('infer_nexus.backends.vllm.importlib.import_module', fake_import_module)
+
+    adapter = backend._initialize_openai_serving_chat_adapter()
+
+    assert isinstance(adapter, DynamicVLLMOpenAIChatServingAdapter)
+    assert backend.openai_serving_adapter_init_error is None
+    assert adapter.serving_chat.engine_client is engine_client
+    assert adapter.serving_chat.response_role == 'assistant'
+    assert adapter.serving_chat.reasoning_parser == 'qwen3'
+    assert adapter.serving_chat.default_chat_template_kwargs == {'enable_thinking': False}
+    assert adapter.serving_chat.models.base_model_paths[0].name == 'qwen3-chat'
+    assert adapter.serving_chat.models.base_model_paths[0].model_path == '/models/Qwen/Qwen3'
+    assert adapter.serving_chat.openai_serving_render.chat_template_content_format == 'auto'
+
+    response = asyncio.run(
+        adapter.chat_completion(
+            {
+                'model': 'qwen3-chat',
+                'messages': [{'role': 'user', 'content': 'hello'}],
+                'stream': False,
+            }
+        )
+    )
+
+    assert response == {
+        'id': 'chatcmpl-native',
+        'object': 'chat.completion',
+        'model': 'qwen3-chat',
+        'choices': [{'index': 0, 'message': {'role': 'assistant', 'content': 'native'}}],
+    }
+    assert adapter.serving_chat.requests[0].payload['messages'] == [
+        {'role': 'user', 'content': 'hello'}
+    ]
+
+
+def test_vllm_backend_openai_serving_adapter_init_reports_import_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing vLLM serving symbols should fall back cleanly and retain the failure reason."""
+    runtime_spec = {
+        'backend': 'vllm',
+        'task_mode': 'generate',
+        'model_path': '/models/Qwen/Qwen3',
+        'request_defaults': {},
+        'openai_serving': {'enabled': True},
+    }
+    backend = VLLMBackend(runtime_spec)
+    backend.engine = object()
+
+    def fake_import_module(name: str):
+        raise ImportError(f'missing {name}')
+
+    monkeypatch.setattr('infer_nexus.backends.vllm.importlib.import_module', fake_import_module)
+
+    adapter = backend._initialize_openai_serving_chat_adapter()
+
+    assert adapter is None
+    assert backend.openai_serving_adapter_init_error is not None
+    assert 'Unable to resolve supported vLLM OpenAI serving imports' in (
+        backend.openai_serving_adapter_init_error
+    )
 
 
 def test_serve_builder_rejects_unsupported_vllm_task(model_store: LocalModelStore) -> None:

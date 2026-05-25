@@ -103,16 +103,34 @@ class DynamicVLLMOpenAIChatServingAdapter:
 class OpenAIServingEngineClientCompatProxy:
     """Compatibility proxy that augments engine clients with required serving attributes."""
 
-    def __init__(self, client: Any) -> None:
-        self._client = client
+    def __init__(self, primary_client: Any, fallback_clients: list[Any]) -> None:
+        self._client = primary_client
+        self._fallback_clients = [candidate for candidate in fallback_clients if candidate is not None]
 
     @property
     def errored(self) -> bool:
-        value = getattr(self._client, "errored", False)
-        return bool(value)
+        for candidate in [self._client, *self._fallback_clients]:
+            if hasattr(candidate, "errored"):
+                return bool(getattr(candidate, "errored"))
+        return False
+
+    async def generate(self, *args: Any, **kwargs: Any) -> Any:
+        for candidate in [self._client, *self._fallback_clients]:
+            method = getattr(candidate, "generate", None)
+            if callable(method):
+                result = method(*args, **kwargs)
+                if inspect.isawaitable(result):
+                    return await result
+                return result
+        raise AttributeError("No compatible 'generate' method found on engine client candidates.")
 
     def __getattr__(self, name: str) -> Any:
-        return getattr(self._client, name)
+        if hasattr(self._client, name):
+            return getattr(self._client, name)
+        for candidate in self._fallback_clients:
+            if hasattr(candidate, name):
+                return getattr(candidate, name)
+        raise AttributeError(name)
 
 
 class VLLMBackend(InferenceBackend):
@@ -937,13 +955,23 @@ class VLLMBackend(InferenceBackend):
             getattr(self.engine, "_engine", None),
             self.engine,
         ]
+        unique_candidates: list[Any] = []
+        seen_ids: set[int] = set()
         for candidate in candidates:
             if candidate is None:
                 continue
+            candidate_id = id(candidate)
+            if candidate_id in seen_ids:
+                continue
+            seen_ids.add(candidate_id)
+            unique_candidates.append(candidate)
+
+        for candidate in unique_candidates:
             if _is_compatible(candidate):
-                if hasattr(candidate, "errored"):
+                if hasattr(candidate, "errored") and hasattr(candidate, "generate"):
                     return candidate
-                return OpenAIServingEngineClientCompatProxy(candidate)
+                fallbacks = [item for item in unique_candidates if item is not candidate]
+                return OpenAIServingEngineClientCompatProxy(candidate, fallbacks)
         return None
 
     def _build_openai_serving_base_model_path(self, base_model_path_cls: type[Any]) -> Any:

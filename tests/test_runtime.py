@@ -1300,6 +1300,178 @@ def test_vllm_backend_chat_completion_stream_uses_async_engine_generate_deltas()
     assert [chunk['finish_reason'] for chunk in chunks] == [None, None, 'stop']
 
 
+def test_vllm_backend_chat_completion_stream_passes_async_engine_multimodal_kwarg(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Async vision chat should pass decoded images to vLLM when generate accepts multi_modal_data."""
+    captured = {}
+
+    class FakeTokenizer:
+        def apply_chat_template(self, messages, *, tokenize, add_generation_prompt, **kwargs):
+            captured['template_messages'] = messages
+            return '<vision prompt>'
+
+    class FakeOutput:
+        text = 'ok'
+        finish_reason = 'stop'
+
+    class FakeRequestOutput:
+        outputs = [FakeOutput()]
+
+    class FakeAsyncEngine:
+        def get_tokenizer(self):
+            return FakeTokenizer()
+
+        def generate(self, prompt, sampling_params, request_id, **kwargs):
+            captured['prompt'] = prompt
+            captured['generate_kwargs'] = kwargs
+
+            async def iterator():
+                yield FakeRequestOutput()
+
+            return iterator()
+
+    monkeypatch.setattr(
+        VLLMBackend,
+        '_load_async_engine_image_asset',
+        lambda self, image_url: f'image:{image_url}',
+    )
+    runtime_spec = {
+        'backend': 'vllm',
+        'task_mode': 'generate',
+        'request_defaults': {},
+        'request_policy': {},
+        'served_model_name': 'mineru',
+        'capabilities': ['vision'],
+    }
+    backend = VLLMBackend(runtime_spec)
+    backend.engine = FakeAsyncEngine()
+    backend.engine_kind = 'async'
+    backend.engine_state = 'ready'
+
+    async def collect() -> list[dict | bytes | str]:
+        return [
+            chunk
+            async for chunk in backend.chat_completion_stream(
+                runtime_spec,
+                ChatCompletionsRequest(
+                    model='mineru',
+                    messages=[
+                        {
+                            'role': 'user',
+                            'content': [
+                                {'type': 'text', 'text': 'describe'},
+                                {
+                                    'type': 'image_url',
+                                    'image_url': {'url': 'data:image/png;base64,AAAA'},
+                                },
+                            ],
+                        }
+                    ],
+                    stream=True,
+                ),
+                {'deployment_name': 'model-mineru', 'served_model_name': 'mineru'},
+            )
+        ]
+
+    chunks = asyncio.run(collect())
+
+    assert captured['prompt'] == '<vision prompt>'
+    assert captured['generate_kwargs'] == {
+        'multi_modal_data': {'image': ['image:data:image/png;base64,AAAA']}
+    }
+    assert captured['template_messages'] == [
+        {
+            'role': 'user',
+            'content': [
+                {'type': 'text', 'text': 'describe'},
+                {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,AAAA'}},
+            ],
+        }
+    ]
+    assert [chunk['delta_text'] for chunk in chunks] == ['ok', '']
+    assert [chunk['finish_reason'] for chunk in chunks] == [None, 'stop']
+
+
+def test_vllm_backend_chat_completion_stream_passes_async_engine_multimodal_prompt_dict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Older AsyncLLMEngine signatures should receive multimodal data inside the prompt input."""
+    captured = {}
+
+    class FakeTokenizer:
+        def apply_chat_template(self, messages, *, tokenize, add_generation_prompt, **kwargs):
+            return '<vision prompt>'
+
+    class FakeOutput:
+        text = 'ok'
+        finish_reason = 'stop'
+
+    class FakeRequestOutput:
+        outputs = [FakeOutput()]
+
+    class FakeAsyncEngine:
+        def get_tokenizer(self):
+            return FakeTokenizer()
+
+        def generate(self, prompt, sampling_params, request_id):
+            captured['prompt'] = prompt
+
+            async def iterator():
+                yield FakeRequestOutput()
+
+            return iterator()
+
+    monkeypatch.setattr(
+        VLLMBackend,
+        '_load_async_engine_image_asset',
+        lambda self, image_url: f'image:{image_url}',
+    )
+    runtime_spec = {
+        'backend': 'vllm',
+        'task_mode': 'generate',
+        'request_defaults': {},
+        'request_policy': {},
+        'served_model_name': 'mineru',
+        'capabilities': ['vision'],
+    }
+    backend = VLLMBackend(runtime_spec)
+    backend.engine = FakeAsyncEngine()
+    backend.engine_kind = 'async'
+    backend.engine_state = 'ready'
+
+    async def collect() -> list[dict | bytes | str]:
+        return [
+            chunk
+            async for chunk in backend.chat_completion_stream(
+                runtime_spec,
+                ChatCompletionsRequest(
+                    model='mineru',
+                    messages=[
+                        {
+                            'role': 'user',
+                            'content': [
+                                {'type': 'text', 'text': 'describe'},
+                                {'type': 'image_url', 'image_url': {'url': 'https://example.test/a.png'}},
+                            ],
+                        }
+                    ],
+                    stream=True,
+                ),
+                {'deployment_name': 'model-mineru', 'served_model_name': 'mineru'},
+            )
+        ]
+
+    chunks = asyncio.run(collect())
+
+    assert captured['prompt'] == {
+        'prompt': '<vision prompt>',
+        'multi_modal_data': {'image': ['image:https://example.test/a.png']},
+    }
+    assert [chunk['delta_text'] for chunk in chunks] == ['ok', '']
+    assert [chunk['finish_reason'] for chunk in chunks] == [None, 'stop']
+
+
 def test_vllm_backend_chat_completion_uses_async_engine_generate_result() -> None:
     """Non-streaming chat should aggregate the final AsyncLLMEngine output."""
     class FakeTokenizer:

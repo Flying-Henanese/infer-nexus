@@ -1614,7 +1614,23 @@ class VLLMBackend(InferenceBackend):
             return
         except BackendRequestValidationError as exc:
             if exc.code != "unsupported_parameter" or self.openai_serving_chat_adapter is None:
-                raise
+                if exc.code == "unsupported_parameter" and self._should_use_openai_serving_adapter(runtime_spec):
+                    self.openai_serving_chat_adapter = self._initialize_openai_serving_chat_adapter()
+                    if self.openai_serving_chat_adapter is None:
+                        message = (
+                            f"{exc} OpenAI serving adapter is enabled but not initialized."
+                        )
+                        if self.openai_serving_adapter_init_error:
+                            message = (
+                                f"{message} Initialization error: "
+                                f"{self.openai_serving_adapter_init_error}"
+                            )
+                        raise BackendRequestValidationError(
+                            message,
+                            code="unsupported_parameter",
+                        ) from exc
+                else:
+                    raise
 
         request_payload = self._build_openai_serving_request_payload(
             request,

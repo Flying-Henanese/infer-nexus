@@ -119,9 +119,9 @@ fi
 # This ensures `ray`, `serve`, `vllm`, and any extras are available.
 if [[ "${INSTALL}" -eq 1 ]]; then
   if [[ "${INSTALL_ARTIFACTS}" -eq 1 ]]; then
-    uv sync --extra serve --extra vllm --extra artifacts
+    uv sync --preview-features extra-build-dependencies --extra serve --extra vllm --extra artifacts
   else
-    uv sync --extra serve --extra vllm
+    uv sync --preview-features extra-build-dependencies --extra serve --extra vllm
   fi
 fi
 

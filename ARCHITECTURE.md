@@ -69,6 +69,108 @@ Client
           -> Scaling Policy
 ```
 
+### Module Relationship Diagram
+
+```mermaid
+graph TD
+  subgraph Entry[启动入口]
+    G[scripts/run_gateway.py]
+    R[scripts/run_serve_runtime.py]
+    M[src/infer_nexus/main.py]
+  end
+
+  subgraph API[HTTP API 层]
+    OA[src/infer_nexus/api/openai_routes.py]
+    PA[src/infer_nexus/api/platform_routes.py]
+    HZ[src/infer_nexus/api/health_routes.py]
+    D[src/infer_nexus/api/deps.py]
+  end
+
+  subgraph Catalog[模型目录]
+    CL[src/infer_nexus/catalog/loader.py]
+    CR[src/infer_nexus/catalog/registry.py]
+    CM[src/infer_nexus/catalog/models.py]
+  end
+
+  subgraph Runtime[运行时编排]
+    RD[src/infer_nexus/runtime/dispatcher.py]
+    RE[src/infer_nexus/runtime/executor.py]
+    SA[src/infer_nexus/runtime/serve_app.py]
+    DP[src/infer_nexus/runtime/deployments.py]
+    RT[src/infer_nexus/runtime/types.py]
+  end
+
+  subgraph Backend[后端适配]
+    VB[src/infer_nexus/backends/vllm.py]
+    BL[src/infer_nexus/backends/base.py]
+  end
+
+  subgraph Control[控制面]
+    AC[src/infer_nexus/control/admission.py]
+    LI[src/infer_nexus/control/load_inspector.py]
+    SC[src/infer_nexus/control/scaler.py]
+    RC[src/infer_nexus/control/reconciler.py]
+    PL[src/infer_nexus/control/policies.py]
+  end
+
+  subgraph Infra[基础设施]
+    MS[src/infer_nexus/model_store.py]
+    CFG[src/infer_nexus/core/config.py]
+    SCH[src/infer_nexus/core/schemas.py]
+    ENU[src/infer_nexus/core/enums.py]
+    ERR[src/infer_nexus/core/errors.py]
+    AUTH[src/infer_nexus/auth/api_keys.py]
+    OBS[src/infer_nexus/observability/*]
+  end
+
+  G --> M
+  R --> M
+  M --> OA
+  M --> PA
+  M --> HZ
+  M --> CL
+  M --> CR
+  M --> AC
+  M --> LI
+  M --> SA
+  M --> RD
+  M --> RE
+  M --> MS
+  M --> CFG
+
+  OA --> D
+  PA --> D
+  D --> CR
+  D --> AC
+  D --> MS
+  D --> RD
+
+  CL --> CM
+  CR --> CM
+
+  RD --> SA
+  RD --> RE
+  RD --> RT
+  SA --> DP
+  SA --> CR
+  SA --> MS
+  DP --> CM
+  DP --> VB
+  RE --> RT
+  RE --> VB
+
+  VB --> BL
+  VB --> SCH
+  VB --> ENU
+  VB --> ERR
+
+  AC --> CM
+  LI --> CR
+  SC --> PL
+  RC --> CR
+  OBS --> LI
+```
+
 ### Responsibilities by layer
 
 #### API Gateway
@@ -343,6 +445,49 @@ Client request
       -> proxy backend: upstream OpenAI-compatible request/response passthrough
       -> local backend: route to model-specific Ray Serve deployment -> vLLM inference -> response adaptation
   -> client response
+```
+
+### Request Flow Diagram
+
+```mermaid
+flowchart TD
+  C[Client] --> G[FastAPI Gateway]
+  G --> V{Route type?}
+
+  V -->|OpenAI-compatible| OA[OpenAI routes]
+  V -->|Platform-native| PA[Platform routes]
+  V -->|Health| HZ[Health routes]
+
+  OA --> MR[Resolve model from registry]
+  MR --> TK{Task matches?}
+  TK -->|No| E1[404/400 OpenAI-style error]
+  TK -->|Yes| MD[Check model artifact path]
+  MD --> AD[AdmissionController]
+  AD --> RQ[RuntimeDispatcher.resolve_target]
+
+  RQ --> BT{Backend type?}
+  BT -->|vllm| LX[Local Ray Serve path]
+  BT -->|vllm_openai_proxy| PX[Upstream proxy path]
+
+  LX --> EX[RuntimeExecutor]
+  EX --> SR{Serve mode or stub?}
+  SR -->|serve| RH[Ray Serve handle]
+  SR -->|stub| LR[Local replica]
+  RH --> VB[VLLMBackend]
+  LR --> VB
+  VB --> RESP[Adapt to OpenAI/native response]
+  RESP --> C
+
+  PX --> HTTP[Forward request to upstream OpenAI-compatible endpoint]
+  HTTP --> PASSTHRU[Preserve upstream status/body/content-type]
+  PASSTHRU --> C
+
+  PA --> CRG[Catalog / status / load queries]
+  CRG --> RG[Registry + LocalModelStore + LoadInspector]
+  RG --> C
+
+  HZ --> OK[healthz / readyz]
+  OK --> C
 ```
 
 ### 7.2 Model discovery request flow

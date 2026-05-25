@@ -100,6 +100,21 @@ class DynamicVLLMOpenAIChatServingAdapter:
         yield self._normalize_payload(result)
 
 
+class OpenAIServingEngineClientCompatProxy:
+    """Compatibility proxy that augments engine clients with required serving attributes."""
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+
+    @property
+    def errored(self) -> bool:
+        value = getattr(self._client, "errored", False)
+        return bool(value)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._client, name)
+
+
 class VLLMBackend(InferenceBackend):
     """Adapt local vLLM engine lifecycle and request handling."""
 
@@ -911,6 +926,9 @@ class VLLMBackend(InferenceBackend):
         ) from last_error
 
     def _resolve_openai_serving_engine_client(self) -> Any | None:
+        def _is_compatible(client: Any) -> bool:
+            return hasattr(client, "model_config")
+
         candidates = [
             getattr(self.engine, "engine_client", None),
             getattr(self.engine, "async_engine_client", None),
@@ -920,8 +938,12 @@ class VLLMBackend(InferenceBackend):
             self.engine,
         ]
         for candidate in candidates:
-            if candidate is not None:
-                return candidate
+            if candidate is None:
+                continue
+            if _is_compatible(candidate):
+                if hasattr(candidate, "errored"):
+                    return candidate
+                return OpenAIServingEngineClientCompatProxy(candidate)
         return None
 
     def _build_openai_serving_base_model_path(self, base_model_path_cls: type[Any]) -> Any:
@@ -1279,7 +1301,11 @@ class VLLMBackend(InferenceBackend):
                 runtime_spec=runtime_spec,
                 runtime_context=runtime_context,
             )
-            return await self._call_openai_serving_chat_completion(request_payload)
+            try:
+                return await self._call_openai_serving_chat_completion(request_payload)
+            except Exception as exc:
+                self.openai_serving_adapter_init_error = str(exc)
+                self.openai_serving_chat_adapter = None
 
         messages = self._build_chat_messages(request, runtime_context=runtime_context)
         sampling_params = self._build_sampling_params(request, runtime_spec=runtime_spec)
@@ -1319,9 +1345,13 @@ class VLLMBackend(InferenceBackend):
                 runtime_spec=runtime_spec,
                 runtime_context=runtime_context,
             )
-            async for chunk in self._iter_openai_serving_stream(request_payload):
-                yield chunk
-            return
+            try:
+                async for chunk in self._iter_openai_serving_stream(request_payload):
+                    yield chunk
+                return
+            except Exception as exc:
+                self.openai_serving_adapter_init_error = str(exc)
+                self.openai_serving_chat_adapter = None
 
         messages = self._build_chat_messages(request, runtime_context=runtime_context)
         sampling_params = self._build_sampling_params(request, runtime_spec=runtime_spec)

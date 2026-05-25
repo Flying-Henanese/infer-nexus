@@ -267,7 +267,19 @@ class RuntimeExecutor:
             )
 
         try:
-            response = remote_method.remote(payload)
+            stream_handle = handle
+            options_method = getattr(handle, "options", None)
+            if callable(options_method):
+                try:
+                    stream_handle = options_method(stream=True)
+                except Exception:
+                    # Fallback to legacy handle invocation for environments lacking stream options support.
+                    stream_handle = handle
+            stream_remote_method = getattr(stream_handle, method_name, None)
+            if stream_remote_method is None or not hasattr(stream_remote_method, "remote"):
+                stream_remote_method = remote_method
+
+            response = stream_remote_method.remote(payload)
             return self._normalize_stream_result(response)
         except RuntimeNotConnectedError:
             raise
@@ -725,15 +737,23 @@ class RuntimeExecutor:
 
         async def iterator() -> Any:
             saw_done = False
-            async for chunk in chunks:
-                if isinstance(chunk, bytes):
-                    saw_done = saw_done or self._is_done_sse_chunk(chunk)
-                    yield chunk
-                elif isinstance(chunk, str):
-                    saw_done = saw_done or self._is_done_sse_chunk(chunk)
-                    yield chunk.encode("utf-8")
-                elif isinstance(chunk, dict):
-                    yield self._encode_sse_chunk(chunk)
+            try:
+                async for chunk in chunks:
+                    if isinstance(chunk, bytes):
+                        saw_done = saw_done or self._is_done_sse_chunk(chunk)
+                        yield chunk
+                    elif isinstance(chunk, str):
+                        saw_done = saw_done or self._is_done_sse_chunk(chunk)
+                        yield chunk.encode("utf-8")
+                    elif isinstance(chunk, dict):
+                        yield self._encode_sse_chunk(chunk)
+            except Exception as exc:
+                logger.exception(
+                    "SSE stream iteration failed for request_id '%s': %s",
+                    request_id,
+                    exc,
+                )
+                return
             if not saw_done:
                 yield b"data: [DONE]\n\n"
 

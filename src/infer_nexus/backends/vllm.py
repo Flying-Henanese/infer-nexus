@@ -115,6 +115,13 @@ class OpenAIServingEngineClientCompatProxy:
         return False
 
     def generate(self, *args: Any, **kwargs: Any) -> Any:
+        def _wrap_iterable(iterable: Iterable[Any]) -> AsyncIterator[Any]:
+            async def iterator() -> AsyncIterator[Any]:
+                for item in iterable:
+                    yield item
+
+            return iterator()
+
         def _wrap_awaitable(awaitable: Any) -> AsyncIterator[Any]:
             async def iterator() -> AsyncIterator[Any]:
                 resolved = await awaitable
@@ -133,6 +140,7 @@ class OpenAIServingEngineClientCompatProxy:
         for candidate in [self._client, *self._fallback_clients]:
             method = getattr(candidate, "generate", None)
             if callable(method):
+                call_args = args
                 call_kwargs = kwargs
                 try:
                     signature = inspect.signature(method)
@@ -141,6 +149,22 @@ class OpenAIServingEngineClientCompatProxy:
 
                 if signature is not None:
                     parameters = signature.parameters
+                    accepts_var_args = any(
+                        parameter.kind == inspect.Parameter.VAR_POSITIONAL
+                        for parameter in parameters.values()
+                    )
+                    if not accepts_var_args:
+                        positional_limit = sum(
+                            1
+                            for parameter in parameters.values()
+                            if parameter.kind
+                            in (
+                                inspect.Parameter.POSITIONAL_ONLY,
+                                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                            )
+                        )
+                        call_args = args[:positional_limit]
+
                     accepts_var_kwargs = any(
                         parameter.kind == inspect.Parameter.VAR_KEYWORD
                         for parameter in parameters.values()
@@ -161,11 +185,13 @@ class OpenAIServingEngineClientCompatProxy:
                             if key in allowed_names
                         }
 
-                result = method(*args, **call_kwargs)
+                result = method(*call_args, **call_kwargs)
                 if hasattr(result, "__aiter__"):
                     return result
                 if inspect.isawaitable(result):
                     return _wrap_awaitable(result)
+                if isinstance(result, Iterable) and not isinstance(result, (bytes, str, dict)):
+                    return _wrap_iterable(result)
                 return result
         raise AttributeError("No compatible 'generate' method found on engine client candidates.")
 

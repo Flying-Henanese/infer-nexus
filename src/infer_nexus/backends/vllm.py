@@ -254,6 +254,8 @@ class VLLMBackend(InferenceBackend):
         self.engine: Any | None = None
         self.openai_serving_chat_adapter: OpenAIChatServingAdapter | None = None
         self.openai_serving_adapter_init_error: str | None = None
+        self.async_engine_init_error: str | None = None
+        self.engine_kind: str = "created"
         self.engine_state: str = "created"
 
     def validate_runtime_spec(self, runtime_spec: dict[str, Any], runtime_context: dict[str, Any]) -> None:
@@ -275,21 +277,55 @@ class VLLMBackend(InferenceBackend):
                 f"Expected 'vllm', got '{runtime_spec.get('backend')}'."
             )
 
+    def _filter_kwargs_for_callable(self, callable_obj: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
+        try:
+            signature = inspect.signature(callable_obj)
+        except (TypeError, ValueError):
+            return dict(kwargs)
+
+        parameters = signature.parameters
+        if any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()):
+            return dict(kwargs)
+
+        allowed_names = {
+            name
+            for name, parameter in parameters.items()
+            if name != "self"
+            and parameter.kind
+            in {
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            }
+        }
+        return {key: value for key, value in kwargs.items() if key in allowed_names}
+
+    def _create_async_vllm_engine(self, llm_kwargs: dict[str, Any]) -> Any:
+        try:
+            try:
+                from vllm.engine.arg_utils import AsyncEngineArgs
+                from vllm.engine.async_llm_engine import AsyncLLMEngine
+            except ImportError:
+                from vllm import AsyncEngineArgs, AsyncLLMEngine  # type: ignore[attr-defined]
+        except ImportError as exc:
+            raise RuntimeError("This vLLM installation does not expose AsyncLLMEngine.") from exc
+
+        engine_args_kwargs = self._filter_kwargs_for_callable(AsyncEngineArgs, llm_kwargs)
+        engine_args = AsyncEngineArgs(**engine_args_kwargs)
+        from_engine_args = getattr(AsyncLLMEngine, "from_engine_args", None)
+        if callable(from_engine_args):
+            return from_engine_args(engine_args)
+        return AsyncLLMEngine(engine_args)
+
     def startup(self) -> None:
         init_mode = self.runtime_spec.get("backend_init_mode", "stub")
         if init_mode != "real":
             self.engine = None
             self.openai_serving_chat_adapter = None
             self.openai_serving_adapter_init_error = None
+            self.async_engine_init_error = None
+            self.engine_kind = "stub"
             self.engine_state = "stub"
             return
-
-        try:
-            from vllm import LLM
-        except ImportError as exc:
-            raise RuntimeError(
-                "vLLM is not installed. Install the 'vllm' extra or switch runtime.backend_init_mode to 'stub'."
-            ) from exc
 
         llm_kwargs: dict[str, Any] = {
             "model": self.runtime_spec["model_path"],
@@ -303,6 +339,31 @@ class VLLMBackend(InferenceBackend):
         gpu_memory_utilization = self.runtime_spec.get("gpu_memory_utilization")
         max_model_len = self.runtime_spec.get("max_model_len")
         requested_mode = self.runtime_spec.get("task_mode")
+
+        if requested_mode == "generate":
+            async_llm_kwargs = dict(llm_kwargs)
+            if gpu_memory_utilization is not None:
+                async_llm_kwargs["gpu_memory_utilization"] = gpu_memory_utilization
+            if max_model_len is not None:
+                async_llm_kwargs["max_model_len"] = max_model_len
+            async_llm_kwargs["task"] = requested_mode or "auto"
+            try:
+                self.engine = self._create_async_vllm_engine(async_llm_kwargs)
+                self.openai_serving_chat_adapter = None
+                self.openai_serving_adapter_init_error = None
+                self.async_engine_init_error = None
+                self.engine_kind = "async"
+                self.engine_state = "ready"
+                return
+            except Exception as exc:
+                self.async_engine_init_error = str(exc)
+
+        try:
+            from vllm import LLM
+        except ImportError as exc:
+            raise RuntimeError(
+                "vLLM is not installed. Install the 'vllm' extra or switch runtime.backend_init_mode to 'stub'."
+            ) from exc
 
         try:
             llm_signature = inspect.signature(LLM.__init__)
@@ -331,6 +392,7 @@ class VLLMBackend(InferenceBackend):
             pass
 
         self.engine = LLM(**llm_kwargs)
+        self.engine_kind = "sync"
         supported_tasks = getattr(self.engine, "supported_tasks", None)
         if not supported_tasks:
             engine_task = getattr(self.engine, "task", None)
@@ -348,6 +410,8 @@ class VLLMBackend(InferenceBackend):
         self.engine = None
         self.openai_serving_chat_adapter = None
         self.openai_serving_adapter_init_error = None
+        self.async_engine_init_error = None
+        self.engine_kind = "stopped"
         self.engine_state = "stopped"
 
     def build_runtime_spec(self, model: ModelConfig, resolved_model_reference: str) -> dict[str, Any]:
@@ -799,6 +863,142 @@ class VLLMBackend(InferenceBackend):
             if key in supported_keys
         }
 
+    def _is_async_engine(self) -> bool:
+        return self.engine is not None and self.engine_kind == "async"
+
+    async def _maybe_await(self, value: Any) -> Any:
+        if inspect.isawaitable(value):
+            return await value
+        return value
+
+    async def _get_async_engine_tokenizer(self) -> Any:
+        if self.engine is None:
+            raise RuntimeError("vLLM engine is not initialized")
+
+        for candidate in (
+            self.engine,
+            getattr(self.engine, "engine", None),
+            getattr(self.engine, "engine_client", None),
+            getattr(self.engine, "llm_engine", None),
+        ):
+            if candidate is None:
+                continue
+            get_tokenizer = getattr(candidate, "get_tokenizer", None)
+            if callable(get_tokenizer):
+                return await self._maybe_await(get_tokenizer())
+            tokenizer = getattr(candidate, "tokenizer", None)
+            if tokenizer is not None:
+                return tokenizer
+
+        raise BackendRequestValidationError(
+            "This vLLM async engine does not expose a tokenizer for chat templating.",
+            code="unsupported_parameter",
+        )
+
+    async def _build_async_engine_chat_prompt(
+        self,
+        messages: list[dict[str, Any]],
+        chat_kwargs: dict[str, Any],
+    ) -> str:
+        if any(not isinstance(message.get("content"), str) for message in messages):
+            raise BackendRequestValidationError(
+                "Async vLLM chat streaming currently supports text-only chat content.",
+                code="unsupported_message_content",
+            )
+
+        tokenizer = await self._get_async_engine_tokenizer()
+        apply_chat_template = getattr(tokenizer, "apply_chat_template", None)
+        if not callable(apply_chat_template):
+            raise BackendRequestValidationError(
+                "This vLLM async engine tokenizer does not support chat templates.",
+                code="unsupported_parameter",
+            )
+
+        template_kwargs = dict(chat_kwargs.get("chat_template_kwargs") or {})
+        for key in ("enable_thinking", "reasoning", "thinking"):
+            if key in chat_kwargs and key not in template_kwargs:
+                template_kwargs[key] = chat_kwargs[key]
+        prompt = apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            **template_kwargs,
+        )
+        if not isinstance(prompt, str):
+            raise BackendRequestValidationError(
+                "This vLLM async engine produced a non-text chat template prompt.",
+                code="unsupported_parameter",
+            )
+        return prompt
+
+    def _build_async_engine_sampling_params_instance(self, sampling_params: dict[str, Any]) -> Any:
+        try:
+            from vllm import SamplingParams
+        except ImportError:
+            return dict(sampling_params)
+        return self._build_sampling_params_instance(
+            sampling_params,
+            sampling_params_cls=SamplingParams,
+        )
+
+    async def _invoke_async_engine_chat_stream(
+        self,
+        messages: list[dict[str, Any]],
+        sampling_params: dict[str, Any],
+        *,
+        chat_kwargs: dict[str, Any],
+        request_id: str,
+    ) -> Any:
+        if self.engine is None:
+            raise RuntimeError("vLLM engine is not initialized")
+        generate = getattr(self.engine, "generate", None)
+        if not callable(generate):
+            raise BackendRequestValidationError(
+                "This vLLM async engine does not expose generate().",
+                code="unsupported_parameter",
+            )
+
+        prompt = await self._build_async_engine_chat_prompt(messages, chat_kwargs)
+        sampling_params_instance = self._build_async_engine_sampling_params_instance(sampling_params)
+        generate_kwargs = self._filter_kwargs_for_callable(generate, {})
+        stream = generate(
+            prompt,
+            sampling_params_instance,
+            request_id,
+            **generate_kwargs,
+        )
+        return await self._maybe_await(stream)
+
+    async def _collect_async_engine_chat_completion(
+        self,
+        request: ChatCompletionsRequest,
+        runtime_spec: dict[str, Any],
+        runtime_context: dict[str, Any],
+        sampling_params: dict[str, Any],
+        chat_kwargs: dict[str, Any],
+    ) -> dict[str, Any]:
+        messages = self._build_chat_messages(request, runtime_context=runtime_context)
+        request_id = f"chatcmpl-{uuid4().hex}"
+        stream = await self._invoke_async_engine_chat_stream(
+            messages,
+            sampling_params,
+            chat_kwargs=chat_kwargs,
+            request_id=request_id,
+        )
+        final_item = None
+        async for item in self._iter_chat_stream_outputs(stream):
+            final_item = item
+        if final_item is None:
+            raise RuntimeError("vLLM async chat returned no result")
+        return self._convert_chat_result(
+            request=request,
+            runtime_spec=runtime_spec,
+            runtime_context=runtime_context,
+            result=[final_item],
+            sampling_params=sampling_params,
+            chat_kwargs=chat_kwargs,
+        )
+
     def _invoke_chat_callable(
         self,
         messages: list[dict[str, Any]],
@@ -1025,11 +1225,19 @@ class VLLMBackend(InferenceBackend):
             return
 
         messages = self._build_chat_messages(request, runtime_context=runtime_context)
-        stream = self._invoke_vllm_chat_stream(
-            messages,
-            sampling_params,
-            chat_kwargs=chat_kwargs,
-        )
+        if self._is_async_engine():
+            stream = await self._invoke_async_engine_chat_stream(
+                messages,
+                sampling_params,
+                chat_kwargs=chat_kwargs,
+                request_id=response_id,
+            )
+        else:
+            stream = self._invoke_vllm_chat_stream(
+                messages,
+                sampling_params,
+                chat_kwargs=chat_kwargs,
+            )
         previous_text = ""
         async for item in self._iter_chat_stream_outputs(stream):
             text, finish_reason = self._extract_stream_output_text_and_finish(item)
@@ -1074,6 +1282,14 @@ class VLLMBackend(InferenceBackend):
         """
         if self.engine is None:
             response = self._build_chat_stub_response(
+                request,
+                runtime_spec,
+                runtime_context,
+                sampling_params,
+                chat_kwargs,
+            )
+        elif self._is_async_engine():
+            response = await self._collect_async_engine_chat_completion(
                 request,
                 runtime_spec,
                 runtime_context,
@@ -1645,7 +1861,7 @@ class VLLMBackend(InferenceBackend):
         request: ChatCompletionsRequest,
         runtime_context: dict[str, Any],
     ) -> dict[str, Any]:
-        if self.openai_serving_chat_adapter is not None:
+        if self.openai_serving_chat_adapter is not None and not self._is_async_engine():
             request_payload = self._build_openai_serving_request_payload(
                 request,
                 runtime_spec=runtime_spec,
@@ -1662,6 +1878,14 @@ class VLLMBackend(InferenceBackend):
         chat_kwargs = self._build_chat_kwargs(request, runtime_spec=runtime_spec)
         if self.engine is None:
             return self._build_chat_stub_response(
+                request,
+                runtime_spec,
+                runtime_context,
+                sampling_params,
+                chat_kwargs,
+            )
+        if self._is_async_engine():
+            return await self._collect_async_engine_chat_completion(
                 request,
                 runtime_spec,
                 runtime_context,

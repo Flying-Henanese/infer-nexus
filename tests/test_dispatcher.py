@@ -198,6 +198,71 @@ def test_chat_stream_response_forwards_raw_sse_bytes_unchanged() -> None:
     assert asyncio.run(collect()) == raw
 
 
+def test_chat_stream_response_maps_standard_delta_events_to_openai_sse() -> None:
+    """Backend-standard delta events should be exposed as OpenAI-compatible SSE chunks."""
+    executor = RuntimeExecutor()
+    request = ChatCompletionsRequest(
+        model='qwen3-chat',
+        messages=[{'role': 'user', 'content': 'hello'}],
+        stream=True,
+    )
+    target = RuntimeTarget(
+        model_name='qwen3-32b-instruct',
+        model_alias='qwen3-chat',
+        backend=BackendType.VLLM,
+        app_name='infer-nexus-model-qwen3-32b-instruct',
+        deployment_name='model-qwen3-32b-instruct',
+        runtime_context={'served_model_name': 'qwen3-chat'},
+    )
+
+    async def chunks():
+        yield {
+            'type': 'chat_delta',
+            'id': 'chatcmpl-native',
+            'created': 123,
+            'model': 'qwen3-chat',
+            'delta_text': 'hel',
+            'finish_reason': None,
+        }
+        yield {
+            'type': 'chat_delta',
+            'id': 'chatcmpl-native',
+            'created': 123,
+            'model': 'qwen3-chat',
+            'delta_text': 'lo',
+            'finish_reason': None,
+        }
+        yield {
+            'type': 'chat_delta',
+            'id': 'chatcmpl-native',
+            'created': 123,
+            'model': 'qwen3-chat',
+            'delta_text': '',
+            'finish_reason': 'stop',
+        }
+
+    response = executor._build_chat_stream_response(request, target, chunks())
+
+    async def collect() -> list[dict | str]:
+        payloads = []
+        async for chunk in response.body_iterator:
+            text = chunk.decode('utf-8')
+            for line in text.splitlines():
+                if not line.startswith('data: '):
+                    continue
+                payload = line.removeprefix('data: ')
+                payloads.append('[DONE]' if payload == '[DONE]' else json.loads(payload))
+        return payloads
+
+    payloads = asyncio.run(collect())
+
+    assert payloads[0]['choices'][0]['delta'] == {'role': 'assistant'}
+    assert payloads[1]['choices'][0]['delta'] == {'content': 'hel'}
+    assert payloads[2]['choices'][0]['delta'] == {'content': 'lo'}
+    assert payloads[3]['choices'][0]['finish_reason'] == 'stop'
+    assert payloads[4] == '[DONE]'
+
+
 def test_dispatch_embedding_returns_stub_embedding_response() -> None:
     """stub 模式下 embedding 分发应返回占位向量。"""
     registry, _, dispatcher = make_dispatcher()
@@ -337,6 +402,11 @@ class FakeStreamingDeploymentHandle(FakeDeploymentHandle):
     def __init__(self, deployment_name: str, captured_payloads: list[dict]) -> None:
         super().__init__(deployment_name)
         self.chat_completion_stream = FakeStreamingDeploymentMethod(captured_payloads)
+        self.options_calls: list[dict] = []
+
+    def options(self, **kwargs):
+        self.options_calls.append(kwargs)
+        return self
 
 
 class FakeStreamingServe:
@@ -344,10 +414,13 @@ class FakeStreamingServe:
 
     def __init__(self) -> None:
         self.captured_payloads: list[dict] = []
+        self.handles: list[FakeStreamingDeploymentHandle] = []
 
     def get_deployment_handle(self, deployment_name: str, app_name: str) -> FakeStreamingDeploymentHandle:
         assert app_name.startswith('infer-nexus-model-')
-        return FakeStreamingDeploymentHandle(deployment_name, self.captured_payloads)
+        handle = FakeStreamingDeploymentHandle(deployment_name, self.captured_payloads)
+        self.handles.append(handle)
+        return handle
 
 
 class FakeOpenAIChatDeploymentHandle:
@@ -455,6 +528,7 @@ def test_dispatch_chat_stream_uses_serve_streaming_handle_without_rewriting_requ
     assert isinstance(response, StreamingResponse)
     assert fake_serve.captured_payloads[0]['stream'] is True
     assert fake_serve.captured_payloads[0]['extra_body'] == {'top_k': 50}
+    assert fake_serve.handles[0].options_calls[0] == {'stream': True}
 
     async def collect() -> bytes:
         chunks = []

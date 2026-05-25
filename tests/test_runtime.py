@@ -10,6 +10,7 @@ from infer_nexus.catalog.loader import load_model_catalog
 from infer_nexus.catalog.models import ModelCatalogFile, ModelConfig
 from infer_nexus.catalog.registry import ModelRegistry
 from infer_nexus.backends.vllm import DynamicVLLMOpenAIChatServingAdapter
+from infer_nexus.backends.vllm import OpenAIServingEngineClientCompatProxy
 from infer_nexus.core.errors import BackendConfigurationError, BackendRequestValidationError
 from infer_nexus.core.enums import TaskType
 from infer_nexus.core.schemas import ChatCompletionsRequest, EmbeddingRequest, RerankRequest
@@ -1091,8 +1092,8 @@ def test_vllm_backend_chat_completion_passthroughs_openai_serving_payload() -> N
     ]
 
 
-def test_vllm_backend_chat_completion_stream_passthroughs_openai_serving_chunks() -> None:
-    """OpenAI serving adapter stream chunks should be forwarded without rewriting."""
+def test_vllm_backend_chat_completion_stream_emits_standard_delta_events() -> None:
+    """Streaming chat should emit backend-standard delta events, independent of OpenAI serving."""
     runtime_spec = {
         'backend': 'vllm',
         'task_mode': 'generate',
@@ -1110,23 +1111,7 @@ def test_vllm_backend_chat_completion_stream_passthroughs_openai_serving_chunks(
         'deployment_name': 'model-qwen3-32b-instruct',
         'served_model_name': 'qwen3-chat',
     }
-    expected_chunks = [
-        {
-            'id': 'chatcmpl-serving',
-            'object': 'chat.completion.chunk',
-            'created': 123,
-            'model': 'qwen3-chat',
-            'choices': [
-                {
-                    'index': 0,
-                    'delta': {'role': 'assistant', 'reasoning_content': '先想'},
-                    'finish_reason': None,
-                }
-            ],
-        },
-        b'data: [DONE]\n\n',
-    ]
-    adapter = FakeOpenAIChatServingAdapter(stream_chunks=expected_chunks)
+    adapter = FakeOpenAIChatServingAdapter(stream_chunks=[b'data: [DONE]\n\n'])
     backend = VLLMBackend(runtime_spec)
     backend.openai_serving_chat_adapter = adapter
 
@@ -1137,19 +1122,7 @@ def test_vllm_backend_chat_completion_stream_passthroughs_openai_serving_chunks(
                 runtime_spec,
                 ChatCompletionsRequest(
                     model='qwen3-chat',
-                    messages=[
-                        {
-                            'role': 'assistant',
-                            'content': None,
-                            'tool_calls': [
-                                {
-                                    'id': 'call_1',
-                                    'type': 'function',
-                                    'function': {'name': 'lookup', 'arguments': '{}'},
-                                }
-                            ],
-                        }
-                    ],
+                    messages=[{'role': 'user', 'content': 'hello'}],
                     stream=True,
                     stream_options={'include_usage': True},
                 ),
@@ -1159,11 +1132,437 @@ def test_vllm_backend_chat_completion_stream_passthroughs_openai_serving_chunks(
 
     chunks = asyncio.run(collect())
 
-    assert chunks == expected_chunks
-    assert adapter.requests == [
+    assert len(chunks) == 2
+    assert chunks[0]['type'] == 'chat_delta'
+    assert chunks[0]['delta_text'].startswith('backend stub response from vllm')
+    assert chunks[0]['finish_reason'] is None
+    assert chunks[1]['type'] == 'chat_delta'
+    assert chunks[1]['delta_text'] == ''
+    assert chunks[1]['finish_reason'] == 'stop'
+    assert adapter.requests == []
+
+
+def test_vllm_backend_chat_completion_stream_uses_native_vllm_deltas() -> None:
+    """Native vLLM streaming output should be normalized into text delta events."""
+    captured = {}
+
+    class FakeOutput:
+        def __init__(self, text: str, finish_reason: str | None = None) -> None:
+            self.text = text
+            self.finish_reason = finish_reason
+
+    class FakeRequestOutput:
+        def __init__(self, text: str, finish_reason: str | None = None) -> None:
+            self.outputs = [FakeOutput(text, finish_reason)]
+
+    class FakeStreamingLLM:
+        def chat(self, messages, *, stream: bool, temperature, top_p, max_tokens, **kwargs):
+            captured['messages'] = messages
+            captured['stream'] = stream
+            captured['temperature'] = temperature
+            captured['top_p'] = top_p
+            captured['max_tokens'] = max_tokens
+
+            async def iterator():
+                yield FakeRequestOutput('hel')
+                yield FakeRequestOutput('hello')
+                yield FakeRequestOutput('hello', 'stop')
+
+            return iterator()
+
+    runtime_spec = {
+        'backend': 'vllm',
+        'task_mode': 'generate',
+        'request_defaults': {},
+        'request_policy': {},
+        'served_model_name': 'qwen3-chat',
+        'capabilities': [],
+    }
+    runtime_context = {
+        'deployment_name': 'model-qwen3-32b-instruct',
+        'served_model_name': 'qwen3-chat',
+    }
+    backend = VLLMBackend(runtime_spec)
+    backend.engine = FakeStreamingLLM()
+    backend.engine_state = 'ready'
+
+    async def collect() -> list[dict | bytes | str]:
+        return [
+            chunk
+            async for chunk in backend.chat_completion_stream(
+                runtime_spec,
+                ChatCompletionsRequest(
+                    model='qwen3-chat',
+                    messages=[{'role': 'user', 'content': 'hello'}],
+                    stream=True,
+                    max_tokens=16,
+                    temperature=0.1,
+                ),
+                runtime_context,
+            )
+        ]
+
+    chunks = asyncio.run(collect())
+
+    assert captured == {
+        'messages': [{'role': 'user', 'content': 'hello'}],
+        'stream': True,
+        'temperature': 0.1,
+        'top_p': 1.0,
+        'max_tokens': 16,
+    }
+    assert [chunk['delta_text'] for chunk in chunks] == ['hel', 'lo', '']
+    assert [chunk['finish_reason'] for chunk in chunks] == [None, None, 'stop']
+    assert {chunk['type'] for chunk in chunks} == {'chat_delta'}
+
+
+def test_vllm_backend_chat_completion_stream_uses_async_engine_generate_deltas() -> None:
+    """AsyncLLMEngine outputs should be normalized into incremental chat delta events."""
+    captured = {}
+
+    class FakeTokenizer:
+        def apply_chat_template(self, messages, *, tokenize, add_generation_prompt, **kwargs):
+            captured['template_messages'] = messages
+            captured['template_kwargs'] = kwargs
+            captured['tokenize'] = tokenize
+            captured['add_generation_prompt'] = add_generation_prompt
+            return '<chat prompt>'
+
+    class FakeOutput:
+        def __init__(self, text: str, finish_reason: str | None = None) -> None:
+            self.text = text
+            self.finish_reason = finish_reason
+
+    class FakeRequestOutput:
+        def __init__(self, text: str, finish_reason: str | None = None) -> None:
+            self.outputs = [FakeOutput(text, finish_reason)]
+
+    class FakeAsyncEngine:
+        def get_tokenizer(self):
+            return FakeTokenizer()
+
+        def generate(self, prompt, sampling_params, request_id):
+            captured['prompt'] = prompt
+            captured['sampling_params'] = sampling_params
+            captured['request_id'] = request_id
+
+            async def iterator():
+                yield FakeRequestOutput('hel')
+                yield FakeRequestOutput('hello')
+                yield FakeRequestOutput('hello', 'stop')
+
+            return iterator()
+
+    runtime_spec = {
+        'backend': 'vllm',
+        'task_mode': 'generate',
+        'request_defaults': {'chat_template_kwargs': {'enable_thinking': False}},
+        'request_policy': {'allow_reasoning': True},
+        'served_model_name': 'qwen3-chat',
+        'capabilities': [],
+    }
+    runtime_context = {
+        'deployment_name': 'model-qwen3-32b-instruct',
+        'served_model_name': 'qwen3-chat',
+    }
+    backend = VLLMBackend(runtime_spec)
+    backend.engine = FakeAsyncEngine()
+    backend.engine_kind = 'async'
+    backend.engine_state = 'ready'
+
+    async def collect() -> list[dict | bytes | str]:
+        return [
+            chunk
+            async for chunk in backend.chat_completion_stream(
+                runtime_spec,
+                ChatCompletionsRequest(
+                    model='qwen3-chat',
+                    messages=[{'role': 'user', 'content': 'hello'}],
+                    stream=True,
+                    max_tokens=16,
+                    temperature=0.1,
+                    extra_body={'enable_thinking': False},
+                ),
+                runtime_context,
+            )
+        ]
+
+    chunks = asyncio.run(collect())
+
+    assert captured['prompt'] == '<chat prompt>'
+    assert captured['request_id'].startswith('chatcmpl-')
+    assert captured['sampling_params'] == {'temperature': 0.1, 'top_p': 1.0, 'max_tokens': 16}
+    assert captured['template_messages'] == [{'role': 'user', 'content': 'hello'}]
+    assert captured['template_kwargs'] == {'enable_thinking': False}
+    assert captured['tokenize'] is False
+    assert captured['add_generation_prompt'] is True
+    assert [chunk['delta_text'] for chunk in chunks] == ['hel', 'lo', '']
+    assert [chunk['finish_reason'] for chunk in chunks] == [None, None, 'stop']
+
+
+def test_vllm_backend_chat_completion_uses_async_engine_generate_result() -> None:
+    """Non-streaming chat should aggregate the final AsyncLLMEngine output."""
+    class FakeTokenizer:
+        def apply_chat_template(self, messages, *, tokenize, add_generation_prompt, **kwargs):
+            return '<chat prompt>'
+
+    class FakeOutput:
+        text = 'final answer'
+        finish_reason = 'stop'
+        token_ids = [1, 2, 3]
+
+    class FakeRequestOutput:
+        outputs = [FakeOutput()]
+        prompt_token_ids = [4, 5]
+
+    class FakeAsyncEngine:
+        def get_tokenizer(self):
+            return FakeTokenizer()
+
+        def generate(self, prompt, sampling_params, request_id):
+            async def iterator():
+                yield FakeRequestOutput()
+
+            return iterator()
+
+    runtime_spec = {
+        'backend': 'vllm',
+        'task_mode': 'generate',
+        'request_defaults': {},
+        'request_policy': {},
+        'served_model_name': 'qwen3-chat',
+        'capabilities': [],
+    }
+    backend = VLLMBackend(runtime_spec)
+    backend.engine = FakeAsyncEngine()
+    backend.engine_kind = 'async'
+    backend.engine_state = 'ready'
+
+    response = asyncio.run(
+        backend.chat_completion(
+            runtime_spec,
+            ChatCompletionsRequest(
+                model='qwen3-chat',
+                messages=[{'role': 'user', 'content': 'hello'}],
+                stream=False,
+            ),
+            {'deployment_name': 'model-qwen3-32b-instruct'},
+        )
+    )
+
+    assert response['content'] == 'final answer'
+    assert response['finish_reason'] == 'stop'
+    assert response['usage'] == {
+        'prompt_tokens': 2,
+        'completion_tokens': 3,
+        'total_tokens': 5,
+    }
+
+
+def test_vllm_backend_startup_prefers_async_engine_for_chat(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Real chat startup should prefer AsyncLLMEngine without requiring model config changes."""
+    captured = {}
+
+    class FakeAsyncEngineArgs:
+        def __init__(
+            self,
+            *,
+            model,
+            tensor_parallel_size,
+            dtype,
+            task,
+            gpu_memory_utilization=None,
+            max_model_len=None,
+        ):
+            captured['engine_args'] = {
+                'model': model,
+                'tensor_parallel_size': tensor_parallel_size,
+                'dtype': dtype,
+                'task': task,
+                'gpu_memory_utilization': gpu_memory_utilization,
+                'max_model_len': max_model_len,
+            }
+
+    class FakeAsyncLLMEngine:
+        @classmethod
+        def from_engine_args(cls, engine_args):
+            captured['from_engine_args'] = engine_args
+            return cls()
+
+    vllm_module = types.ModuleType('vllm')
+    vllm_module.__path__ = []
+    engine_module = types.ModuleType('vllm.engine')
+    engine_module.__path__ = []
+    arg_utils_module = types.ModuleType('vllm.engine.arg_utils')
+    arg_utils_module.AsyncEngineArgs = FakeAsyncEngineArgs
+    async_engine_module = types.ModuleType('vllm.engine.async_llm_engine')
+    async_engine_module.AsyncLLMEngine = FakeAsyncLLMEngine
+    monkeypatch.setitem(sys.modules, 'vllm', vllm_module)
+    monkeypatch.setitem(sys.modules, 'vllm.engine', engine_module)
+    monkeypatch.setitem(sys.modules, 'vllm.engine.arg_utils', arg_utils_module)
+    monkeypatch.setitem(sys.modules, 'vllm.engine.async_llm_engine', async_engine_module)
+
+    backend = VLLMBackend(
         {
-            'model': 'qwen3-chat',
-            'messages': [
+            'backend_init_mode': 'real',
+            'backend': 'vllm',
+            'task_mode': 'generate',
+            'model_path': '/models/qwen',
+            'tensor_parallel_size': 1,
+            'dtype': 'bfloat16',
+            'gpu_memory_utilization': 0.35,
+            'max_model_len': 4096,
+            'engine_kwargs': {'trust_remote_code': True},
+            'model_loading_config': {},
+        }
+    )
+
+    backend.startup()
+
+    assert backend.engine_kind == 'async'
+    assert isinstance(backend.engine, FakeAsyncLLMEngine)
+    assert backend.openai_serving_chat_adapter is None
+    assert captured['engine_args'] == {
+        'model': '/models/qwen',
+        'tensor_parallel_size': 1,
+        'dtype': 'bfloat16',
+        'task': 'generate',
+        'gpu_memory_utilization': 0.35,
+        'max_model_len': 4096,
+    }
+    assert captured['from_engine_args'] is not None
+
+
+def test_vllm_backend_chat_completion_stream_wraps_non_incremental_vllm_result() -> None:
+    """Sync vLLM chat results should still be exposed as SSE-compatible delta events."""
+    class FakeOutput:
+        text = 'full response'
+        finish_reason = 'stop'
+        token_ids = [1, 2]
+
+    class FakeRequestOutput:
+        outputs = [FakeOutput()]
+        prompt_token_ids = [3]
+
+    class FakeNonStreamingLLM:
+        def chat(self, messages, *, temperature, top_p, max_tokens):
+            return [FakeRequestOutput()]
+
+    runtime_spec = {
+        'backend': 'vllm',
+        'task_mode': 'generate',
+        'request_defaults': {},
+        'request_policy': {},
+        'served_model_name': 'qwen3-chat',
+        'capabilities': [],
+    }
+    backend = VLLMBackend(runtime_spec)
+    backend.engine = FakeNonStreamingLLM()
+    backend.engine_state = 'ready'
+
+    async def collect() -> list[dict | bytes | str]:
+        return [
+            chunk
+            async for chunk in backend.chat_completion_stream(
+                runtime_spec,
+                ChatCompletionsRequest(
+                    model='qwen3-chat',
+                    messages=[{'role': 'user', 'content': 'hello'}],
+                    stream=True,
+                ),
+                {'deployment_name': 'model-qwen3-32b-instruct'},
+            )
+        ]
+
+    chunks = asyncio.run(collect())
+
+    assert [chunk['delta_text'] for chunk in chunks] == ['full response', '']
+    assert [chunk['finish_reason'] for chunk in chunks] == [None, 'stop']
+
+
+def test_vllm_backend_chat_completion_stream_does_not_use_openai_serving_for_sync_fallback() -> None:
+    """The sync fallback should not depend on vLLM OpenAI serving private stream APIs."""
+    class FakeOutput:
+        text = 'fallback'
+        finish_reason = 'stop'
+        token_ids = [1]
+
+    class FakeRequestOutput:
+        outputs = [FakeOutput()]
+        prompt_token_ids = [2]
+
+    class FakeNonStreamingLLM:
+        def chat(self, messages, *, temperature, top_p, max_tokens):
+            return [FakeRequestOutput()]
+
+    runtime_spec = {
+        'backend': 'vllm',
+        'task_mode': 'generate',
+        'request_defaults': {},
+        'request_policy': {
+            'allow_tools': True,
+            'allow_reasoning': True,
+            'passthrough_unknown_openai_fields': True,
+        },
+        'openai_serving': {'enabled': True},
+        'served_model_name': 'qwen3-chat',
+        'capabilities': [],
+    }
+    runtime_context = {
+        'deployment_name': 'model-qwen3-32b-instruct',
+        'served_model_name': 'qwen3-chat',
+    }
+    adapter = FakeOpenAIChatServingAdapter(stream_chunks=[b'data: [DONE]\n\n'])
+    backend = VLLMBackend(runtime_spec)
+    backend.engine = FakeNonStreamingLLM()
+    backend.engine_state = 'ready'
+    backend.openai_serving_chat_adapter = adapter
+
+    async def collect() -> list[dict | bytes | str]:
+        return [
+            chunk
+            async for chunk in backend.chat_completion_stream(
+                runtime_spec,
+                ChatCompletionsRequest(
+                    model='qwen3-chat',
+                    messages=[{'role': 'user', 'content': 'hello'}],
+                    stream=True,
+                ),
+                runtime_context,
+            )
+        ]
+
+    chunks = asyncio.run(collect())
+
+    assert [chunk['delta_text'] for chunk in chunks] == ['fallback', '']
+    assert [chunk['finish_reason'] for chunk in chunks] == [None, 'stop']
+    assert adapter.requests == []
+
+
+def test_vllm_backend_builds_openai_serving_stream_payload_for_legacy_adapter() -> None:
+    """Legacy OpenAI serving payload construction remains available for explicit fallback paths."""
+    runtime_spec = {
+        'backend': 'vllm',
+        'task_mode': 'generate',
+        'request_defaults': {},
+        'request_policy': {
+            'allow_tools': True,
+            'allow_reasoning': True,
+            'passthrough_unknown_openai_fields': True,
+        },
+        'openai_serving': {'enabled': True},
+        'served_model_name': 'qwen3-chat',
+        'capabilities': [],
+    }
+    runtime_context = {
+        'deployment_name': 'model-qwen3-32b-instruct',
+        'served_model_name': 'qwen3-chat',
+    }
+    backend = VLLMBackend(runtime_spec)
+    payload = backend._build_openai_serving_request_payload(
+        ChatCompletionsRequest(
+            model='qwen3-chat',
+            messages=[
                 {
                     'role': 'assistant',
                     'content': None,
@@ -1176,10 +1575,58 @@ def test_vllm_backend_chat_completion_stream_passthroughs_openai_serving_chunks(
                     ],
                 }
             ],
-            'stream': True,
-            'stream_options': {'include_usage': True},
-        }
-    ]
+            stream=True,
+            stream_options={'include_usage': True},
+        ),
+        runtime_spec=runtime_spec,
+        runtime_context=runtime_context,
+    )
+
+    assert payload == {
+        'model': 'qwen3-chat',
+        'messages': [
+            {
+                'role': 'assistant',
+                'content': None,
+                'tool_calls': [
+                    {
+                        'id': 'call_1',
+                        'type': 'function',
+                        'function': {'name': 'lookup', 'arguments': '{}'},
+                    }
+                ],
+            }
+        ],
+        'stream': True,
+        'stream_options': {'include_usage': True},
+    }
+
+
+def test_openai_serving_engine_client_proxy_adapts_sync_llm_generate_signature() -> None:
+    """Compat proxy should drop async-engine request_id args for sync LLM.generate."""
+    captured = {}
+
+    class FakeSyncLLM:
+        model_config = 'model-config'
+
+        def generate(self, prompts, sampling_params=None, *, use_tqdm=True):
+            captured['prompts'] = prompts
+            captured['sampling_params'] = sampling_params
+            captured['use_tqdm'] = use_tqdm
+            return ['output']
+
+    proxy = OpenAIServingEngineClientCompatProxy(FakeSyncLLM(), [])
+    result = proxy.generate('prompt', 'sampling', 'request-id', use_tqdm=False, trace_headers={})
+
+    async def collect() -> list[str]:
+        return [item async for item in result]
+
+    assert asyncio.run(collect()) == ['output']
+    assert captured == {
+        'prompts': 'prompt',
+        'sampling_params': 'sampling',
+        'use_tqdm': False,
+    }
 
 
 def test_vllm_backend_initializes_openai_serving_adapter_via_dynamic_imports(
@@ -1234,7 +1681,8 @@ def test_vllm_backend_initializes_openai_serving_adapter_via_dynamic_imports(
 
     assert isinstance(adapter, DynamicVLLMOpenAIChatServingAdapter)
     assert backend.openai_serving_adapter_init_error is None
-    assert adapter.serving_chat.engine_client is engine_client
+    serving_engine_client = adapter.serving_chat.engine_client
+    assert getattr(serving_engine_client, "_client", serving_engine_client) is engine_client
     assert adapter.serving_chat.response_role == 'assistant'
     assert adapter.serving_chat.reasoning_parser == 'qwen3'
     assert adapter.serving_chat.default_chat_template_kwargs == {'enable_thinking': False}

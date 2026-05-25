@@ -7,11 +7,15 @@ import importlib
 import inspect
 import re
 import struct
+from io import BytesIO
+from pathlib import Path
 from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass
 from time import time
 from typing import Any, Protocol
 from uuid import uuid4
+from urllib.parse import urlparse
+from urllib.request import urlopen
 
 from infer_nexus.backends.base import InferenceBackend
 from infer_nexus.catalog.models import ModelConfig
@@ -895,17 +899,103 @@ class VLLMBackend(InferenceBackend):
             code="unsupported_parameter",
         )
 
+    def _load_async_engine_image_asset(self, image_url: str) -> Any:
+        """Load a vision asset into a vLLM-friendly in-memory image object."""
+        try:
+            from PIL import Image
+        except ImportError as exc:
+            raise BackendRequestValidationError(
+                "Async vLLM multimodal chat requires Pillow for image decoding.",
+                code="unsupported_parameter",
+            ) from exc
+
+        normalized_url = self._normalize_data_url(image_url)
+        parsed = urlparse(normalized_url)
+
+        try:
+            if normalized_url.startswith("data:") and ";base64," in normalized_url:
+                _, payload = normalized_url.split(",", 1)
+                image_bytes = base64.b64decode(payload)
+                return Image.open(BytesIO(image_bytes)).convert("RGB")
+
+            if parsed.scheme in {"http", "https"}:
+                with urlopen(normalized_url, timeout=10) as response:
+                    image_bytes = response.read()
+                return Image.open(BytesIO(image_bytes)).convert("RGB")
+
+            candidate_path = Path(normalized_url)
+            if candidate_path.exists():
+                return Image.open(candidate_path).convert("RGB")
+        except Exception as exc:
+            raise BackendRequestValidationError(
+                f"Async vLLM multimodal chat could not load image input: {exc}",
+                code="unsupported_parameter",
+            ) from exc
+
+        raise BackendRequestValidationError(
+            "Async vLLM multimodal chat requires image_url values that are data URLs, "
+            "HTTP(S) URLs, or readable local file paths.",
+            code="unsupported_parameter",
+        )
+
+    def _build_async_engine_multi_modal_data(
+        self,
+        messages: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        image_assets: list[Any] = []
+        for message in messages:
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") != "image_url":
+                    continue
+                image_url = ((block.get("image_url") or {}).get("url"))
+                if not isinstance(image_url, str):
+                    raise BackendRequestValidationError(
+                        "Async vLLM multimodal chat requires image_url.url to be a string.",
+                        code="unsupported_parameter",
+                    )
+                image_assets.append(self._load_async_engine_image_asset(image_url))
+
+        if not image_assets:
+            return None
+        return {"image": image_assets}
+
+    def _build_async_engine_generate_input(
+        self,
+        generate: Any,
+        prompt: str,
+        multi_modal_data: dict[str, Any] | None,
+    ) -> tuple[Any, dict[str, Any]]:
+        if multi_modal_data is None:
+            return prompt, {}
+
+        try:
+            signature = inspect.signature(generate)
+        except (TypeError, ValueError):
+            signature = None
+
+        accepts_multi_modal_kwarg = False
+        if signature is not None:
+            accepts_multi_modal_kwarg = any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                or name == "multi_modal_data"
+                for name, parameter in signature.parameters.items()
+            )
+
+        if accepts_multi_modal_kwarg:
+            return prompt, {"multi_modal_data": multi_modal_data}
+
+        return {"prompt": prompt, "multi_modal_data": multi_modal_data}, {}
+
     async def _build_async_engine_chat_prompt(
         self,
         messages: list[dict[str, Any]],
         chat_kwargs: dict[str, Any],
-    ) -> str:
-        if any(not isinstance(message.get("content"), str) for message in messages):
-            raise BackendRequestValidationError(
-                "Async vLLM chat streaming currently supports text-only chat content.",
-                code="unsupported_message_content",
-            )
-
+    ) -> tuple[str, dict[str, Any] | None]:
         tokenizer = await self._get_async_engine_tokenizer()
         apply_chat_template = getattr(tokenizer, "apply_chat_template", None)
         if not callable(apply_chat_template):
@@ -929,7 +1019,10 @@ class VLLMBackend(InferenceBackend):
                 "This vLLM async engine produced a non-text chat template prompt.",
                 code="unsupported_parameter",
             )
-        return prompt
+        multi_modal_data = None
+        if any(isinstance(message.get("content"), list) for message in messages):
+            multi_modal_data = self._build_async_engine_multi_modal_data(messages)
+        return prompt, multi_modal_data
 
     def _build_async_engine_sampling_params_instance(self, sampling_params: dict[str, Any]) -> Any:
         try:
@@ -958,11 +1051,15 @@ class VLLMBackend(InferenceBackend):
                 code="unsupported_parameter",
             )
 
-        prompt = await self._build_async_engine_chat_prompt(messages, chat_kwargs)
+        prompt, multi_modal_data = await self._build_async_engine_chat_prompt(messages, chat_kwargs)
         sampling_params_instance = self._build_async_engine_sampling_params_instance(sampling_params)
-        generate_kwargs = self._filter_kwargs_for_callable(generate, {})
-        stream = generate(
+        generate_input, generate_kwargs = self._build_async_engine_generate_input(
+            generate,
             prompt,
+            multi_modal_data,
+        )
+        stream = generate(
+            generate_input,
             sampling_params_instance,
             request_id,
             **generate_kwargs,
@@ -995,6 +1092,43 @@ class VLLMBackend(InferenceBackend):
             runtime_spec=runtime_spec,
             runtime_context=runtime_context,
             result=[final_item],
+            sampling_params=sampling_params,
+            chat_kwargs=chat_kwargs,
+        )
+
+    async def _collect_sync_chat_completion(
+        self,
+        request: ChatCompletionsRequest,
+        runtime_spec: dict[str, Any],
+        runtime_context: dict[str, Any],
+        sampling_params: dict[str, Any],
+        chat_kwargs: dict[str, Any],
+    ) -> dict[str, Any]:
+        if self.engine is None:
+            return self._build_chat_stub_response(
+                request,
+                runtime_spec,
+                runtime_context,
+                sampling_params,
+                chat_kwargs,
+            )
+        if self._is_async_engine():
+            raise BackendRequestValidationError(
+                "This vLLM async runtime does not have a sync chat fallback engine.",
+                code="unsupported_parameter",
+            )
+
+        messages = self._build_chat_messages(request, runtime_context=runtime_context)
+        result = self._invoke_vllm_chat(
+            messages,
+            sampling_params,
+            chat_kwargs=chat_kwargs,
+        )
+        return self._convert_chat_result(
+            request=request,
+            runtime_spec=runtime_spec,
+            runtime_context=runtime_context,
+            result=result,
             sampling_params=sampling_params,
             chat_kwargs=chat_kwargs,
         )
@@ -1273,6 +1407,8 @@ class VLLMBackend(InferenceBackend):
         runtime_context: dict[str, Any],
         sampling_params: dict[str, Any],
         chat_kwargs: dict[str, Any],
+        *,
+        force_sync: bool = False,
     ) -> AsyncIterator[dict[str, Any]]:
         """Expose a full non-streaming chat completion as an SSE-compatible stream.
 
@@ -1288,7 +1424,7 @@ class VLLMBackend(InferenceBackend):
                 sampling_params,
                 chat_kwargs,
             )
-        elif self._is_async_engine():
+        elif self._is_async_engine() and not force_sync:
             response = await self._collect_async_engine_chat_completion(
                 request,
                 runtime_spec,
@@ -1297,19 +1433,12 @@ class VLLMBackend(InferenceBackend):
                 chat_kwargs,
             )
         else:
-            messages = self._build_chat_messages(request, runtime_context=runtime_context)
-            result = self._invoke_vllm_chat(
-                messages,
+            response = await self._collect_sync_chat_completion(
+                request,
+                runtime_spec,
+                runtime_context,
                 sampling_params,
-                chat_kwargs=chat_kwargs,
-            )
-            response = self._convert_chat_result(
-                request=request,
-                runtime_spec=runtime_spec,
-                runtime_context=runtime_context,
-                result=result,
-                sampling_params=sampling_params,
-                chat_kwargs=chat_kwargs,
+                chat_kwargs,
             )
 
         response_id = response.get("id") or f"chatcmpl-{uuid4().hex}"
@@ -1893,18 +2022,12 @@ class VLLMBackend(InferenceBackend):
                 chat_kwargs,
             )
 
-        result = self._invoke_vllm_chat(
-            messages,
+        return await self._collect_sync_chat_completion(
+            request,
+            runtime_spec,
+            runtime_context,
             sampling_params,
-            chat_kwargs=chat_kwargs,
-        )
-        return self._convert_chat_result(
-            request=request,
-            runtime_spec=runtime_spec,
-            runtime_context=runtime_context,
-            result=result,
-            sampling_params=sampling_params,
-            chat_kwargs=chat_kwargs,
+            chat_kwargs,
         )
 
     async def chat_completion_stream(
@@ -1915,6 +2038,17 @@ class VLLMBackend(InferenceBackend):
     ) -> AsyncIterator[dict[str, Any] | bytes | str]:
         sampling_params = self._build_sampling_params(request, runtime_spec=runtime_spec)
         chat_kwargs = self._build_chat_kwargs(request, runtime_spec=runtime_spec)
+        if self.engine is None:
+            async for event in self._iter_chat_completion_deltas(
+                request,
+                runtime_spec,
+                runtime_context,
+                sampling_params,
+                chat_kwargs,
+                force_sync=True,
+            ):
+                yield event
+            return
         try:
             async for event in self._iter_chat_deltas(
                 request,
@@ -1926,7 +2060,7 @@ class VLLMBackend(InferenceBackend):
                 yield event
             return
         except BackendRequestValidationError as exc:
-            if exc.code != "unsupported_parameter":
+            if exc.code != "unsupported_parameter" or self._is_async_engine():
                 raise
 
         async for event in self._iter_chat_completion_deltas(
@@ -1935,6 +2069,7 @@ class VLLMBackend(InferenceBackend):
             runtime_context,
             sampling_params,
             chat_kwargs,
+            force_sync=True,
         ):
             yield event
 

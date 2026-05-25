@@ -1058,6 +1058,69 @@ class VLLMBackend(InferenceBackend):
                 }
                 return
 
+    async def _iter_chat_completion_deltas(
+        self,
+        request: ChatCompletionsRequest,
+        runtime_spec: dict[str, Any],
+        runtime_context: dict[str, Any],
+        sampling_params: dict[str, Any],
+        chat_kwargs: dict[str, Any],
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Expose a full non-streaming chat completion as an SSE-compatible stream.
+
+        This is a compatibility path for vLLM runtimes backed by sync LLM, which
+        cannot produce true incremental tokens but can still satisfy OpenAI
+        stream clients with one content chunk followed by a terminal chunk.
+        """
+        if self.engine is None:
+            response = self._build_chat_stub_response(
+                request,
+                runtime_spec,
+                runtime_context,
+                sampling_params,
+                chat_kwargs,
+            )
+        else:
+            messages = self._build_chat_messages(request, runtime_context=runtime_context)
+            result = self._invoke_vllm_chat(
+                messages,
+                sampling_params,
+                chat_kwargs=chat_kwargs,
+            )
+            response = self._convert_chat_result(
+                request=request,
+                runtime_spec=runtime_spec,
+                runtime_context=runtime_context,
+                result=result,
+                sampling_params=sampling_params,
+                chat_kwargs=chat_kwargs,
+            )
+
+        response_id = response.get("id") or f"chatcmpl-{uuid4().hex}"
+        created = response.get("created") or int(time())
+        model = response.get("model") or (
+            runtime_context.get("served_model_name") or runtime_spec.get("served_model_name") or request.model
+        )
+        content = response.get("content") or ""
+        finish_reason = response.get("finish_reason") or "stop"
+        if content:
+            yield {
+                "type": "chat_delta",
+                "id": response_id,
+                "created": created,
+                "model": model,
+                "delta_text": content,
+                "finish_reason": None,
+            }
+        yield {
+            "type": "chat_delta",
+            "id": response_id,
+            "created": created,
+            "model": model,
+            "delta_text": "",
+            "finish_reason": finish_reason,
+        }
+
     def _supports_multimodal(self, runtime_context: dict[str, Any] | None = None) -> bool:
         capabilities = self.runtime_spec.get("capabilities")
         if capabilities is None and runtime_context is not None:
@@ -1639,40 +1702,17 @@ class VLLMBackend(InferenceBackend):
                 yield event
             return
         except BackendRequestValidationError as exc:
-            if exc.code != "unsupported_parameter" or self.openai_serving_chat_adapter is None:
-                if exc.code == "unsupported_parameter" and self._should_use_openai_serving_adapter(runtime_spec):
-                    self.openai_serving_chat_adapter = self._initialize_openai_serving_chat_adapter()
-                    if self.openai_serving_chat_adapter is None:
-                        message = (
-                            f"{exc} OpenAI serving adapter is enabled but not initialized."
-                        )
-                        if self.openai_serving_adapter_init_error:
-                            message = (
-                                f"{message} Initialization error: "
-                                f"{self.openai_serving_adapter_init_error}"
-                            )
-                        raise BackendRequestValidationError(
-                            message,
-                            code="unsupported_parameter",
-                        ) from exc
-                else:
-                    raise
+            if exc.code != "unsupported_parameter":
+                raise
 
-        request_payload = self._build_openai_serving_request_payload(
+        async for event in self._iter_chat_completion_deltas(
             request,
-            runtime_spec=runtime_spec,
-            runtime_context=runtime_context,
-        )
-        try:
-            async for chunk in self._iter_openai_serving_stream(request_payload):
-                yield chunk
-        except Exception as exc:
-            self.openai_serving_adapter_init_error = str(exc)
-            self.openai_serving_chat_adapter = None
-            raise BackendRequestValidationError(
-                f"Streaming chat completion fallback failed: {exc}",
-                code="unsupported_parameter",
-            ) from exc
+            runtime_spec,
+            runtime_context,
+            sampling_params,
+            chat_kwargs,
+        ):
+            yield event
 
     async def embedding(
         self,

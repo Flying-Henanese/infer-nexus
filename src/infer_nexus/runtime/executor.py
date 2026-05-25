@@ -669,6 +669,9 @@ class RuntimeExecutor:
     def _encode_sse_chunk(self, chunk_payload: dict[str, Any]) -> bytes:
         return f"data: {json.dumps(chunk_payload, ensure_ascii=False)}\n\n".encode("utf-8")
 
+    def _is_chat_delta_event(self, chunk: dict[str, Any]) -> bool:
+        return chunk.get("type") == "chat_delta"
+
     def _is_done_sse_chunk(self, chunk: bytes | str) -> bool:
         if isinstance(chunk, bytes):
             text = chunk.decode("utf-8", errors="ignore")
@@ -683,7 +686,7 @@ class RuntimeExecutor:
         chunks: dict[str, Any] | AsyncIterator[dict[str, Any] | bytes | str],
     ) -> StreamingResponse:
         if not isinstance(chunks, dict):
-            return self._build_passthrough_stream_response(chunks)
+            return self._build_mapped_chat_stream_response(request, target, chunks)
 
         payload = chunks
         created = payload.get("created", int(time()))
@@ -783,6 +786,126 @@ class RuntimeExecutor:
                 )
                 return
             if not saw_done:
+                yield b"data: [DONE]\n\n"
+
+        return StreamingResponse(
+            iterator(),
+            media_type="text/event-stream",
+            headers={"X-Infer-Nexus-Request-ID": request_id},
+        )
+
+    def _build_mapped_chat_stream_response(
+        self,
+        request: ChatCompletionsRequest,
+        target: RuntimeTarget,
+        chunks: AsyncIterator[dict[str, Any] | bytes | str],
+    ) -> StreamingResponse:
+        request_id = uuid4().hex
+
+        async def iterator() -> Any:
+            saw_done = False
+            sent_role = False
+            sent_finish = False
+            response_id = f"chatcmpl-{uuid4().hex}"
+            created = int(time())
+            model = target.runtime_context.get("served_model_name", request.model)
+            try:
+                async for chunk in chunks:
+                    if isinstance(chunk, bytes):
+                        saw_done = saw_done or self._is_done_sse_chunk(chunk)
+                        yield chunk
+                        continue
+                    if isinstance(chunk, str):
+                        saw_done = saw_done or self._is_done_sse_chunk(chunk)
+                        yield chunk.encode("utf-8")
+                        continue
+                    if not self._is_chat_delta_event(chunk):
+                        yield self._encode_sse_chunk(chunk)
+                        continue
+
+                    response_id = str(chunk.get("id") or response_id)
+                    created = int(chunk.get("created") or created)
+                    model = str(chunk.get("model") or model)
+                    if not sent_role:
+                        yield self._encode_sse_chunk(
+                            {
+                                "id": response_id,
+                                "object": "chat.completion.chunk",
+                                "created": created,
+                                "model": model,
+                                "choices": [
+                                    {
+                                        "index": 0,
+                                        "delta": {"role": "assistant"},
+                                        "finish_reason": None,
+                                    }
+                                ],
+                            }
+                        )
+                        sent_role = True
+
+                    delta_text = chunk.get("delta_text")
+                    if isinstance(delta_text, str) and delta_text:
+                        yield self._encode_sse_chunk(
+                            {
+                                "id": response_id,
+                                "object": "chat.completion.chunk",
+                                "created": created,
+                                "model": model,
+                                "choices": [
+                                    {
+                                        "index": 0,
+                                        "delta": {"content": delta_text},
+                                        "finish_reason": None,
+                                    }
+                                ],
+                            }
+                        )
+
+                    finish_reason = chunk.get("finish_reason")
+                    if finish_reason:
+                        yield self._encode_sse_chunk(
+                            {
+                                "id": response_id,
+                                "object": "chat.completion.chunk",
+                                "created": created,
+                                "model": model,
+                                "choices": [
+                                    {
+                                        "index": 0,
+                                        "delta": {},
+                                        "finish_reason": finish_reason,
+                                    }
+                                ],
+                            }
+                        )
+                        sent_finish = True
+                        yield b"data: [DONE]\n\n"
+                        saw_done = True
+            except Exception as exc:
+                logger.exception(
+                    "SSE stream iteration failed for request_id '%s': %s",
+                    request_id,
+                    exc,
+                )
+                return
+            if not saw_done:
+                if sent_role and not sent_finish:
+                    yield self._encode_sse_chunk(
+                        {
+                            "id": response_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {},
+                                    "finish_reason": "stop",
+                                }
+                            ],
+                        }
+                    )
                 yield b"data: [DONE]\n\n"
 
         return StreamingResponse(

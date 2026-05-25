@@ -844,6 +844,194 @@ class VLLMBackend(InferenceBackend):
             chat_kwargs=chat_kwargs,
         )
 
+    def _chat_method_accepts_stream(self) -> bool:
+        if self.engine is None:
+            return False
+        chat_method = getattr(self.engine, "chat", None)
+        if not callable(chat_method):
+            return False
+        try:
+            signature = inspect.signature(chat_method)
+        except (TypeError, ValueError):
+            return False
+        parameters = signature.parameters
+        return "stream" in parameters or any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        )
+
+    def _invoke_vllm_chat_stream(
+        self,
+        messages: list[dict[str, Any]],
+        sampling_params: dict[str, Any],
+        *,
+        chat_kwargs: dict[str, Any],
+    ) -> Any:
+        if self.engine is None:
+            raise RuntimeError("vLLM engine is not initialized")
+        if not self._chat_method_accepts_stream():
+            raise BackendRequestValidationError(
+                "This vLLM runtime does not expose a native streaming chat API.",
+                code="unsupported_parameter",
+            )
+
+        try:
+            from vllm import SamplingParams
+        except ImportError:
+            SamplingParams = None  # type: ignore[assignment]
+
+        sampling_params_instance = (
+            self._build_sampling_params_instance(
+                sampling_params,
+                sampling_params_cls=SamplingParams,
+            )
+            if SamplingParams is not None
+            else None
+        )
+        current_chat_kwargs = self._filter_chat_kwargs_for_vllm(chat_kwargs)
+
+        while True:
+            try:
+                if sampling_params_instance is not None:
+                    return self.engine.chat(
+                        messages,
+                        sampling_params=sampling_params_instance,
+                        stream=True,
+                        **current_chat_kwargs,
+                    )
+                return self.engine.chat(
+                    messages,
+                    stream=True,
+                    **sampling_params,
+                    **current_chat_kwargs,
+                )
+            except TypeError as exc:
+                match = self.UNSUPPORTED_KWARG_PATTERN.search(str(exc))
+                if match is None:
+                    raise
+                unsupported_key = match.group(1)
+                if unsupported_key == "stream":
+                    raise BackendRequestValidationError(
+                        "This vLLM runtime does not expose a native streaming chat API.",
+                        code="unsupported_parameter",
+                    ) from exc
+                if unsupported_key not in current_chat_kwargs:
+                    raise
+                current_chat_kwargs = {
+                    key: value
+                    for key, value in current_chat_kwargs.items()
+                    if key != unsupported_key
+                }
+
+    async def _iter_chat_stream_outputs(self, result: Any) -> AsyncIterator[Any]:
+        if inspect.isawaitable(result):
+            result = await result
+        if hasattr(result, "__aiter__"):
+            async for item in result:
+                yield item
+            return
+        if isinstance(result, Iterable) and not isinstance(result, (bytes, str, dict, list, tuple)):
+            for item in result:
+                yield item
+            return
+        raise BackendRequestValidationError(
+            "This vLLM runtime did not return an incremental chat stream.",
+            code="unsupported_parameter",
+        )
+
+    def _extract_stream_output_text_and_finish(self, item: Any) -> tuple[str, str | None]:
+        if isinstance(item, dict):
+            if isinstance(item.get("delta_text"), str):
+                return item["delta_text"], item.get("finish_reason")
+            if isinstance(item.get("text"), str):
+                return item["text"], item.get("finish_reason")
+            outputs = item.get("outputs") or []
+        else:
+            if isinstance(getattr(item, "delta_text", None), str):
+                return getattr(item, "delta_text"), getattr(item, "finish_reason", None)
+            if isinstance(getattr(item, "text", None), str):
+                return getattr(item, "text"), getattr(item, "finish_reason", None)
+            outputs = getattr(item, "outputs", None) or []
+
+        if not outputs:
+            return "", None
+        output = outputs[0]
+        if isinstance(output, dict):
+            return str(output.get("text") or ""), output.get("finish_reason")
+        return str(getattr(output, "text", "") or ""), getattr(output, "finish_reason", None)
+
+    async def _iter_chat_deltas(
+        self,
+        request: ChatCompletionsRequest,
+        runtime_spec: dict[str, Any],
+        runtime_context: dict[str, Any],
+        sampling_params: dict[str, Any],
+        chat_kwargs: dict[str, Any],
+    ) -> AsyncIterator[dict[str, Any]]:
+        response_id = f"chatcmpl-{uuid4().hex}"
+        created = int(time())
+        model = runtime_context.get("served_model_name") or runtime_spec.get("served_model_name") or request.model
+
+        if self.engine is None:
+            response = self._build_chat_stub_response(
+                request,
+                runtime_spec,
+                runtime_context,
+                sampling_params,
+                chat_kwargs,
+            )
+            yield {
+                "type": "chat_delta",
+                "id": response["id"],
+                "created": response["created"],
+                "model": response["model"],
+                "delta_text": response["content"],
+                "finish_reason": None,
+            }
+            yield {
+                "type": "chat_delta",
+                "id": response["id"],
+                "created": response["created"],
+                "model": response["model"],
+                "delta_text": "",
+                "finish_reason": response.get("finish_reason", "stop"),
+            }
+            return
+
+        messages = self._build_chat_messages(request, runtime_context=runtime_context)
+        stream = self._invoke_vllm_chat_stream(
+            messages,
+            sampling_params,
+            chat_kwargs=chat_kwargs,
+        )
+        previous_text = ""
+        async for item in self._iter_chat_stream_outputs(stream):
+            text, finish_reason = self._extract_stream_output_text_and_finish(item)
+            if text.startswith(previous_text):
+                delta_text = text[len(previous_text):]
+            else:
+                delta_text = text
+            previous_text = text
+            if delta_text:
+                yield {
+                    "type": "chat_delta",
+                    "id": response_id,
+                    "created": created,
+                    "model": model,
+                    "delta_text": delta_text,
+                    "finish_reason": None,
+                }
+            if finish_reason:
+                yield {
+                    "type": "chat_delta",
+                    "id": response_id,
+                    "created": created,
+                    "model": model,
+                    "delta_text": "",
+                    "finish_reason": finish_reason,
+                }
+                return
+
     def _supports_multimodal(self, runtime_context: dict[str, Any] | None = None) -> bool:
         capabilities = self.runtime_spec.get("capabilities")
         if capabilities is None and runtime_context is not None:
@@ -1412,41 +1600,37 @@ class VLLMBackend(InferenceBackend):
         request: ChatCompletionsRequest,
         runtime_context: dict[str, Any],
     ) -> AsyncIterator[dict[str, Any] | bytes | str]:
-        if self.openai_serving_chat_adapter is not None:
-            request_payload = self._build_openai_serving_request_payload(
-                request,
-                runtime_spec=runtime_spec,
-                runtime_context=runtime_context,
-            )
-            try:
-                async for chunk in self._iter_openai_serving_stream(request_payload):
-                    yield chunk
-                return
-            except Exception as exc:
-                self.openai_serving_adapter_init_error = str(exc)
-                self.openai_serving_chat_adapter = None
-
-        messages = self._build_chat_messages(request, runtime_context=runtime_context)
         sampling_params = self._build_sampling_params(request, runtime_spec=runtime_spec)
         chat_kwargs = self._build_chat_kwargs(request, runtime_spec=runtime_spec)
-        if self.engine is None:
-            for chunk in self._build_chat_stub_stream_chunks(
+        try:
+            async for event in self._iter_chat_deltas(
                 request,
                 runtime_spec,
                 runtime_context,
                 sampling_params,
                 chat_kwargs,
             ):
-                yield chunk
+                yield event
             return
+        except BackendRequestValidationError as exc:
+            if exc.code != "unsupported_parameter" or self.openai_serving_chat_adapter is None:
+                raise
 
-        message = (
-            "Streaming chat completions require the vLLM OpenAI serving adapter, "
-            "which is not initialized yet."
+        request_payload = self._build_openai_serving_request_payload(
+            request,
+            runtime_spec=runtime_spec,
+            runtime_context=runtime_context,
         )
-        if self.openai_serving_adapter_init_error:
-            message = f"{message} Initialization error: {self.openai_serving_adapter_init_error}"
-        raise BackendRequestValidationError(message, code="unsupported_parameter")
+        try:
+            async for chunk in self._iter_openai_serving_stream(request_payload):
+                yield chunk
+        except Exception as exc:
+            self.openai_serving_adapter_init_error = str(exc)
+            self.openai_serving_chat_adapter = None
+            raise BackendRequestValidationError(
+                f"Streaming chat completion fallback failed: {exc}",
+                code="unsupported_parameter",
+            ) from exc
 
     async def embedding(
         self,

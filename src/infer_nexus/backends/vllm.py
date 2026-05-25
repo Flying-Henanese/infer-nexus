@@ -7,7 +7,7 @@ import importlib
 import inspect
 import re
 import struct
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass
 from time import time
 from typing import Any, Protocol
@@ -114,13 +114,30 @@ class OpenAIServingEngineClientCompatProxy:
                 return bool(getattr(candidate, "errored"))
         return False
 
-    async def generate(self, *args: Any, **kwargs: Any) -> Any:
+    def generate(self, *args: Any, **kwargs: Any) -> Any:
+        def _wrap_awaitable(awaitable: Any) -> AsyncIterator[Any]:
+            async def iterator() -> AsyncIterator[Any]:
+                resolved = await awaitable
+                if hasattr(resolved, "__aiter__"):
+                    async for item in resolved:
+                        yield item
+                    return
+                if isinstance(resolved, Iterable) and not isinstance(resolved, (bytes, str, dict)):
+                    for item in resolved:
+                        yield item
+                    return
+                yield resolved
+
+            return iterator()
+
         for candidate in [self._client, *self._fallback_clients]:
             method = getattr(candidate, "generate", None)
             if callable(method):
                 result = method(*args, **kwargs)
+                if hasattr(result, "__aiter__"):
+                    return result
                 if inspect.isawaitable(result):
-                    return await result
+                    return _wrap_awaitable(result)
                 return result
         raise AttributeError("No compatible 'generate' method found on engine client candidates.")
 

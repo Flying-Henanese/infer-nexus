@@ -69,6 +69,13 @@ def runtime_not_connected_status(code: str) -> tuple[int, str]:
     return 501, "not_implemented_error"
 
 
+def runtime_execution_status(code: str) -> tuple[int, str]:
+    """Map backend execution failures to API-facing status classes when they reflect request shape."""
+    if code in {"unsupported_parameter", "unsupported_message_content", "invalid_input"}:
+        return 400, "invalid_request_error"
+    return 500, "internal_server_error"
+
+
 @router.get("/models", response_model=ModelListResponse)
 async def list_models(registry: ModelRegistry = Depends(get_registry)) -> ModelListResponse:
     """列出对外可见模型清单（以 alias 优先作为展示 ID）。"""
@@ -152,10 +159,11 @@ async def create_chat_completion(
         )
     except RuntimeExecutionError as exc:
         logger.exception("Chat completion runtime execution failed for model '%s'.", request.model)
+        status_code, error_type = runtime_execution_status(exc.code)
         return openai_error_response(
-            500,
+            status_code,
             str(exc),
-            error_type="internal_server_error",
+            error_type=error_type,
             code=exc.code,
         )
     except BackendRequestValidationError as exc:
@@ -225,10 +233,11 @@ async def create_embedding(
         )
     except RuntimeExecutionError as exc:
         logger.exception("Embedding runtime execution failed for model '%s'.", request.model)
+        status_code, error_type = runtime_execution_status(exc.code)
         return openai_error_response(
-            500,
+            status_code,
             str(exc),
-            error_type="internal_server_error",
+            error_type=error_type,
             code=exc.code,
         )
     except BackendRequestValidationError as exc:
@@ -297,10 +306,11 @@ async def _create_rerank_impl(
         )
     except RuntimeExecutionError as exc:
         logger.exception("Rerank runtime execution failed for model '%s'.", request.model)
+        status_code, error_type = runtime_execution_status(exc.code)
         return openai_error_response(
-            500,
+            status_code,
             str(exc),
-            error_type="internal_server_error",
+            error_type=error_type,
             code=exc.code,
         )
     except BackendRequestValidationError as exc:

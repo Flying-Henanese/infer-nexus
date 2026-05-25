@@ -128,6 +128,13 @@ class VLLMBackend(InferenceBackend):
                 llm_kwargs["max_model_len"] = max_model_len
             if "task" in llm_init_args:
                 llm_kwargs["task"] = requested_mode or "auto"
+            elif (
+                requested_mode in {"embed", "score"}
+                and ("runner" in llm_init_args or accepts_var_kwargs)
+            ):
+                # Older vLLM releases use runner="pooling" for embedding / scoring
+                # models instead of the newer task=... API.
+                llm_kwargs["runner"] = "pooling"
         except (TypeError, ValueError):
             pass
 
@@ -884,7 +891,19 @@ class VLLMBackend(InferenceBackend):
                 documents,
             )
 
-        result = self.engine.score(request.query, documents)
+        score_kwargs: dict[str, Any] = {}
+        score_signature = inspect.signature(self.engine.score)
+        score_args = score_signature.parameters
+        score_accepts_var_kwargs = any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in score_args.values()
+        )
+
+        chat_template = (runtime_spec.get("engine_kwargs") or {}).get("chat_template")
+        if chat_template and ("chat_template" in score_args or score_accepts_var_kwargs):
+            score_kwargs["chat_template"] = chat_template
+
+        result = self.engine.score(request.query, documents, **score_kwargs)
         return self._convert_rerank_result(
             request=request,
             runtime_spec=runtime_spec,

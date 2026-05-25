@@ -17,6 +17,9 @@ models:
     labels:
       - internal
       - llm
+    vllm:
+      openai_serving:
+        enabled: true
 
   - name: Qwen3-32B
     alias: qwen3-32b
@@ -37,6 +40,8 @@ models:
           enable_thinking: false
       request_policy:
         allow_reasoning: true
+      openai_serving:
+        enabled: true
     labels:
       - internal
       - llm

@@ -64,7 +64,7 @@ Client
           -> Model Catalog
           -> Backend Dispatch per Model
               -> vllm_openai_proxy -> Upstream vLLM/OpenAI-compatible server
-              -> vllm (local) -> Ray Serve Deployments -> vLLM Runtime
+              -> vllm (local) -> Ray Serve Deployments -> replica-local vLLM Runtime
           -> Load Inspector
           -> Scaling Policy
 ```
@@ -208,6 +208,12 @@ graph TD
 #### vLLM Backend
 - Runs the actual model inference engines
 - Provides OpenAI-like behavior where possible
+- For local chat models, prefers replica-local `AsyncLLMEngine` and streams
+  native incremental text through the `infer-nexus` OpenAI SSE mapper
+- Keeps sync `vllm.LLM` as a compatibility fallback for non-streaming chat and
+  compatibility streaming when async engine initialization is unavailable
+- Keeps embedding and rerank on the existing sync vLLM paths in the current
+  implementation
 - Can later be replaced by `vllm-ascend` without redesigning the entire platform
 
 #### OpenAI Proxy Backend
@@ -319,11 +325,18 @@ Rationale:
 Implementation notes:
 - Keep backend abstraction thin to avoid hard-coupling gateway logic to one runtime.
 - For compatibility-sensitive multimodal models, prefer `vllm_openai_proxy`.
-- Keep local `LLM.chat()` path as fallback, not universal default.
-- The local `vllm` backend now has a replica-local OpenAI-serving integration
-  path under active development. When enabled, the backend attempts to use
-  vLLM's OpenAI serving internals for chat payload passthrough and streaming
-  instead of rebuilding everything from `LLM.chat()`.
+- Keep local sync `LLM.chat()` path as fallback, not universal default.
+- The local `vllm` chat backend now prefers `AsyncLLMEngine` for real
+  incremental streaming. The backend consumes vLLM cumulative `RequestOutput`
+  objects, converts them into internal `chat_delta` events, and lets
+  `RuntimeExecutor` encode those events as OpenAI-compatible SSE chunks.
+- `vllm.openai_serving.enabled` is preserved as model metadata and for
+  compatibility experiments, but local Ray Serve chat streaming no longer
+  depends on vLLM's private `OpenAIServingChat` interface.
+- If `AsyncLLMEngine` cannot be initialized, chat falls back to sync `LLM`.
+  Streaming remains available as an OpenAI-compatible stream in that case, but
+  it is compatibility streaming over a completed response rather than token-level
+  incremental streaming.
 - A Ray Serve LLM based option was considered: `from ray.serve.llm import
   LLMConfig, build_openai_app`. This could provide a more native Ray Serve
   wrapper around vLLM's OpenAI-compatible behavior. However, the API is still
@@ -391,8 +404,10 @@ Recommended later:
 - Proxy-backed embeddings and rerank requests are supported by the current implementation even though the original proxy rollout was described as chat-first
 - Streaming support for chat completions should be considered part of the design, even if implemented after the first non-streaming version
   - local `vllm` path streaming plumbing exists end to end
-  - real local-engine streaming still depends on successful initialization of the
-    replica-local vLLM OpenAI serving adapter
+  - real local-engine chat streaming is implemented through replica-local
+    `AsyncLLMEngine` when available
+  - sync `LLM` fallback still emits OpenAI-compatible SSE, but without true
+    token-level incrementality
   - proxy stream cancellation and disconnect hardening: `待实现`
 
 ## 6.2 Native platform APIs
@@ -464,7 +479,7 @@ Client request
   -> admission control check
   -> backend dispatch
       -> proxy backend: upstream OpenAI-compatible request/response passthrough
-      -> local backend: route to model-specific Ray Serve deployment -> vLLM inference -> response adaptation
+      -> local backend: route to model-specific Ray Serve deployment -> vLLM inference -> OpenAI-compatible response/SSE adaptation
   -> client response
 ```
 
@@ -496,7 +511,7 @@ flowchart TD
   SR -->|stub| LR[Local replica]
   RH --> VB[VLLMBackend]
   LR --> VB
-  VB --> RESP[Adapt to OpenAI/native response]
+  VB --> RESP[OpenAI JSON or SSE response adaptation]
   RESP --> C
 
   PX --> HTTP[Forward request to upstream OpenAI-compatible endpoint]

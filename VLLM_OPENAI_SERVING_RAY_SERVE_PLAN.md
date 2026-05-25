@@ -1,10 +1,27 @@
-# vLLM OpenAI Serving on Ray Serve Plan
+# vLLM Chat Streaming on Ray Serve Plan
 
 ## 1. Goal
 
-This document describes the planned implementation for making `infer-nexus`
-behave like a vLLM OpenAI-compatible service while keeping the current Ray
-Serve based runtime architecture.
+This document describes the implementation path for making `infer-nexus`
+behave like an OpenAI-compatible chat service while keeping the current Ray
+Serve based runtime architecture and replica ownership.
+
+The original plan explored reusing vLLM's internal OpenAI serving classes
+inside each Ray Serve replica. After implementation and remote validation, the
+current primary path is different and more stable:
+
+```text
+Ray Serve replica
+  -> VLLMBackend
+    -> vLLM AsyncLLMEngine.generate(...)
+      -> vLLM cumulative RequestOutput stream
+        -> infer-nexus chat_delta events
+          -> RuntimeExecutor OpenAI SSE chunks
+```
+
+The vLLM OpenAI serving adapter boundary remains useful as a compatibility and
+experimentation seam, but local Ray Serve chat streaming no longer depends on
+private `OpenAIServingChat` internals.
 
 The target user experience is:
 
@@ -15,6 +32,8 @@ The target user experience is:
 - Chat streaming, vLLM-specific request parameters, reasoning fields, tool
   calling fields, logprobs, and other OpenAI-compatible response details should
   be preserved as close to native vLLM behavior as possible.
+- `stream=True` for local chat should produce real incremental SSE chunks when
+  `AsyncLLMEngine` is available.
 
 The target runtime architecture remains:
 
@@ -24,7 +43,7 @@ Client
     -> model routing by request.body.model
       -> Ray Serve model deployment
         -> one of N equal Ray Serve replicas
-          -> replica-local vLLM instance / engine
+          -> replica-local vLLM engine
 ```
 
 Each model can have multiple Ray Serve replicas. Replicas are peer workers owned
@@ -66,20 +85,20 @@ FastAPI route
       -> Ray Serve deployment handle or local stub replica
         -> ModelRuntimeReplica
           -> VLLMBackend
-            -> vllm.LLM.chat / embed / score
-          -> internal payload
-      -> RuntimeExecutor rebuilds OpenAI-style response
+            -> AsyncLLMEngine.generate for chat
+            -> sync vLLM LLM fallback for chat / embed / score
+          -> internal chat_delta or task payload
+      -> RuntimeExecutor encodes OpenAI-style JSON/SSE response
 ```
 
 This is sufficient for basic local inference, but it is not equivalent to
 vLLM's OpenAI-compatible server.
 
-The main chat gaps are:
+Historical chat gaps before the current streaming work were:
 
-- `stream=True` is currently converted to `stream=False` before backend
-  execution.
-- Streaming responses are currently synthesized by the gateway after full
-  generation has completed.
+- `stream=True` was converted to `stream=False` before backend execution.
+- Streaming responses were synthesized by the gateway after full generation had
+  completed.
 - Non-streaming chat responses are rebuilt into a narrow response shape with one
   choice and a small set of fields.
 - vLLM-native OpenAI server behavior for reasoning, tool calls, logprobs,
@@ -115,8 +134,9 @@ If `infer-nexus` calls only `LLM.chat()` and then reconstructs responses itself,
 the external protocol will depend on the local adapter implementation. That
 causes drift from native vLLM server behavior.
 
-The target implementation should therefore reuse vLLM's OpenAI-compatible
-serving logic where practical, while still running inside Ray Serve replicas.
+The current implementation therefore avoids treating `LLM.chat()` as the
+streaming main path. It uses `AsyncLLMEngine.generate(...)` for local chat
+streaming and keeps sync `LLM.chat()` as a compatibility fallback.
 
 ## 5. Target Design
 
@@ -131,9 +151,9 @@ vllm.LLM.chat()
 to:
 
 ```text
-replica-local vLLM async engine
-  -> vLLM OpenAI-compatible serving adapter
-  -> OpenAI-compatible response or streaming chunks
+replica-local vLLM AsyncLLMEngine.generate(...)
+  -> infer-nexus standardized chat_delta events
+  -> RuntimeExecutor OpenAI-compatible JSON/SSE response
 ```
 
 Conceptually:
@@ -144,9 +164,10 @@ Client
     -> infer-nexus model lookup and admission
       -> Ray Serve deployment handle
         -> selected replica
-          -> VLLMBackend OpenAI serving adapter
-            -> vLLM async engine
-          -> OpenAI-compatible payload or chunks
+          -> VLLMBackend
+            -> vLLM AsyncLLMEngine for chat when available
+            -> sync vLLM LLM fallback otherwise
+          -> OpenAI-compatible payload or SSE chunks
     -> FastAPI returns JSON or StreamingResponse
 ```
 
@@ -160,12 +181,13 @@ The gateway should continue to own:
 - request ID / trace headers
 - high-level error mapping for gateway-stage failures
 
-The vLLM serving adapter should own:
+The vLLM backend should own:
 
-- chat protocol semantics
-- vLLM request parameter interpretation
-- native streaming chunks
-- reasoning/tool/logprob/usage field details
+- chat prompt construction through the engine tokenizer chat template
+- vLLM sampling parameter construction
+- native incremental output consumption from `AsyncLLMEngine.generate(...)`
+- conversion from cumulative vLLM output text to incremental `chat_delta` events
+- sync fallback behavior when async engine initialization is unavailable
 
 ## 6. Implementation Areas
 
@@ -193,14 +215,14 @@ or rerank models.
 
 For `task_mode == "generate"`:
 
-- initialize the vLLM runtime required for online chat serving
-- initialize or wrap the vLLM OpenAI-compatible chat serving adapter
+- prefer initializing a replica-local `AsyncLLMEngine`
 - keep existing runtime spec fields such as model path, dtype,
   tensor parallel size, max model length, GPU memory utilization, and engine
   kwargs
 - preserve Qwen3 reasoning configuration:
   - `enable_reasoning`
   - `reasoning_parser`
+- if async engine initialization fails, fall back to sync `vllm.LLM`
 
 For `task_mode == "embed"` and `task_mode == "score"`:
 
@@ -215,10 +237,14 @@ For `stream=False`:
 
 1. FastAPI route validates the top-level request enough to find `model`.
 2. Runtime dispatch resolves the model to a Ray Serve deployment.
-3. The selected replica passes the request to the vLLM OpenAI serving adapter.
-4. The adapter returns an OpenAI-compatible response payload.
-5. `RuntimeExecutor` returns that payload without narrowing it to the current
-   internal minimal schema.
+3. The selected replica calls `VLLMBackend.chat_completion(...)`.
+4. If the backend is using `AsyncLLMEngine`, it builds a chat-template prompt,
+   consumes `engine.generate(...)` until the final output, and returns an
+   OpenAI-compatible chat completion payload.
+5. If the backend is using sync `LLM`, it uses the existing compatibility
+   conversion path.
+6. `RuntimeExecutor` returns full OpenAI-compatible payloads without narrowing
+   them when possible.
 
 The current `_build_chat_response_from_payload()` behavior should remain only as
 a fallback for stub/dev paths or legacy backend payloads.
@@ -231,11 +257,18 @@ For `stream=True`:
 2. `RuntimeExecutor` must not rewrite the request to `stream=False`.
 3. `RuntimeExecutor` calls a streaming method on the Ray Serve deployment.
 4. The selected replica calls `VLLMBackend.chat_completion_stream(...)`.
-5. The backend yields OpenAI-compatible chunk dictionaries or raw SSE bytes.
-6. `RuntimeExecutor` returns a `StreamingResponse`.
+5. The backend prefers `AsyncLLMEngine.generate(...)` and yields standardized
+   internal `chat_delta` events with `delta_text` and `finish_reason`.
+6. `RuntimeExecutor` maps `chat_delta` events into OpenAI-compatible SSE:
+   - first chunk: `delta.role=assistant`
+   - content chunks: `delta.content=<incremental text>`
+   - terminal chunk: `finish_reason`
+   - final frame: `data: [DONE]`
+7. If the backend falls back to sync `LLM`, streaming remains protocol-compatible
+   but may emit a completed response as one content chunk.
 
-The gateway should not wait for full generation before returning the first
-chunk.
+When `AsyncLLMEngine` is active, the gateway does not wait for full generation
+before returning content chunks.
 
 The desired wire format is the native OpenAI SSE style:
 
@@ -247,8 +280,8 @@ data: {"id":"...","object":"chat.completion.chunk","choices":[...]}
 data: [DONE]
 ```
 
-The gateway can perform SSE encoding when the backend yields dictionaries, but
-it should not rewrite the semantic content of chunks.
+The gateway performs SSE encoding and the `chat_delta -> OpenAI chunk` mapping,
+but it should not parse model text or perform tokenization itself.
 
 ### 6.5 RuntimeExecutor Changes
 
@@ -297,10 +330,11 @@ requirements, the implementation should follow that version's API.
 chat_completion_stream(runtime_spec, request, runtime_context)
 ```
 
-For chat models using the new serving integration, this method should delegate to
-vLLM's OpenAI-compatible chat serving layer.
+For chat models using the async path, this method should delegate to
+`AsyncLLMEngine.generate(...)` and normalize cumulative vLLM outputs into
+incremental `chat_delta` events.
 
-For stub/dev paths, it may yield deterministic OpenAI-compatible test chunks.
+For stub/dev paths, it may yield deterministic `chat_delta` test events.
 
 The backend should also support non-streaming passthrough:
 
@@ -308,8 +342,9 @@ The backend should also support non-streaming passthrough:
 chat_completion(...) -> full OpenAI-compatible response payload
 ```
 
-When possible, the backend should avoid converting vLLM results into a reduced
-custom shape. The goal is to preserve native fields.
+When possible, the backend should avoid converting vLLM results into an overly
+reduced custom shape. The current async path returns an OpenAI-compatible chat
+completion payload; future work can widen response fidelity further.
 
 ### 6.8 Schema Changes
 
@@ -338,7 +373,7 @@ Response-side schema should support or avoid rejecting:
 - vLLM-specific extension fields
 
 Where possible, gateway response validation should not strip fields produced by
-the vLLM serving adapter.
+the vLLM backend or any future serving adapter.
 
 ### 6.9 Request Parameter Policy
 
@@ -366,7 +401,7 @@ The standard model selector is:
 
 ```json
 {
-  "model": "qwen3-chat"
+  "model": "qwen3-vl-chat-8b-instruct"
 }
 ```
 
@@ -376,7 +411,7 @@ Clients should be able to keep using OpenAI SDK style calls:
 
 ```python
 client.chat.completions.create(
-    model="qwen3-chat",
+    model="qwen3-vl-chat-8b-instruct",
     messages=[{"role": "user", "content": "hello"}],
     stream=True,
     extra_body={"top_k": 50},
@@ -387,7 +422,8 @@ Expected behavior:
 
 - `model` is resolved by `infer-nexus` catalog.
 - request body is passed to the selected Ray Serve model deployment.
-- vLLM-specific fields are preserved and interpreted by the vLLM serving layer.
+- vLLM-specific fields are preserved and interpreted by the vLLM backend where
+  supported.
 - streaming chunks preserve vLLM/OpenAI-compatible fields.
 
 ## 8. Error Handling Policy
@@ -403,10 +439,10 @@ Examples:
 - Ray Serve deployment unavailable
 - backend misconfiguration
 
-Backend protocol errors produced by vLLM's serving adapter should be preserved as
-much as possible. The gateway should avoid converting all backend failures into a
-generic internal error when the vLLM serving layer already produced a structured
-OpenAI-compatible error payload.
+Backend protocol errors produced by vLLM or by any future vLLM serving adapter
+should be preserved as much as possible. The gateway should avoid converting all
+backend failures into a generic internal error when the backend already produced
+a structured OpenAI-compatible error payload.
 
 ## 9. Observability Requirements
 
@@ -499,10 +535,12 @@ unchanged and covered by regression tests.
 
 ### Phase 3: vLLM Chat Serving Integration
 
-- Initialize vLLM online serving components for chat models.
-- Route non-streaming chat requests through the serving adapter.
-- Route streaming chat requests through the serving adapter.
-- Preserve OpenAI-compatible payloads and chunks.
+- Initialize `AsyncLLMEngine` for local chat models when available.
+- Route non-streaming chat requests through async `generate(...)` aggregation.
+- Route streaming chat requests through async `generate(...)` incremental output.
+- Preserve sync `LLM` fallback for environments where async engine startup fails.
+- Keep the private vLLM OpenAI serving adapter boundary as an experimental
+  compatibility seam, not the primary streaming path.
 
 ### Phase 4: Schema and Policy Hardening
 
@@ -527,7 +565,8 @@ The implementation should be considered complete for this phase when:
   shape used for direct vLLM OpenAI-compatible serving.
 - `stream=True` produces real incremental SSE chunks.
 - Gateway code no longer synthesizes streaming output from a completed
-  non-streaming response for local Ray Serve vLLM chat.
+  non-streaming response for local Ray Serve vLLM chat when `AsyncLLMEngine` is
+  available.
 - Reasoning chunks are preserved.
 - Tool call fields are preserved when the model and policy allow them.
 - vLLM extra parameters can be passed through in the supported configuration.
@@ -539,7 +578,38 @@ The implementation should be considered complete for this phase when:
 
 ## 14. Current Implementation Status
 
-Last updated: 2026-05-23.
+Last updated: 2026-05-25.
+
+### 14.0 Current Production-Validated Path
+
+The current verified local Ray Serve chat path is:
+
+```text
+FastAPI /v1/chat/completions
+  -> RuntimeDispatcher
+    -> RuntimeExecutor
+      -> Ray Serve deployment handle with stream=True
+        -> ModelRuntimeReplica.chat_completion_stream(...)
+          -> VLLMBackend
+            -> AsyncLLMEngine.generate(...)
+              -> cumulative RequestOutput stream
+            -> normalized chat_delta events
+      -> RuntimeExecutor OpenAI SSE mapper
+  -> text/event-stream
+```
+
+Remote validation against `192.168.0.194:8000` with the single model
+`qwen3-vl-chat-8b-instruct` confirmed:
+
+- `/v1/models` returns the expected single chat model.
+- non-streaming `/v1/chat/completions` returns `200 OK`.
+- `stream=true` returns `200 OK` with `content-type: text/event-stream`.
+- long text generation emits many incremental `delta.content` chunks instead of
+  one completed-response chunk.
+- the stream terminates with `finish_reason="stop"` and `data: [DONE]`.
+
+This validates that `AsyncLLMEngine` is active for the remote Qwen3-VL chat
+deployment.
 
 Original target vLLM compatibility version confirmed by the project owner:
 
@@ -617,16 +687,16 @@ Covered behavior:
 #### Stub streaming
 
 - `VLLMBackend.chat_completion_stream(...)` now supports the stub/dev path.
-- In stub mode, the backend yields deterministic OpenAI-style
-  `chat.completion.chunk` dictionaries.
+- In stub mode, the backend yields deterministic standardized `chat_delta`
+  events which the executor maps to OpenAI-style SSE.
 - This enables testing executor/replica/gateway streaming behavior without
   starting a vLLM model.
 
-Important limitation:
+Current fallback behavior:
 
-- When a real legacy `vllm.LLM` engine is initialized, streaming currently
-  raises a validation error stating that the vLLM OpenAI serving adapter is not
-  initialized yet. This is intentional until Phase 3 is implemented.
+- When a real sync `vllm.LLM` engine is initialized and no async engine is
+  available, streaming remains protocol-compatible by wrapping a completed chat
+  result as SSE. This fallback is intentionally not token-level incremental.
 
 #### Non-streaming OpenAI payload passthrough
 
@@ -688,43 +758,38 @@ into engine kwargs when present:
 This was added to preserve Qwen reasoning configuration for the future vLLM
 OpenAI serving adapter integration.
 
-#### OpenAI serving adapter boundary and passthrough contract
+#### AsyncLLMEngine chat path
 
-`VLLMBackend` now has an explicit local adapter boundary for future native
-vLLM OpenAI serving integration.
+`VLLMBackend` now has a production-validated async chat path.
 
 Implemented pieces:
 
-- `OpenAIChatServingAdapter` protocol was added under the local vLLM backend.
-- `VLLMBackend` now stores an `openai_serving_chat_adapter` handle.
-- Chat requests now prefer the adapter path when that adapter is present.
-- A dedicated request payload builder now serializes an OpenAI-style request
-  body for serving passthrough instead of rebuilding the old local
-  `LLM.chat()` payload shape.
-- That request payload builder preserves:
-  - top-level `extra_body` fields as OpenAI/vLLM request keys
-  - `stream`
-  - `stream_options`
-  - nullable assistant `content`
-  - assistant `tool_calls`
-  - `parallel_tool_calls`
-- Non-streaming adapter responses are returned as-is to the existing executor
-  passthrough path.
-- Streaming adapter chunks are yielded as-is and therefore feed directly into
-  the existing SSE encoding/forwarding path.
+- chat `startup()` prefers `AsyncLLMEngine` for `task_mode == "generate"`
+- async engine initialization uses `AsyncEngineArgs` plus
+  `AsyncLLMEngine.from_engine_args(...)` when available
+- `VLLMBackend` tracks `engine_kind` so request paths can distinguish async,
+  sync, stub, and stopped states
+- non-streaming chat consumes async `generate(...)` to the final output and
+  returns an OpenAI-compatible response payload
+- streaming chat consumes async `generate(...)` incrementally and emits
+  standardized `chat_delta` events
+- the executor maps `chat_delta` events into OpenAI-compatible SSE chunks
+- sync `LLM` remains the fallback if async engine initialization fails
 
-Current limitation:
+#### OpenAI serving adapter boundary and passthrough contract
 
-- `_initialize_openai_serving_chat_adapter()` now performs real dynamic import
-  probing and constructor attempts for multiple candidate vLLM OpenAI serving
-  layouts.
-- The adapter initializer now records
-  `openai_serving_adapter_init_error` when native import or construction fails.
-- When no adapter is present, real-engine non-streaming still falls back to
-  legacy `LLM.chat()`.
-- When no adapter is present, real-engine streaming still raises the current
-  intentional `backend_misconfigured` validation error, now including the
-  adapter initialization failure reason when available.
+`VLLMBackend` still contains an explicit local adapter boundary for experiments
+with native vLLM OpenAI serving internals.
+
+Current role:
+
+- `OpenAIChatServingAdapter` and dynamic import probing remain available.
+- `vllm.openai_serving.enabled` is preserved in runtime specs and catalog
+  metadata.
+- This path is no longer required for local Ray Serve chat streaming.
+- The remote Qwen3-VL issue showed that `OpenAIServingChat + sync LLM` is not a
+  reliable long-term streaming foundation; it should remain an experimental or
+  legacy compatibility seam rather than the primary data plane.
 
 #### Proxy request serialization
 
@@ -908,19 +973,47 @@ Important vLLM Metal streaming finding:
   be tested separately before drawing conclusions about the latest vLLM Metal
   project's streaming support.
 
+Additional local verification performed on 2026-05-25 for the async chat path:
+
+- `tests/test_runtime.py::test_vllm_backend_startup_prefers_async_engine_for_chat`
+- `tests/test_runtime.py::test_vllm_backend_chat_completion_stream_uses_async_engine_generate_deltas`
+- `tests/test_runtime.py::test_vllm_backend_chat_completion_uses_async_engine_generate_result`
+- `tests/test_runtime.py::test_vllm_backend_chat_completion_stream_uses_native_vllm_deltas`
+- `tests/test_runtime.py::test_vllm_backend_chat_completion_stream_wraps_non_incremental_vllm_result`
+- `tests/test_runtime.py::test_vllm_backend_chat_completion_stream_does_not_use_openai_serving_for_sync_fallback`
+- `tests/test_dispatcher.py::test_chat_stream_response_maps_standard_delta_events_to_openai_sse`
+
+Result:
+
+```text
+7 passed
+compileall passed
+```
+
+Remote verification performed on 2026-05-25:
+
+- host: `192.168.0.194:8000`
+- model: `qwen3-vl-chat-8b-instruct`
+- `/v1/models`: `200 OK`
+- non-streaming `/v1/chat/completions`: `200 OK`
+- short `stream=true`: `200 OK`, `text/event-stream`, `data: [DONE]`
+- long `stream=true`: emitted many incremental `delta.content` chunks and
+  ended with `finish_reason="stop"` plus `data: [DONE]`
+
+This remote validation confirms that the current branch achieves true
+incremental streaming for the Qwen3-VL local Ray Serve vLLM backend.
+
 ### 14.3 Not Yet Implemented
 
 The following parts of the original plan are still not implemented.
 
-#### vLLM 0.18.x serving API discovery
+#### vLLM private OpenAI serving API discovery
 
-- The project now has a small local adapter boundary in `VLLMBackend`, and that
-  boundary is no longer a placeholder:
-  - it probes multiple candidate vLLM serving import layouts
-  - it attempts real constructor wiring for serving objects
-  - it stores initialization failures for diagnosis
-- Exact compatibility with production-targeted vLLM `0.18.x` is still not
-  verified against a real installed package or runtime environment.
+- The project has a small local adapter boundary in `VLLMBackend` for vLLM
+  OpenAI serving internals.
+- That boundary is no longer the primary chat streaming strategy.
+- Exact compatibility with vLLM private serving internals is not required for
+  the current production-validated async engine path.
 
 Additional note after vLLM Metal investigation:
 
@@ -940,41 +1033,26 @@ Additional note after vLLM Metal investigation:
   integration of vLLM serving internals inside `infer-nexus` Ray Serve
   deployments, not proxying to a standalone vLLM server.
 
-Expected next work:
+Expected next work for this optional seam:
 
-- validate the current dynamic import candidates against real vLLM `0.18.x`
-  source/install layout
-- verify the exact constructor signatures and required engine-client objects in
-  a real environment
-- tighten the current heuristic engine-client selection once real-object
-  inspection is possible
+- keep dynamic import candidates isolated behind `VLLMBackend`
+- do not make private serving adapter success a requirement for local chat
+  streaming
+- only tighten this path if a future compatibility requirement needs native
+  vLLM OpenAI serving fields that the async engine path cannot reproduce
 
-#### Real vLLM OpenAI serving adapter integration
+#### Async engine parity hardening
 
-The main Phase 3 work remains open.
+The main chat streaming path is implemented and remotely verified. Remaining
+hardening work:
 
-Not yet implemented:
-
-- validated replica-local vLLM async engine / engine-client initialization for
-  serving against a real `vllm` package
-- validated OpenAI serving model registry setup against a real `vllm` package
-- validated chat serving adapter setup against a real `vllm` package
-- real non-streaming chat routed through vLLM's OpenAI serving layer in a live
-  environment
-- real streaming chat routed through vLLM's OpenAI serving layer in a live
-  environment
-- preservation of native vLLM structured errors from the serving adapter in
-  end-to-end runtime tests
-
-Current state:
-
-- legacy `LLM.chat()` remains the real-engine non-streaming fallback path
-- real-engine streaming is intentionally blocked until the serving adapter is
-  successfully initialized
-- stub streaming is available for plumbing tests only
-- fake adapter passthrough tests cover the backend contract shape
-- fake native constructor tests now cover the backend dynamic import and object
-  wiring path before real model startup is required
+- validate text-only and multimodal prompt construction separately
+- add explicit cancellation propagation to abort async engine requests when
+  clients disconnect
+- improve usage accounting for async streaming terminal chunks if needed
+- preserve or surface structured backend errors from async engine failures
+- widen response fidelity for reasoning, tool calls, logprobs, and multi-choice
+  when these are required by real clients
 
 #### Full response schema parity
 
@@ -1020,14 +1098,14 @@ The following observability requirements are still not implemented:
 
 #### Real Ray Serve streaming verification
 
-Streaming handle behavior is currently tested with fake Serve handles only.
+Single-model remote Ray Serve streaming has been verified with
+`qwen3-vl-chat-8b-instruct` on `192.168.0.194:8000`.
 
 Still needed:
 
-- verify the implementation against the installed Ray Serve version
-- confirm remote streaming handle return shape
 - confirm cancellation behavior
-- confirm multiple replicas still behave as peer workers
+- verify multiple replicas still behave as peer workers
+- add production-oriented stream lifecycle metrics
 
 #### Real model/client validation
 
@@ -1037,14 +1115,21 @@ Partially done:
   - stub gateway tests through `qwen3.5-0.8b`
   - real non-streaming proxy tests through `qwen3.5-0.8b-metal`
 
-Still needed once the local serving adapter is implemented:
+Current real backend status:
 
-- run `Qwen/Qwen3.5-0.8B` through the local Ray Serve `vllm` backend path
+- `qwen3-vl-chat-8b-instruct` has been verified through the local Ray Serve
+  `vllm` backend path on the remote server.
+- non-streaming chat works.
+- `stream=True` works and emits real incremental SSE chunks.
+
+Still useful:
+
 - test OpenAI SDK non-streaming request
 - test OpenAI SDK streaming request
 - test vLLM extra params such as `top_k`
 - test Qwen reasoning configuration if supported by the model/config
-- verify `stream=True` against a real backend that actually emits SSE chunks
+- test multimodal Qwen3-VL image input on the async path or define fallback
+  behavior explicitly
 
 Embedding and rerank native serving parity remain future work and are unchanged
 from section 11.
@@ -1083,155 +1168,53 @@ the vLLM OpenAI serving work until config/test fixtures are reconciled.
 
 ### 14.5 Recommended Next Step
 
-Continue with Phase 1 and Phase 3, but split production vLLM and macOS local
-validation clearly:
+The next work should harden the now-working async engine path rather than return
+to the private `OpenAIServingChat + sync LLM` path.
 
-1. Keep `qwen3.5-0.8b` as the local small-model catalog entry for future
-   Ray Serve local backend tests.
-2. Keep `qwen3.5-0.8b-metal` as a real non-streaming proxy smoke-test target
-   when a local `vllm_metal.server` is running on `127.0.0.1:18000`.
-3. Do not use PyPI `vllm-metal==0.1.0` `vllm_metal.server` as evidence for
-   streaming parity; it does not emit SSE for `stream: true`.
-4. Decide whether implementation discovery targets production vLLM `0.18.x` or
-   local macOS vLLM core `0.21.0` plus vLLM Metal plugin.
-5. Use the existing local `OpenAIChatServingAdapter` boundary under the vLLM
-   backend as the single integration point for native vLLM serving internals.
-6. Keep the current dynamic import + constructor probing path as the single
-   native-serving initialization path under `VLLMBackend`.
-7. Validate the current adapter constructor against upstream `vLLM 0.18.x`
-   source structure and a runnable environment.
-8. Use the local Qwen3.5 snapshot as the real smoke-test model only after a
-   real `import vllm` environment is available.
-9. Once a real environment exists, verify:
-   - engine-client object selection
-   - `OpenAIServingModels` construction
-   - `OpenAIServingChat.create_chat_completion(...)` non-streaming behavior
-   - native streaming chunk behavior
-10. Only after that, decide whether the current fallback to legacy `LLM.chat()`
-    should remain or be tightened for `openai_serving.enabled` models.
+Recommended order:
 
-## 15. Handoff Summary After Local Qwen3.5, vLLM Metal, and Adapter Passthrough Validation
+1. Add cancellation propagation from client disconnect to async engine request
+   abort.
+2. Verify OpenAI SDK streaming against the remote `qwen3-vl-chat-8b-instruct`
+   deployment.
+3. Test vLLM extra parameters such as `top_k`, `min_p`, and stop sequences.
+4. Test Qwen reasoning configuration if enabled for the model.
+5. Decide the multimodal policy for Qwen3-VL on async engine:
+   - support image inputs by passing the correct vLLM multimodal prompt shape
+   - or explicitly fall back to sync `LLM.chat()` for multimodal requests
+6. Keep embedding and rerank unchanged until their serving parity is addressed
+   separately.
 
-This section is a compact handoff record for continuing work after context
-compaction.
+## 15. Current Handoff Summary
 
-### 15.1 Completed In This Round
+This is the current state after the remote Qwen3-VL validation on 2026-05-25.
 
-- `config/models.yaml` was changed to a local-only working catalog:
-  - enabled `qwen3.5-0.8b` as a local `vllm` chat model
-  - enabled `qwen3.5-0.8b-metal` as a `vllm_openai_proxy` model
-  - commented out unavailable production `/nas_data/...` models
-- `config/settings.yaml` was changed to local-safe defaults:
-  - `execution_mode: stub`
-  - `backend_init_mode: stub`
-- `.gitignore` now ignores `.venv-metal/`.
-- `.venv-metal/` was created with Python 3.12 and `vllm-metal==0.1.0`.
-- The local Qwen3.5 snapshot was confirmed to exist and load through
-  `vllm-metal` when Metal access is available.
-- infer-nexus successfully proxied a real non-streaming model response from
-  local `vllm_metal.server`.
-- `VLLMBackend` now includes a local OpenAI serving adapter boundary and
-  passthrough request builder.
-- Fake adapter tests now cover both non-streaming payload passthrough and
-  streaming chunk passthrough at the backend layer.
-- A serving request payload with assistant `content: null` plus `tool_calls`
-  is now preserved correctly by the backend passthrough builder.
-- `VLLMBackend._initialize_openai_serving_chat_adapter()` now includes a real
-  dynamic import + constructor probing path for candidate vLLM serving layouts.
-- `VLLMBackend` now stores `openai_serving_adapter_init_error` so failed native
-  adapter initialization is diagnosable instead of silent.
-- Local tests now cover both:
-  - fake adapter passthrough behavior
-  - fake native serving-object construction through the dynamic initializer
-- An attempt was made to install official vLLM core plus the Metal plugin into
-  `.venv-metal/`, but this did not yet produce a stable local `import vllm`
-  validation environment.
+Completed:
 
-### 15.2 Verified Behavior
+- Local Ray Serve chat now prefers `AsyncLLMEngine`.
+- Non-streaming chat works through async generation aggregation.
+- Streaming chat emits real incremental `delta.content` chunks through OpenAI
+  SSE.
+- Sync `LLM` remains as fallback and can still provide protocol-compatible SSE
+  over a completed response.
+- The private vLLM OpenAI serving adapter path remains isolated but is no
+  longer required for working chat streaming.
+- Embedding and rerank remain unchanged.
 
-- `qwen3.5-0.8b` catalog load and runtime context generation work.
-- Stub non-streaming chat works through infer-nexus for `qwen3.5-0.8b`.
-- Stub streaming chat works through infer-nexus for `qwen3.5-0.8b` and emits
-  OpenAI-style SSE.
-- Direct `vllm_metal.server` non-streaming chat works with the local Qwen3.5
-  snapshot.
-- infer-nexus `vllm_openai_proxy` non-streaming chat works against
-  `vllm_metal.server`.
-- Direct `vllm_metal.server` with `stream: true` does not stream; it returns a
-  normal JSON response.
-- infer-nexus proxying `stream: true` to `vllm_metal.server` also receives a
-  normal JSON response because the upstream does not emit SSE.
-- A fake OpenAI serving adapter can drive backend non-streaming chat and return
-  a full OpenAI-compatible payload unchanged.
-- A fake OpenAI serving adapter can drive backend streaming chat and emit
-  reasoning/tool-call compatible chunks unchanged.
-- The backend can construct a native-style serving adapter from dynamically
-  imported fake upstream classes and invoke `create_chat_completion(...)`
-  through the local wrapper.
-- Native adapter import/construction failures are captured and available for
-  later runtime error reporting.
+Verified remotely:
 
-### 15.3 Still Not Completed
+- `GET /v1/models` returns `qwen3-vl-chat-8b-instruct`.
+- `POST /v1/chat/completions` non-streaming returns `200 OK`.
+- `POST /v1/chat/completions` with `stream=true` returns
+  `text/event-stream`.
+- Long streaming generation returns many content chunks and ends with
+  `data: [DONE]`.
 
-- Native local Ray Serve `vllm` backend serving adapter initialization is
-  implemented as a probing path, but it has not yet been validated against a
-  real installed `vllm` package.
-- Real local `vllm` backend streaming remains intentionally blocked when a real
-  legacy `LLM` engine is initialized and the native adapter cannot be
-  constructed.
-- Reasoning is only implemented at config/policy/passthrough/schema level; it
-  has not been verified through native vLLM OpenAI serving.
-- Tool calling, logprobs, guided decoding, structured output, and full vLLM
-  extra-parameter parity are not complete.
-- Observability requirements for streaming lifecycle are not complete.
-- Broad test suite remains misaligned with the local-only model catalog.
+Known remaining work:
 
-### 15.4 Environment Commands Used
-
-The useful verification commands were ad hoc Python/curl probes, not permanent
-test scripts. The important reproducible pieces are:
-
-```bash
-python3.12 -m venv .venv-metal
-.venv-metal/bin/python -m pip install -U pip setuptools wheel
-.venv-metal/bin/python -m pip install vllm-metal
-```
-
-Real model probe requires running outside the sandbox so MLX can access Metal:
-
-```bash
-.venv-metal/bin/python -c "from vllm_metal.server import create_engine; p='/Users/zhoushujian/.cache/huggingface/hub/models--Qwen--Qwen3.5-0.8B/snapshots/2fc06364715b967f1860aea9cf38778875588b17'; e=create_engine(p); print(e.generate('User: hello\nAssistant:', max_tokens=8, temperature=0.0))"
-```
-
-Local upstream server command:
-
-```bash
-.venv-metal/bin/python -m vllm_metal.server \
-  --model /Users/zhoushujian/.cache/huggingface/hub/models--Qwen--Qwen3.5-0.8B/snapshots/2fc06364715b967f1860aea9cf38778875588b17 \
-  --host 127.0.0.1 \
-  --port 18000 \
-  --log-level info
-```
-
-### 15.5 Decision Point
-
-There are now two viable but different validation tracks:
-
-1. Production target track:
-   - inspect and integrate vLLM `0.18.x` OpenAI serving internals
-   - likely requires Linux/CUDA or a compatible server environment for final
-     real validation
-
-2. macOS local target track:
-   - install official vLLM core `0.21.0` plus vLLM Metal plugin using the
-     upstream `install.sh`
-   - verify whether `vllm serve ...` through that full stack emits SSE for
-     `stream: true`
-   - if it does, use it for local real streaming smoke tests while keeping
-     production compatibility concerns separate
-
-In either track, the next code step should be the same:
-
-- validate and tighten the existing
-  `VLLMBackend._initialize_openai_serving_chat_adapter()` constructor path
-  against a real upstream vLLM environment
+- OpenAI SDK client-level streaming smoke tests.
+- Async engine cancellation/abort on client disconnect.
+- Multimodal Qwen3-VL image request handling on the async path.
+- Reasoning/tool/logprob/structured-output parity.
+- Stream lifecycle observability.
+- Test fixture cleanup for old catalog aliases such as `qwen3-chat`.

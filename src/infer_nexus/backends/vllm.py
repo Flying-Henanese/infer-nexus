@@ -1343,7 +1343,7 @@ class VLLMBackend(InferenceBackend):
         )
         if self.openai_serving_adapter_init_error:
             message = f"{message} Initialization error: {self.openai_serving_adapter_init_error}"
-        raise BackendRequestValidationError(message, code="backend_misconfigured")
+        raise BackendRequestValidationError(message, code="unsupported_parameter")
 
     async def embedding(
         self,

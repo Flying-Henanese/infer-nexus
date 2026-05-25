@@ -94,6 +94,9 @@ class RuntimeExecutor:
                 method_name="chat_completion_stream",
                 payload=request.model_dump(mode="json"),
             )
+        # Prime one chunk before sending response headers so unsupported streaming requests
+        # fail as JSON errors instead of returning a broken 200 SSE connection.
+        chunks = await self._prime_stream_chunks(chunks)
         return self._build_chat_stream_response(request, target, chunks)
 
     async def execute_embedding(
@@ -310,6 +313,11 @@ class RuntimeExecutor:
 
     async def _normalize_stream_result(self, response: Any) -> AsyncIterator[dict[str, Any] | bytes | str]:
         """Normalize local, fake, and Serve streaming return shapes into an async iterator."""
+        if hasattr(response, "__aiter__"):
+            async for chunk in response:
+                yield chunk
+            return
+
         if inspect.isawaitable(response):
             response = await response
         if hasattr(response, "result") and not hasattr(response, "__aiter__"):
@@ -333,6 +341,26 @@ class RuntimeExecutor:
             f"Streaming method returned unsupported payload type '{type(response).__name__}'.",
             code="runtime_execution_failed",
         )
+
+    async def _prime_stream_chunks(
+        self,
+        chunks: AsyncIterator[dict[str, Any] | bytes | str],
+    ) -> AsyncIterator[dict[str, Any] | bytes | str]:
+        iterator = chunks.__aiter__()
+        try:
+            first = await iterator.__anext__()
+        except StopAsyncIteration:
+            async def empty() -> AsyncIterator[dict[str, Any] | bytes | str]:
+                if False:
+                    yield {}
+            return empty()
+
+        async def replay() -> AsyncIterator[dict[str, Any] | bytes | str]:
+            yield first
+            async for chunk in iterator:
+                yield chunk
+
+        return replay()
 
     def _parse_proxy_config(self, target: RuntimeTarget) -> ProxyConfig:
         raw = target.runtime_context.get("proxy_config") or {}

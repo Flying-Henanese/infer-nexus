@@ -1493,6 +1493,24 @@ class VLLMBackend(InferenceBackend):
                 image_url["url"] = self._normalize_data_url(url)
         return payload
 
+    def _is_text_only_content(self, content: Any) -> bool:
+        if not isinstance(content, list) or not content:
+            return False
+        for block in content:
+            payload = self._serialize_content_block(block)
+            if payload.get("type") != "text":
+                return False
+        return True
+
+    def _collapse_text_only_content(self, content: list[Any]) -> str:
+        parts: list[str] = []
+        for block in content:
+            payload = self._serialize_content_block(block)
+            text = payload.get("text")
+            if isinstance(text, str):
+                parts.append(text)
+        return "".join(parts)
+
     def _serialize_message_content(
         self,
         content: Any,
@@ -1501,6 +1519,9 @@ class VLLMBackend(InferenceBackend):
     ) -> str | list[dict[str, Any]]:
         if isinstance(content, str):
             return content
+
+        if self._is_text_only_content(content):
+            return self._collapse_text_only_content(content)
 
         if not allow_multimodal:
             raise BackendRequestValidationError(

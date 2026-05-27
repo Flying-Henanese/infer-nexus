@@ -1917,32 +1917,29 @@ class VLLMBackend(InferenceBackend):
             result = await result
         return result
 
-    # NOTE: Temporarily commented out because this helper is currently unused.
-    # Keeping the code here for short-term rollback safety during module cleanup.
-    #
-    # async def _iter_openai_serving_stream(
-    #     self,
-    #     request_payload: dict[str, Any],
-    # ) -> AsyncIterator[dict[str, Any] | bytes | str]:
-    #     adapter = self.openai_serving_chat_adapter
-    #     if adapter is None:
-    #         raise RuntimeError("vLLM OpenAI serving adapter is not initialized")
-    #
-    #     stream = adapter.chat_completion_stream(request_payload)
-    #     if inspect.isawaitable(stream):
-    #         stream = await stream
-    #
-    #     if hasattr(stream, "__aiter__"):
-    #         async for chunk in stream:
-    #             yield chunk
-    #         return
-    #
-    #     if isinstance(stream, bytes | str | dict):
-    #         yield stream
-    #         return
-    #
-    #     for chunk in stream:
-    #         yield chunk
+    async def _iter_openai_serving_stream(
+        self,
+        request_payload: dict[str, Any],
+    ) -> AsyncIterator[dict[str, Any] | bytes | str]:
+        adapter = self.openai_serving_chat_adapter
+        if adapter is None:
+            raise RuntimeError("vLLM OpenAI serving adapter is not initialized")
+
+        stream = adapter.chat_completion_stream(request_payload)
+        if inspect.isawaitable(stream):
+            stream = await stream
+
+        if hasattr(stream, "__aiter__"):
+            async for chunk in stream:
+                yield chunk
+            return
+
+        if isinstance(stream, bytes | str | dict):
+            yield stream
+            return
+
+        for chunk in stream:
+            yield chunk
 
     def _build_chat_stub_response(
         self,

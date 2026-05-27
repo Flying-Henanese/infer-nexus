@@ -164,6 +164,8 @@ class FakeOpenAIServingChatNative:
         request_logger: object,
         chat_template: object,
         chat_template_content_format: str,
+        enable_auto_tools: bool | None = None,
+        tool_parser: str | None = None,
         reasoning_parser: str = '',
         default_chat_template_kwargs: dict | None = None,
         **_: object,
@@ -175,6 +177,8 @@ class FakeOpenAIServingChatNative:
         self.request_logger = request_logger
         self.chat_template = chat_template
         self.chat_template_content_format = chat_template_content_format
+        self.enable_auto_tools = enable_auto_tools
+        self.tool_parser = tool_parser
         self.reasoning_parser = reasoning_parser
         self.default_chat_template_kwargs = default_chat_template_kwargs
         self.requests: list[FakeServingRequest] = []
@@ -611,7 +615,11 @@ def test_vllm_backend_build_runtime_spec_includes_openai_serving_reasoning_confi
                 'enable_reasoning': True,
                 'reasoning_parser': 'qwen3',
             },
-            'request_policy': {'allow_reasoning': True},
+            'engine_kwargs': {
+                'enable_auto_tool_choice': True,
+                'tool_call_parser': 'qwen3_xml',
+            },
+            'request_policy': {'allow_tools': True, 'allow_reasoning': True},
         },
     )
 
@@ -624,6 +632,9 @@ def test_vllm_backend_build_runtime_spec_includes_openai_serving_reasoning_confi
     }
     assert runtime_spec['engine_kwargs']['enable_reasoning'] is True
     assert runtime_spec['engine_kwargs']['reasoning_parser'] == 'qwen3'
+    assert runtime_spec['engine_kwargs']['enable_auto_tool_choice'] is True
+    assert runtime_spec['engine_kwargs']['tool_call_parser'] == 'qwen3_xml'
+    assert runtime_spec['request_policy']['allow_tools'] is True
 
 
 def test_vllm_backend_startup_forwards_engine_kwargs(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1092,8 +1103,8 @@ def test_vllm_backend_chat_completion_passthroughs_openai_serving_payload() -> N
     ]
 
 
-def test_vllm_backend_chat_completion_stream_emits_standard_delta_events() -> None:
-    """Streaming chat should emit backend-standard delta events, independent of OpenAI serving."""
+def test_vllm_backend_chat_completion_stream_passthroughs_openai_serving_chunks() -> None:
+    """Streaming chat should pass through native OpenAI serving chunks when available."""
     runtime_spec = {
         'backend': 'vllm',
         'task_mode': 'generate',
@@ -1132,14 +1143,15 @@ def test_vllm_backend_chat_completion_stream_emits_standard_delta_events() -> No
 
     chunks = asyncio.run(collect())
 
-    assert len(chunks) == 2
-    assert chunks[0]['type'] == 'chat_delta'
-    assert chunks[0]['delta_text'].startswith('backend stub response from vllm')
-    assert chunks[0]['finish_reason'] is None
-    assert chunks[1]['type'] == 'chat_delta'
-    assert chunks[1]['delta_text'] == ''
-    assert chunks[1]['finish_reason'] == 'stop'
-    assert adapter.requests == []
+    assert chunks == [b'data: [DONE]\n\n']
+    assert adapter.requests == [
+        {
+            'model': 'qwen3-chat',
+            'messages': [{'role': 'user', 'content': 'hello'}],
+            'stream': True,
+            'stream_options': {'include_usage': True},
+        }
+    ]
 
 
 def test_vllm_backend_chat_completion_stream_uses_native_vllm_deltas() -> None:
@@ -1652,8 +1664,8 @@ def test_vllm_backend_chat_completion_stream_wraps_non_incremental_vllm_result()
     assert [chunk['finish_reason'] for chunk in chunks] == [None, 'stop']
 
 
-def test_vllm_backend_chat_completion_stream_does_not_use_openai_serving_for_sync_fallback() -> None:
-    """The sync fallback should not depend on vLLM OpenAI serving private stream APIs."""
+def test_vllm_backend_chat_completion_stream_prefers_openai_serving_for_sync_engines() -> None:
+    """Sync engines should use OpenAI serving stream passthrough when the adapter is available."""
     class FakeOutput:
         text = 'fallback'
         finish_reason = 'stop'
@@ -1706,9 +1718,14 @@ def test_vllm_backend_chat_completion_stream_does_not_use_openai_serving_for_syn
 
     chunks = asyncio.run(collect())
 
-    assert [chunk['delta_text'] for chunk in chunks] == ['fallback', '']
-    assert [chunk['finish_reason'] for chunk in chunks] == [None, 'stop']
-    assert adapter.requests == []
+    assert chunks == [b'data: [DONE]\n\n']
+    assert adapter.requests == [
+        {
+            'model': 'qwen3-chat',
+            'messages': [{'role': 'user', 'content': 'hello'}],
+            'stream': True,
+        }
+    ]
 
 
 def test_vllm_backend_builds_openai_serving_stream_payload_for_legacy_adapter() -> None:
@@ -1809,6 +1826,10 @@ def test_vllm_backend_initializes_openai_serving_adapter_via_dynamic_imports(
         'backend': 'vllm',
         'task_mode': 'generate',
         'model_path': '/models/Qwen/Qwen3',
+        'engine_kwargs': {
+            'enable_auto_tool_choice': True,
+            'tool_call_parser': 'qwen3_xml',
+        },
         'request_defaults': {'chat_template_kwargs': {'enable_thinking': False}},
         'openai_serving': {
             'enabled': True,
@@ -1856,6 +1877,8 @@ def test_vllm_backend_initializes_openai_serving_adapter_via_dynamic_imports(
     serving_engine_client = adapter.serving_chat.engine_client
     assert getattr(serving_engine_client, "_client", serving_engine_client) is engine_client
     assert adapter.serving_chat.response_role == 'assistant'
+    assert adapter.serving_chat.enable_auto_tools is True
+    assert adapter.serving_chat.tool_parser == 'qwen3_xml'
     assert adapter.serving_chat.reasoning_parser == 'qwen3'
     assert adapter.serving_chat.default_chat_template_kwargs == {'enable_thinking': False}
     assert adapter.serving_chat.models.base_model_paths[0].name == 'qwen3-chat'

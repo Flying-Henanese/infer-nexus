@@ -1732,17 +1732,46 @@ class VLLMBackend(InferenceBackend):
         if model_registry is None:
             raise RuntimeError("OpenAIServingModels did not expose a model registry.")
 
-        return serving_render_cls(
-            model_config=getattr(engine_client, "model_config"),
-            renderer=getattr(engine_client, "renderer"),
-            io_processor=getattr(engine_client, "io_processor"),
-            model_registry=model_registry,
-            request_logger=None,
-            chat_template=None,
-            chat_template_content_format="auto",
-            trust_request_chat_template=False,
-            default_chat_template_kwargs=self._request_defaults().get("chat_template_kwargs"),
+        openai_serving_config = self.runtime_spec.get("openai_serving") or {}
+        engine_kwargs = self.runtime_spec.get("engine_kwargs") or {}
+        tool_call_parser = (
+            openai_serving_config.get("tool_call_parser")
+            or engine_kwargs.get("tool_call_parser")
         )
+        enable_auto_tools = bool(
+            openai_serving_config.get("enable_auto_tool_choice")
+            or engine_kwargs.get("enable_auto_tool_choice")
+        )
+        reasoning_parser = (
+            openai_serving_config.get("reasoning_parser")
+            or engine_kwargs.get("reasoning_parser")
+            or None
+        )
+
+        init_signature = inspect.signature(serving_render_cls)
+        parameters = init_signature.parameters
+        accepts_var_kwargs = any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        )
+        kwargs = {
+            "model_config": getattr(engine_client, "model_config"),
+            "renderer": getattr(engine_client, "renderer"),
+            "io_processor": getattr(engine_client, "io_processor", None),
+            "model_registry": model_registry,
+            "request_logger": None,
+            "chat_template": None,
+            "chat_template_content_format": "auto",
+            "trust_request_chat_template": False,
+            "enable_auto_tools": enable_auto_tools,
+            "tool_parser": tool_call_parser,
+            "reasoning_parser": reasoning_parser,
+            "default_chat_template_kwargs": self._request_defaults().get("chat_template_kwargs"),
+        }
+        if not accepts_var_kwargs:
+            kwargs = {key: value for key, value in kwargs.items() if key in parameters}
+
+        return serving_render_cls(**kwargs)
 
     def _build_openai_serving_chat(
         self,
@@ -1780,7 +1809,10 @@ class VLLMBackend(InferenceBackend):
             "trust_request_chat_template": False,
             "return_tokens_as_token_ids": False,
             "reasoning_parser": openai_serving_config.get("reasoning_parser") or "",
-            "enable_auto_tools": bool(engine_kwargs.get("enable_auto_tool_choice")),
+            "enable_auto_tools": bool(
+                openai_serving_config.get("enable_auto_tool_choice")
+                or engine_kwargs.get("enable_auto_tool_choice")
+            ),
             "tool_parser": tool_call_parser,
             "default_chat_template_kwargs": self._request_defaults().get("chat_template_kwargs"),
         }

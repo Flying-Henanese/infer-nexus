@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import importlib
 import inspect
+import logging
 import re
 import struct
 from io import BytesIO
@@ -21,6 +22,9 @@ from infer_nexus.backends.base import InferenceBackend
 from infer_nexus.catalog.models import ModelConfig
 from infer_nexus.core.errors import BackendConfigurationError, BackendRequestValidationError
 from infer_nexus.core.schemas import ChatCompletionsRequest, EmbeddingRequest, RerankRequest
+
+
+logger = logging.getLogger(__name__)
 
 
 class OpenAIChatServingAdapter(Protocol):
@@ -242,6 +246,10 @@ class VLLMBackend(InferenceBackend):
         "vllm_xargs",
     }
     TOOL_REQUEST_KEYS = {"parallel_tool_calls"}
+    OPENAI_SERVING_ONLY_ENGINE_KEYS = {
+        "enable_auto_tool_choice",
+        "tool_call_parser",
+    }
     REASONING_REQUEST_KEYS = {
         "chat_template",
         "chat_template_kwargs",
@@ -339,7 +347,14 @@ class VLLMBackend(InferenceBackend):
         loading_config = self.runtime_spec.get("model_loading_config") or {}
         if loading_config.get("revision"):
             llm_kwargs["revision"] = loading_config["revision"]
-        llm_kwargs.update(self.runtime_spec.get("engine_kwargs") or {})
+        engine_kwargs = dict(self.runtime_spec.get("engine_kwargs") or {})
+        llm_kwargs.update(
+            {
+                key: value
+                for key, value in engine_kwargs.items()
+                if key not in self.OPENAI_SERVING_ONLY_ENGINE_KEYS
+            }
+        )
         gpu_memory_utilization = self.runtime_spec.get("gpu_memory_utilization")
         max_model_len = self.runtime_spec.get("max_model_len")
         requested_mode = self.runtime_spec.get("task_mode")
@@ -353,11 +368,17 @@ class VLLMBackend(InferenceBackend):
             async_llm_kwargs["task"] = requested_mode or "auto"
             try:
                 self.engine = self._create_async_vllm_engine(async_llm_kwargs)
-                self.openai_serving_chat_adapter = None
-                self.openai_serving_adapter_init_error = None
                 self.async_engine_init_error = None
                 self.engine_kind = "async"
                 self.engine_state = "ready"
+                self.openai_serving_chat_adapter = self._initialize_openai_serving_chat_adapter()
+                if self.openai_serving_chat_adapter is not None:
+                    logger.info("Initialized vLLM OpenAI serving adapter for async engine.")
+                elif self._should_use_openai_serving_adapter():
+                    logger.warning(
+                        "vLLM OpenAI serving adapter is disabled for async engine: %s",
+                        self.openai_serving_adapter_init_error,
+                    )
                 return
             except Exception as exc:
                 self.async_engine_init_error = str(exc)
@@ -1493,6 +1514,24 @@ class VLLMBackend(InferenceBackend):
                 image_url["url"] = self._normalize_data_url(url)
         return payload
 
+    def _is_text_only_content(self, content: Any) -> bool:
+        if not isinstance(content, list) or not content:
+            return False
+        for block in content:
+            payload = self._serialize_content_block(block)
+            if payload.get("type") != "text":
+                return False
+        return True
+
+    def _collapse_text_only_content(self, content: list[Any]) -> str:
+        parts: list[str] = []
+        for block in content:
+            payload = self._serialize_content_block(block)
+            text = payload.get("text")
+            if isinstance(text, str):
+                parts.append(text)
+        return "".join(parts)
+
     def _serialize_message_content(
         self,
         content: Any,
@@ -1501,6 +1540,9 @@ class VLLMBackend(InferenceBackend):
     ) -> str | list[dict[str, Any]]:
         if isinstance(content, str):
             return content
+
+        if self._is_text_only_content(content):
+            return self._collapse_text_only_content(content)
 
         if not allow_multimodal:
             raise BackendRequestValidationError(
@@ -1690,17 +1732,40 @@ class VLLMBackend(InferenceBackend):
         if model_registry is None:
             raise RuntimeError("OpenAIServingModels did not expose a model registry.")
 
-        return serving_render_cls(
-            model_config=getattr(engine_client, "model_config"),
-            renderer=getattr(engine_client, "renderer"),
-            io_processor=getattr(engine_client, "io_processor"),
-            model_registry=model_registry,
-            request_logger=None,
-            chat_template=None,
-            chat_template_content_format="auto",
-            trust_request_chat_template=False,
-            default_chat_template_kwargs=self._request_defaults().get("chat_template_kwargs"),
+        engine_kwargs = self.runtime_spec.get("engine_kwargs") or {}
+        openai_serving_config = self.runtime_spec.get("openai_serving") or {}
+        tool_call_parser = engine_kwargs.get("tool_call_parser")
+        enable_auto_tools = bool(engine_kwargs.get("enable_auto_tool_choice"))
+        reasoning_parser = (
+            engine_kwargs.get("reasoning_parser")
+            or openai_serving_config.get("reasoning_parser")
+            or None
         )
+
+        init_signature = inspect.signature(serving_render_cls)
+        parameters = init_signature.parameters
+        accepts_var_kwargs = any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        )
+        kwargs = {
+            "model_config": getattr(engine_client, "model_config"),
+            "renderer": getattr(engine_client, "renderer"),
+            "io_processor": getattr(engine_client, "io_processor", None),
+            "model_registry": model_registry,
+            "request_logger": None,
+            "chat_template": None,
+            "chat_template_content_format": "auto",
+            "trust_request_chat_template": False,
+            "enable_auto_tools": enable_auto_tools,
+            "tool_parser": tool_call_parser,
+            "reasoning_parser": reasoning_parser,
+            "default_chat_template_kwargs": self._request_defaults().get("chat_template_kwargs"),
+        }
+        if not accepts_var_kwargs:
+            kwargs = {key: value for key, value in kwargs.items() if key in parameters}
+
+        return serving_render_cls(**kwargs)
 
     def _build_openai_serving_chat(
         self,
@@ -1795,6 +1860,7 @@ class VLLMBackend(InferenceBackend):
             )
         except Exception as exc:
             self.openai_serving_adapter_init_error = str(exc)
+            logger.warning("Failed to initialize vLLM OpenAI serving adapter: %s", exc)
             return None
 
         self.openai_serving_adapter_init_error = None
@@ -2015,7 +2081,7 @@ class VLLMBackend(InferenceBackend):
         request: ChatCompletionsRequest,
         runtime_context: dict[str, Any],
     ) -> dict[str, Any]:
-        if self.openai_serving_chat_adapter is not None and not self._is_async_engine():
+        if self.openai_serving_chat_adapter is not None:
             request_payload = self._build_openai_serving_request_payload(
                 request,
                 runtime_spec=runtime_spec,
@@ -2061,6 +2127,20 @@ class VLLMBackend(InferenceBackend):
         request: ChatCompletionsRequest,
         runtime_context: dict[str, Any],
     ) -> AsyncIterator[dict[str, Any] | bytes | str]:
+        if self.openai_serving_chat_adapter is not None:
+            request_payload = self._build_openai_serving_request_payload(
+                request,
+                runtime_spec=runtime_spec,
+                runtime_context=runtime_context,
+            )
+            try:
+                async for chunk in self._iter_openai_serving_stream(request_payload):
+                    yield chunk
+                return
+            except Exception as exc:
+                self.openai_serving_adapter_init_error = str(exc)
+                self.openai_serving_chat_adapter = None
+
         sampling_params = self._build_sampling_params(request, runtime_spec=runtime_spec)
         chat_kwargs = self._build_chat_kwargs(request, runtime_spec=runtime_spec)
         if self.engine is None:

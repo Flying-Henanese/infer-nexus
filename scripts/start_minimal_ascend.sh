@@ -116,6 +116,11 @@ if ! command -v uvicorn >/dev/null 2>&1; then
   exit 1
 fi
 
+if ! command -v curl >/dev/null 2>&1; then
+  echo "Missing 'curl' in PATH. The container image must provide curl for gateway health checks." >&2
+  exit 1
+fi
+
 ray_is_running() {
   ray status >/dev/null 2>&1
 }
@@ -190,6 +195,30 @@ write_status() {
   printf '%s\n' "${msg}" >"${STATE_DIR}/STATUS"
 }
 
+wait_for_gateway_ready() {
+  local pid_file="$1"
+  local timeout_seconds="$2"
+  local url="http://127.0.0.1:8000/healthz"
+  local waited=0
+
+  while [[ "${waited}" -lt "${timeout_seconds}" ]]; do
+    if ! pid_is_running "${pid_file}"; then
+      echo "Gateway exited before becoming ready. See ${LOG_DIR}/gateway.log" >&2
+      return 1
+    fi
+
+    if curl -fsS --max-time 1 "${url}" >/dev/null 2>&1; then
+      return 0
+    fi
+
+    sleep 1
+    waited=$((waited + 1))
+  done
+
+  echo "Timed out waiting for gateway to listen on ${url}. See ${LOG_DIR}/gateway.log" >&2
+  return 1
+}
+
 start_ray_head_if_needed
 
 SERVE_PID_FILE="${PID_DIR}/serve_runtime.pid"
@@ -225,8 +254,12 @@ else
     gateway_args+=(--reload)
   fi
 
-  (exec "${gateway_args[@]}") >"${LOG_DIR}/gateway.log" 2>&1 &
+  (PYTHONUNBUFFERED=1 exec "${gateway_args[@]}") >"${LOG_DIR}/gateway.log" 2>&1 &
   echo $! >"${GATEWAY_PID_FILE}"
+fi
+
+if ! wait_for_gateway_ready "${GATEWAY_PID_FILE}" 60; then
+  exit 1
 fi
 
 write_status "started"

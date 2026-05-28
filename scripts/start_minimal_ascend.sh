@@ -72,6 +72,10 @@ rm -f "${RAY_STATE_FILE}"
 
 cd "${ROOT_DIR}"
 
+# The repository uses a src/ layout. When running with the container's system
+# Python instead of an installed wheel/venv, make src importable explicitly.
+export PYTHONPATH="${ROOT_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}"
+
 if [[ -n "${ASCEND_VISIBLE_DEVICES_VALUE}" ]]; then
   export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_VISIBLE_DEVICES_VALUE}"
 fi

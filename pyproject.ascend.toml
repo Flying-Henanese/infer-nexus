@@ -1,0 +1,80 @@
+[project]
+name = "infer-nexus"
+version = "0.1.0"
+description = "Shared inference service factory built on Ray Serve and vLLM Ascend"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+  "fastapi>=0.115.0",
+  "httpx>=0.27.0",
+  "pydantic>=2.8.0",
+  "pydantic-settings>=2.4.0",
+  "pyyaml>=6.0.2",
+  "uvicorn>=0.30.0",
+]
+
+[project.optional-dependencies]
+artifacts = [
+  "huggingface_hub>=0.32.0",
+]
+ascend-image = []
+dev = [
+  "httpx>=0.27.0",
+  "pytest>=8.3.0",
+  "ruff>=0.6.0",
+]
+
+[build-system]
+requires = ["hatchling>=1.25.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/infer_nexus"]
+
+[tool.uv]
+default-groups = []
+constraint-dependencies = [
+  # These packages are provided by the Ascend base image.
+  # Keep them constrained so project dependency sync cannot silently replace
+  # the validated NPU runtime stack.
+  "torch==2.9.0",
+  "torch-npu==2.9.0.post1",
+  "torchaudio==2.9.0",
+  "torchvision==0.24.0",
+  "transformers==4.57.6",
+  "vllm==0.18.0",
+  "vllm-ascend==0.18.0rc1",
+]
+
+[tool.infer-nexus.ascend-image]
+base = "Mineru-optimization"
+source = "https://ai.gitcode.com/Ascend-SACT/Mineru-optimization"
+runtime_packages_provided_by_image = [
+  "torch==2.9.0+cpu",
+  "torch-npu==2.9.0.post1+gitee7ba04",
+  "torchaudio==2.9.0",
+  "torchvision==0.24.0",
+  "transformers==4.57.6",
+  "vllm==0.18.0+empty",
+  "vllm-ascend==0.18.0rc1",
+]
+
+[[tool.uv.index]]
+name = "huawei"
+url = "https://mirrors.huaweicloud.com/repository/pypi/simple"
+
+[[tool.uv.index]]
+name = "tsinghua"
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

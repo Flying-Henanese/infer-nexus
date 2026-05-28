@@ -10,8 +10,8 @@ set -euo pipefail
 # - CANN/driver/toolkit/runtime must already be installed and sourced.
 # - Containers must be started with Ascend devices mounted, for example:
 #   /dev/davinci*, /dev/davinci_manager, /dev/devmm_svm, /dev/hisi_hdc.
-# - The Python environment should be built from pyproject.ascend.toml, or the
-#   active pyproject.toml should contain the ascend-image extra.
+# - The container image is expected to already include the required Python
+#   dependencies for Infer Nexus on Ascend.
 #
 # Logs:   .infer-nexus/logs/{ray,serve_runtime,gateway}.log
 # PIDs:   .infer-nexus/pids/{serve_runtime,gateway}.pid
@@ -27,7 +27,6 @@ RAY_STATE_FILE="${STATE_DIR}/ray_state.env"
 SETTINGS="config/settings.yaml"
 RAY_ADDRESS="auto"
 PROXY_LOCATION="Disabled"
-INSTALL=0
 RELOAD=0
 ASCEND_VISIBLE_DEVICES_VALUE="0,1,2,3"
 NUM_NPUS="4"
@@ -39,9 +38,6 @@ Usage: scripts/start_minimal_ascend.sh [options]
 
 Options:
   --settings PATH             Path to settings.yaml (default: config/settings.yaml)
-  --install                   Sync dependencies before startup
-  --no-install                Skip dependency sync before startup (default)
-  --install-artifacts         Also install the optional artifacts extra
   --ray-address ADDR          Ray address passed to the Serve runtime launcher
   --num-npus N                NPU count for a locally started Ray head
   --ascend-visible-devices CSV
@@ -53,17 +49,13 @@ Options:
 
 Examples:
   scripts/start_minimal_ascend.sh --ascend-visible-devices 0,1,2,3 --num-npus 4
-  scripts/start_minimal_ascend.sh --install --install-artifacts
+  scripts/start_minimal_ascend.sh --ray-address auto
 EOF
 }
 
-INSTALL_ARTIFACTS=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --settings) SETTINGS="$2"; shift 2;;
-    --install) INSTALL=1; shift;;
-    --no-install) INSTALL=0; shift;;
-    --install-artifacts) INSTALL_ARTIFACTS=1; shift;;
     --ray-address) RAY_ADDRESS="$2"; shift 2;;
     --num-npus) NUM_NPUS="$2"; shift 2;;
     --ascend-visible-devices) ASCEND_VISIBLE_DEVICES_VALUE="$2"; shift 2;;
@@ -105,27 +97,18 @@ if [[ "${CHECK_DEVICES}" -eq 1 ]]; then
   fi
 fi
 
-if ! command -v uv >/dev/null 2>&1; then
-  echo "Missing 'uv' in PATH. Install uv first." >&2
+if ! command -v ray >/dev/null 2>&1; then
+  echo "Missing 'ray' in PATH. Did you build/install the Ascend runtime environment?" >&2
   exit 1
 fi
 
-if [[ "${INSTALL}" -eq 1 ]]; then
-  if ! grep -q 'ascend-image' pyproject.toml 2>/dev/null; then
-    echo "The active pyproject.toml does not contain the ascend-image extra." >&2
-    echo "Build from pyproject.ascend.toml first, or copy it to pyproject.toml in a dedicated image workspace." >&2
-    exit 1
-  fi
-
-  if [[ "${INSTALL_ARTIFACTS}" -eq 1 ]]; then
-    uv sync --extra serve --extra ascend-image --extra artifacts
-  else
-    uv sync --extra serve --extra ascend-image
-  fi
+if ! command -v python >/dev/null 2>&1; then
+  echo "Missing 'python' in PATH. The container image must provide the runtime environment." >&2
+  exit 1
 fi
 
-if ! command -v ray >/dev/null 2>&1; then
-  echo "Missing 'ray' in PATH. Did you build/install the Ascend runtime environment?" >&2
+if ! command -v uvicorn >/dev/null 2>&1; then
+  echo "Missing 'uvicorn' in PATH. The container image must provide the runtime environment." >&2
   exit 1
 fi
 
@@ -214,7 +197,7 @@ if pid_is_running "${SERVE_PID_FILE}"; then
   echo "Serve runtime already running (pid $(cat "${SERVE_PID_FILE}"))."
 else
   (
-    exec uv run python scripts/run_serve_runtime.py \
+    exec python scripts/run_serve_runtime.py \
       --settings "${SETTINGS}" \
       --ray-address "${RAY_ADDRESS}" \
       --proxy-location "${PROXY_LOCATION}"
@@ -238,7 +221,7 @@ else
     gateway_args+=(--reload)
   fi
 
-  (exec uv run "${gateway_args[@]}") >"${LOG_DIR}/gateway.log" 2>&1 &
+  (exec "${gateway_args[@]}") >"${LOG_DIR}/gateway.log" 2>&1 &
   echo $! >"${GATEWAY_PID_FILE}"
 fi
 

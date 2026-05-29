@@ -16,7 +16,7 @@ from infer_nexus.core.enums import TaskType
 from infer_nexus.core.schemas import ChatCompletionsRequest, EmbeddingRequest, RerankRequest
 from infer_nexus.backends.vllm import VLLMBackend
 from infer_nexus.model_store import LocalModelStore
-from infer_nexus.runtime.deployments import ModelRuntimeReplica
+from infer_nexus.runtime.deployments import DeploymentFactory, ModelRuntimeReplica
 from infer_nexus.runtime.serve_app import ServeApplicationBuilder
 
 
@@ -305,6 +305,29 @@ def test_deployment_factory_applies_llmconfig_style_overrides() -> None:
     }
     assert spec.ray_actor_options['num_cpus'] == 6
     assert spec.ray_actor_options['num_gpus'] == 1
+
+
+def test_deployment_factory_maps_npu_resources_to_custom_ray_resource() -> None:
+    """NPU runtime should use Ray custom resources instead of CUDA num_gpus."""
+    factory = DeploymentFactory(inference_device_type="npu")
+
+    spec = factory.build_spec(
+        ModelConfig(
+            name='qwen3-embedding-8b',
+            alias='qwen3-embedding-8b',
+            task=TaskType.EMBEDDING,
+            model_path='Qwen/Qwen3-Embedding-8B',
+            tensor_parallel_size=1,
+            cpu_per_replica=2,
+            gpu_per_replica=0.3,
+            min_replicas=1,
+            max_replicas=1,
+        )
+    )
+
+    assert spec.ray_actor_options['num_cpus'] == 2
+    assert spec.ray_actor_options['resources'] == {'NPU': 0.3}
+    assert 'num_gpus' not in spec.ray_actor_options
 
 
 def test_build_application_name_is_stable(
@@ -822,6 +845,25 @@ def test_vllm_backend_accepts_streaming_messages_and_rejects_text_only_multimoda
     )
 
     assert backend._build_chat_messages(streaming) == [{'role': 'user', 'content': 'hello'}]
+
+    assert backend._build_chat_messages(multimodal) == [{'role': 'user', 'content': 'hello'}]
+
+
+def test_vllm_backend_rejects_image_blocks_for_non_vision_models() -> None:
+    """Non-vision models should still reject image content blocks."""
+    backend = VLLMBackend({})
+    multimodal = ChatCompletionsRequest(
+        model='qwen3-chat',
+        messages=[
+            {
+                'role': 'user',
+                'content': [
+                    {'type': 'text', 'text': 'hello'},
+                    {'type': 'image_url', 'image_url': {'url': 'https://example.com/demo.png'}},
+                ],
+            }
+        ],
+    )
 
     with pytest.raises(BackendRequestValidationError, match='does not support multimodal'):
         backend._build_chat_messages(multimodal)

@@ -64,6 +64,7 @@ EOF
 # Optional dependency set selector.
 # When enabled, the script will install the service/runtime extras before
 # attempting to start any processes.
+# 也就是读取命令行参数的
 INSTALL_ARTIFACTS=0
 while [[ $# -gt 0 ]]; do
   case "$1" in

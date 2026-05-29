@@ -41,5 +41,5 @@ runtime:
 
 model_store:
   root_dir: models
-  # use mirror endpoint to avoid inaccessibility in mainland China
+  # use mirror endpoint to prevent blocking in mainland China
   huggingface_endpoint: https://hf-mirror.com

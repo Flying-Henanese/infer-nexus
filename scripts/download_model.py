@@ -39,8 +39,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     """下载模型并输出建议的模型注册配置片段。"""
+    # 获取刚才cli传入的参数
     args = parse_args()
+    # 找到配置文件，加载配置，获取模型存储的根目录等信息
     settings = load_settings(args.settings_path)
+    # 从config/settings.yaml(默认值，可自定义)中获取模型存储的根目录等信息，构造模型存储对象
     model_store = LocalModelStore.from_settings(settings.model_store)
 
     # Download into the canonical store layout under model_store.root_dir.

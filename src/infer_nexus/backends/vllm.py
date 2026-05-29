@@ -1732,19 +1732,13 @@ class VLLMBackend(InferenceBackend):
         if model_registry is None:
             raise RuntimeError("OpenAIServingModels did not expose a model registry.")
 
-        openai_serving_config = self.runtime_spec.get("openai_serving") or {}
         engine_kwargs = self.runtime_spec.get("engine_kwargs") or {}
-        tool_call_parser = (
-            openai_serving_config.get("tool_call_parser")
-            or engine_kwargs.get("tool_call_parser")
-        )
-        enable_auto_tools = bool(
-            openai_serving_config.get("enable_auto_tool_choice")
-            or engine_kwargs.get("enable_auto_tool_choice")
-        )
+        openai_serving_config = self.runtime_spec.get("openai_serving") or {}
+        tool_call_parser = engine_kwargs.get("tool_call_parser")
+        enable_auto_tools = bool(engine_kwargs.get("enable_auto_tool_choice"))
         reasoning_parser = (
-            openai_serving_config.get("reasoning_parser")
-            or engine_kwargs.get("reasoning_parser")
+            engine_kwargs.get("reasoning_parser")
+            or openai_serving_config.get("reasoning_parser")
             or None
         )
 
@@ -1783,9 +1777,12 @@ class VLLMBackend(InferenceBackend):
     ) -> Any:
         openai_serving_config = self.runtime_spec.get("openai_serving") or {}
         engine_kwargs = self.runtime_spec.get("engine_kwargs") or {}
-        tool_call_parser = (
-            openai_serving_config.get("tool_call_parser")
-            or engine_kwargs.get("tool_call_parser")
+        enable_auto_tool_choice = engine_kwargs.get("enable_auto_tool_choice")
+        tool_call_parser = engine_kwargs.get("tool_call_parser")
+        reasoning_parser = (
+            engine_kwargs.get("reasoning_parser")
+            or openai_serving_config.get("reasoning_parser")
+            or ""
         )
         init_signature = inspect.signature(serving_chat_cls)
         parameters = init_signature.parameters
@@ -1808,16 +1805,22 @@ class VLLMBackend(InferenceBackend):
             "chat_template_content_format": "auto",
             "trust_request_chat_template": False,
             "return_tokens_as_token_ids": False,
-            "reasoning_parser": openai_serving_config.get("reasoning_parser") or "",
-            "enable_auto_tools": bool(
-                openai_serving_config.get("enable_auto_tool_choice")
-                or engine_kwargs.get("enable_auto_tool_choice")
-            ),
+            "enable_auto_tool_choice": enable_auto_tool_choice,
+            "enable_auto_tools": enable_auto_tool_choice,
+            "tool_call_parser": tool_call_parser,
             "tool_parser": tool_call_parser,
+            "reasoning_parser": reasoning_parser,
             "default_chat_template_kwargs": self._request_defaults().get("chat_template_kwargs"),
         }
+        skip_if_none = {
+            "enable_auto_tool_choice",
+            "enable_auto_tools",
+            "tool_call_parser",
+            "tool_parser",
+            "default_chat_template_kwargs",
+        }
         for key, value in optional_kwargs.items():
-            if key in parameters:
+            if key in parameters and (value is not None or key not in skip_if_none):
                 kwargs[key] = value
 
         return serving_chat_cls(*args, **kwargs)
@@ -1976,55 +1979,58 @@ class VLLMBackend(InferenceBackend):
             },
         }
 
-    def _build_chat_stub_stream_chunks(
-        self,
-        request: ChatCompletionsRequest,
-        runtime_spec: dict[str, Any],
-        runtime_context: dict[str, Any],
-        sampling_params: dict[str, Any],
-        chat_kwargs: dict[str, Any],
-    ) -> list[dict[str, Any]]:
-        response = self._build_chat_stub_response(
-            request,
-            runtime_spec,
-            runtime_context,
-            sampling_params,
-            chat_kwargs,
-        )
-        created = response["created"]
-        response_id = response["id"]
-        model = response["model"]
-        return [
-            {
-                "id": response_id,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "model": model,
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {
-                            "role": "assistant",
-                            "content": response["content"],
-                        },
-                        "finish_reason": None,
-                    }
-                ],
-            },
-            {
-                "id": response_id,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "model": model,
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {},
-                        "finish_reason": response["finish_reason"],
-                    }
-                ],
-            },
-        ]
+    # NOTE: Temporarily commented out because this helper is currently unused.
+    # Keeping the code here for short-term rollback safety during module cleanup.
+    #
+    # def _build_chat_stub_stream_chunks(
+    #     self,
+    #     request: ChatCompletionsRequest,
+    #     runtime_spec: dict[str, Any],
+    #     runtime_context: dict[str, Any],
+    #     sampling_params: dict[str, Any],
+    #     chat_kwargs: dict[str, Any],
+    # ) -> list[dict[str, Any]]:
+    #     response = self._build_chat_stub_response(
+    #         request,
+    #         runtime_spec,
+    #         runtime_context,
+    #         sampling_params,
+    #         chat_kwargs,
+    #     )
+    #     created = response["created"]
+    #     response_id = response["id"]
+    #     model = response["model"]
+    #     return [
+    #         {
+    #             "id": response_id,
+    #             "object": "chat.completion.chunk",
+    #             "created": created,
+    #             "model": model,
+    #             "choices": [
+    #                 {
+    #                     "index": 0,
+    #                     "delta": {
+    #                         "role": "assistant",
+    #                         "content": response["content"],
+    #                     },
+    #                     "finish_reason": None,
+    #                 }
+    #             ],
+    #         },
+    #         {
+    #             "id": response_id,
+    #             "object": "chat.completion.chunk",
+    #             "created": created,
+    #             "model": model,
+    #             "choices": [
+    #                 {
+    #                     "index": 0,
+    #                     "delta": {},
+    #                     "finish_reason": response["finish_reason"],
+    #                 }
+    #             ],
+    #         },
+    #     ]
 
     def _convert_chat_result(
         self,

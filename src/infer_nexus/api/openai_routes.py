@@ -184,8 +184,10 @@ async def create_embedding(
     dispatcher: RuntimeDispatcher = Depends(get_runtime_dispatcher),
 ) -> EmbeddingResponse | JSONResponse | Response:
     """处理向量化请求，执行模型校验、准入校验和运行时分发。"""
+    # 第一步：检查请求模型是否已注册。
     try:
         model = registry.get(request.model)
+    # 如果找不到模型，则向接口返回 OpenAI 兼容的 404 错误响应。
     except ModelNotFoundError:
         return openai_error_response(
             404,
@@ -195,6 +197,8 @@ async def create_embedding(
             code="model_not_found",
         )
 
+    # 第二步：检查模型任务类型。
+    # 防止把 chat/rerank 模型误用于当前链路中的 embedding 接口。
     if model.task is not TaskType.EMBEDDING:
         return openai_error_response(
             400,
@@ -204,7 +208,11 @@ async def create_embedding(
             code="unsupported_task_type",
         )
 
+    # 第三步：检查模型文件是否存在，并通过准入控制后进入运行时执行。
     try:
+        # 对于非 VLLM_OPENAI_PROXY 后端的模型，才检查模型文件路径是否存在。
+        # 因为 VLLM_OPENAI_PROXY 后端的模型是通过代理转发到外部 OpenAI API 的，
+        # 不涉及本地模型文件，所以不需要检查模型路径。
         if model.backend != BackendType.VLLM_OPENAI_PROXY:
             model_store.require_model_path(model)
         admission.check_model_request(model)
@@ -257,8 +265,10 @@ async def _create_rerank_impl(
     dispatcher: RuntimeDispatcher,
 ) -> RerankResponse | JSONResponse | Response:
     """Rerank 共享实现，供 `/v1/rerank` 与兼容路径复用。"""
+    # 第一步：检查请求模型是否已注册。
     try:
         model = registry.get(request.model)
+    # 如果找不到模型，则向接口返回 OpenAI 兼容的 404 错误响应。
     except ModelNotFoundError:
         return openai_error_response(
             404,
@@ -268,6 +278,8 @@ async def _create_rerank_impl(
             code="model_not_found",
         )
 
+    # 第二步：检查模型任务类型。
+    # 防止把 chat/embedding 模型误用于当前链路中的 rerank 接口。
     if model.task is not TaskType.RERANK:
         return openai_error_response(
             400,
@@ -277,7 +289,11 @@ async def _create_rerank_impl(
             code="unsupported_task_type",
         )
 
+    # 第三步：检查模型文件是否存在，并通过准入控制后进入运行时执行。
     try:
+        # 对于非 VLLM_OPENAI_PROXY 后端的模型，才检查模型文件路径是否存在。
+        # 因为 VLLM_OPENAI_PROXY 后端的模型是通过代理转发到外部 OpenAI API 的，
+        # 不涉及本地模型文件，所以不需要检查模型路径。
         if model.backend != BackendType.VLLM_OPENAI_PROXY:
             model_store.require_model_path(model)
         admission.check_model_request(model)

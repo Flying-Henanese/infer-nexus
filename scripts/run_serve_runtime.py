@@ -14,6 +14,7 @@ from infer_nexus.catalog.loader import load_model_catalog
 from infer_nexus.catalog.registry import ModelRegistry
 from infer_nexus.core.config import load_settings
 from infer_nexus.model_store import LocalModelStore
+from infer_nexus.runtime.deployments import DeploymentFactory
 from infer_nexus.runtime.serve_app import ServeApplicationBuilder
 
 
@@ -152,6 +153,9 @@ def main() -> None:
         model_store=model_store,
         backend_init_mode=settings.runtime.backend_init_mode,
         service_name=settings.service.name,
+        deployment_factory=DeploymentFactory(
+            inference_device_type=settings.cluster.inference_device_type,
+        ),
     )
     builder.validate_registry_runtime_configs(registry)
 

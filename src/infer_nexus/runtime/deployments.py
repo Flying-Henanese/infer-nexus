@@ -2,7 +2,7 @@
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from infer_nexus.backends.base import InferenceBackend
 from infer_nexus.backends.vllm import VLLMBackend
@@ -148,9 +148,21 @@ class RuntimeApplicationRoot:
 class DeploymentFactory:
     """Translate model catalog entries into Ray Serve deployment parameters."""
 
+    def __init__(self, inference_device_type: Literal["cuda", "npu"] = "cuda") -> None:
+        """Initialize deployment resource mapping for the configured inference device."""
+        self.inference_device_type = inference_device_type
+
     def build_deployment_name(self, model: ModelConfig) -> str:
         """Build stable per-model deployment names for one-model-per-deployment topology."""
         return f"model-{model.name}"
+
+    def build_accelerator_actor_options(self, accelerator_per_replica: int | float) -> dict[str, Any]:
+        """Map logical per-replica accelerator demand to Ray actor options."""
+        if self.inference_device_type == "cuda":
+            return {"num_gpus": accelerator_per_replica}
+        if self.inference_device_type == "npu":
+            return {"resources": {"NPU": accelerator_per_replica}}
+        raise ValueError(f"unsupported inference_device_type '{self.inference_device_type}'")
 
     def build_spec(self, model: ModelConfig) -> DeploymentSpec:
         """从模型配置生成部署规格。"""
@@ -162,8 +174,8 @@ class DeploymentFactory:
         autoscaling_config.update(model.deployment_config.autoscaling_config)
         ray_actor_options = {
             "num_cpus": model.cpu_per_replica,
-            "num_gpus": model.gpu_per_replica,
         }
+        ray_actor_options.update(self.build_accelerator_actor_options(model.gpu_per_replica))
         ray_actor_options.update(model.deployment_config.ray_actor_options)
         return DeploymentSpec(
             model_name=model.name,

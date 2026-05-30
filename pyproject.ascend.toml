@@ -18,6 +18,8 @@ artifacts = [
   "huggingface_hub>=0.32.0",
 ]
 ascend-image = []
+# for development only
+# not required for real production use
 dev = [
   "httpx>=0.27.0",
   "pytest>=8.3.0",
@@ -33,6 +35,10 @@ packages = ["src/infer_nexus"]
 
 [tool.uv]
 default-groups = []
+# uv-specific constraints for packages provided by the Ascend base image.
+# These entries are not direct project dependencies; they only constrain
+# resolution if one of these packages is requested directly or transitively.
+# This prevents uv sync from silently replacing the validated NPU runtime stack.
 constraint-dependencies = [
   # These packages are provided by the Ascend base image.
   # Keep them constrained so project dependency sync cannot silently replace
@@ -46,6 +52,8 @@ constraint-dependencies = [
   "vllm-ascend==0.18.0rc1",
 ]
 
+# following items are simply provided for reference. 
+# they will not affect project dependencies.
 [tool.infer-nexus.ascend-image]
 base = "Mineru-optimization"
 source = "https://ai.gitcode.com/Ascend-SACT/Mineru-optimization"

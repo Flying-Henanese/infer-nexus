@@ -2,18 +2,19 @@
 
 ## 1. Overview
 
-`infer-nexus` is a shared inference service factory for internal development and testing environments. It is designed to replace the current pattern where each user deploys and maintains their own model inference services on shared GPU servers.
+`infer-nexus` is a shared inference service factory for internal development and testing environments. It is designed to replace the current pattern where each user deploys and maintains their own model inference services on shared accelerator servers.
 
 The project uses:
 - `Python` as the implementation language
 - `uv` for dependency and environment management
 - `Ray Serve` for deployment lifecycle, routing, and autoscaling support
 - `vLLM` as the local runtime backend
+- CUDA GPU and Huawei Ascend NPU as supported accelerator platforms
 - OpenAI-compatible upstream proxying for compatibility-sensitive models
 - OpenAI-compatible northbound APIs for client compatibility
 
 Primary goals:
-- Share GPU resources across teams and users
+- Share accelerator resources across teams and users
 - Expose a single inference endpoint instead of many scattered endpoints
 - Pre-register and centrally manage commonly used models
 - Support elastic scaling for high-demand models
@@ -41,8 +42,9 @@ Out of scope for Phase 1:
    - Existing internal applications should require little or no code change.
    - Platform-specific capabilities are exposed through separate native APIs.
 
-4. Shared GPU pool
-   - All locally hosted model services use the same GPU pool.
+4. Shared accelerator pool
+   - All locally hosted model services use the same accelerator pool.
+   - CUDA GPU and Ascend NPU are selected at the platform configuration layer.
    - No user-level hardware reservation or hard partitioning in Phase 1.
 
 5. Warm replicas for low-frequency large models
@@ -65,6 +67,7 @@ Client
           -> Backend Dispatch per Model
               -> vllm_openai_proxy -> Upstream vLLM/OpenAI-compatible server
               -> vllm (local) -> Ray Serve Deployments -> replica-local vLLM Runtime
+                 -> CUDA GPU or Ascend NPU resource pool
           -> Load Inspector
           -> Scaling Policy
 ```
@@ -203,6 +206,7 @@ graph TD
 #### Ray Serve Runtime
 - Owns deployment lifecycle and replica management
 - Handles internal routing to replicas
+- Maps per-replica accelerator demand to CUDA `num_gpus` or Ray custom `NPU` resources based on platform configuration
 - Exposes runtime and deployment metrics through Prometheus-compatible endpoints
 
 #### vLLM Backend
@@ -214,7 +218,8 @@ graph TD
   compatibility streaming when async engine initialization is unavailable
 - Keeps embedding and rerank on the existing sync vLLM paths in the current
   implementation
-- Can later be replaced by `vllm-ascend` without redesigning the entire platform
+- Supports the same backend abstraction on CUDA and Ascend environments; Ascend
+  deployments rely on the environment-provided `vllm-ascend` runtime stack
 
 #### OpenAI Proxy Backend
 - Preserves northbound SDK compatibility (`base_url + model`)
@@ -249,17 +254,21 @@ Rationale:
 
 For proxy-backed models, the gateway routes to one explicitly configured upstream endpoint per model. The gateway does not own an upstream replica pool in this phase.
 
-### 4.3 GPU resource model
-All locally hosted models share one GPU pool.
+### 4.3 Accelerator resource model
+All locally hosted models share one accelerator pool. In CUDA environments this
+pool is exposed to Ray as GPUs. In Ascend environments this pool is exposed to
+Ray as custom `NPU` resources.
 
 Rationale:
 - Matches the current internal environment
 - Keeps scheduling and operations simple
 - Maximizes hardware sharing in development and testing
+- Keeps model configuration portable across CUDA and Ascend by treating
+  `gpu_per_replica` as logical accelerator demand
 
 Constraint:
 - Resource admission must avoid accepting traffic the cluster cannot serve reasonably
-- Fractional GPU scheduling alone does not guarantee per-model physical GPU separation
+- Fractional accelerator scheduling alone does not guarantee per-model physical device separation
 
 ### 4.4 Resource pool boundary vs deployment resource requests
 The platform must distinguish between two separate concerns:
@@ -267,11 +276,11 @@ The platform must distinguish between two separate concerns:
 1. Resource pool boundary
    - Defines how much accelerator capacity is assigned to the entire `infer-nexus` platform
    - This is set at the Ray node or cluster process boundary
-   - Example: make only 4 A100 GPUs visible to the Ray runtime used by `infer-nexus`
+   - Example: make only 4 A100 GPUs or 4 Ascend NPUs visible to the Ray runtime used by `infer-nexus`
 
 2. Deployment resource requests
    - Defines how much of that shared pool each deployment replica consumes
-   - This is expressed through Ray or Ray Serve resource requirements such as GPU count per replica
+   - This is expressed through Ray or Ray Serve resource requirements such as GPU count per replica or custom NPU resources
    - This does not bind a deployment to specific device IDs ahead of time
 
 Phase 1 should implement platform-level pooling, not static per-deployment device pinning.
@@ -291,9 +300,26 @@ Conceptually:
 This means `CUDA_VISIBLE_DEVICES` is still useful, but only to define the platform resource boundary. It should not be used as a per-model or per-deployment static binding mechanism.
 
 #### Recommended Ascend pattern
-For Ascend environments, the same principle applies:
-- define the set of visible accelerator devices at the Ray runtime boundary
-- let the serving layer schedule replicas within that bounded pool
+For Ascend environments, the same principle applies, with NPU-specific resource
+mapping:
+- set `cluster.inference_device_type: npu` in `config/settings.yaml`
+- define the visible NPU set through `ASCEND_RT_VISIBLE_DEVICES`
+- start Ray with a matching custom resource declaration such as
+  `--resources '{"NPU": 4}'`
+- let Ray Serve schedule replicas by consuming `resources: {"NPU": gpu_per_replica}`
+
+Current implementation details:
+- `DeploymentFactory(inference_device_type="npu")` maps the model's
+  `gpu_per_replica` value to Ray actor options `resources: {"NPU": ...}`
+  instead of CUDA `num_gpus`
+- `scripts/start_minimal_ascend.sh` performs minimal Ascend bootstrap,
+  exports `ASCEND_RT_VISIBLE_DEVICES`, sets
+  `RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1`, starts a Ray head with
+  custom `NPU` resources when needed, then deploys Serve and the gateway
+- `pyproject.ascend.toml`, `dockerfile`, and `docker-compose.yml` describe the
+  current Ascend container path, including reliance on a Huawei-provided
+  Ascend Docker image that already includes the validated CANN / `torch-npu` /
+  `vllm` / `vllm-ascend` / Ray runtime stack
 
 If additional backend-specific environment handling is required for `vllm-ascend`, that logic should remain an implementation detail of the backend integration layer rather than a manual per-deployment operational step.
 
@@ -307,9 +333,9 @@ The architecture should follow these rules:
 This separation is necessary to preserve shared-pool scheduling and avoid falling back to manual device partitioning.
 
 #### Operational caveat observed in current implementation
-- With fractional `num_gpus` such as `0.3` or `0.6`, Ray may co-locate multiple model replicas on one physical GPU.
+- With fractional CUDA `num_gpus` or fractional custom `NPU` resources such as `0.3` or `0.6`, Ray may co-locate multiple model replicas on one physical accelerator.
 - In this mode, deployments can still fail with vLLM KV cache initialization errors even when catalog config is valid.
-- For stability-first bring-up, prefer one-replica-per-GPU (`num_gpus=1`) before reintroducing fractional sharing.
+- For stability-first bring-up, prefer one-replica-per-device (`gpu_per_replica=1`) before reintroducing fractional sharing.
 
 ### 4.5 Serving backends
 Current implementation supports two backends:
@@ -320,7 +346,8 @@ Current implementation supports two backends:
 Rationale:
 - `vllm`: good fit when local runtime control and resource ownership are needed
 - `vllm_openai_proxy`: highest compatibility with official upstream server behavior
-- Forward path exists to `vllm-ascend`
+- Ascend support is handled as a platform/runtime variant of the local `vllm`
+  backend, not as a separate northbound backend type
 
 Implementation notes:
 - Keep backend abstraction thin to avoid hard-coupling gateway logic to one runtime.
@@ -350,6 +377,9 @@ Implementation notes:
   OpenAI-compatible requests to a Ray Serve LLM application, preserving the
   current control-plane boundary while delegating vLLM protocol fidelity to Ray
   Serve LLM.
+- On Ascend, the backend assumes the Huawei-provided runtime image has already
+  installed and validated CANN, `torch-npu`, `vllm`, `vllm-ascend`, and Ray.
+  The application code should avoid replacing those packages during startup.
 - Header forwarding policy should remain explicit and model-scoped.
 - If `forward_authorization` is enabled for a proxy model, the gateway should forward the inbound client `Authorization` header to the configured upstream service (`待实现`).
 - If proxy auth is also configured through static or environment-derived bearer tokens, precedence rules must be defined explicitly before enabling `forward_authorization` (`待实现`).
@@ -449,9 +479,9 @@ Returns operational status such as:
 Returns a summarized runtime load view for the shared inference factory.
 
 Example payload shape:
-- total GPUs (`待实现`)
-- allocated GPUs (`待实现`)
-- free GPUs estimate (`待实现`)
+- total accelerators (`待实现`)
+- allocated accelerators (`待实现`)
+- free accelerator estimate (`待实现`)
 - active models
 - pending scale actions (`待实现`)
 - rejection pressure state (`待实现`)
@@ -580,8 +610,10 @@ Each model entry should include at least:
 Configuration should be declarative and file-based in Phase 1.
 
 Recommended initial files:
-- `config/settings.toml` or `config/settings.yaml`
+- `config/settings.yaml`
 - `config/models.yaml`
+- `pyproject.toml` for the default development/runtime dependency set
+- `pyproject.ascend.toml` for the Ascend container dependency boundary
 
 ## 9.1 Local Model Store and Offline Registration
 
@@ -644,6 +676,44 @@ Current implementation note:
 - local `vllm` models now also support backend-scoped request behavior in
   configuration, including `vllm.request_defaults`, `vllm.request_policy`, and
   `vllm.openai_serving`
+- platform accelerator selection is configured in `config/settings.yaml` through
+  `cluster.inference_device_type`, currently `cuda` or `npu`
+- on `cuda`, Serve deployments request Ray CUDA resources through `num_gpus`
+- on `npu`, Serve deployments request Ray custom resources through
+  `resources: {"NPU": gpu_per_replica}`; the Ray cluster must be started with a
+  matching custom `NPU` resource budget
+
+### 9.2 Ascend Runtime Packaging
+
+Ascend support is intentionally packaged as a platform-specific runtime
+environment rather than a separate application architecture. The current
+implementation uses a Huawei-provided Ascend Docker image as the runtime base;
+that image already contains the NPU runtime stack and core inference/serving
+components such as `torch-npu`, `vllm`, `vllm-ascend`, and Ray.
+
+Current files:
+- `pyproject.ascend.toml` constrains packages that are expected to be provided
+  by the Huawei Ascend base image, including `torch-npu`, `vllm`, `vllm-ascend`,
+  and Ray
+- `dockerfile` builds from the current Huawei Ascend base image and syncs the project
+  using the Ascend pyproject
+- `docker-compose.yml` mounts Ascend device nodes, driver/tooling paths, model
+  storage, and the working tree into the container
+- `scripts/start_minimal_ascend.sh` starts the minimal Ray Serve plus gateway
+  flow on Ascend NPU
+
+Operational assumptions:
+- CANN, device drivers, runtime libraries, and `npu-smi` are provided by the
+  host/container environment before `infer-nexus` starts
+- the service does not install or mutate the NPU runtime stack at application
+  startup
+- cross-platform code behavior is selected by configuration, primarily
+  `cluster.inference_device_type` in `config/settings.yaml`; model-serving code
+  should not require separate CUDA-only or Ascend-only request paths
+- `ASCEND_RT_VISIBLE_DEVICES` defines the NPU visibility boundary for the
+  platform process
+- Ray custom `NPU` resources must match the accelerator budget intended for
+  `infer-nexus`
 
 ### Runtime implications
 At runtime, `infer-nexus` should:
@@ -718,7 +788,7 @@ Per-model signals:
 - deployment at max replicas or not
 
 Cluster-level signals:
-- available GPU capacity estimate
+- available accelerator capacity estimate
 - pending scale-up actions
 - recent rejection pressure
 
@@ -770,7 +840,7 @@ Scale up when any of these conditions persist for a configured window:
 
 Only scale up if:
 - current replicas are below `max_replicas`
-- cluster GPU capacity can satisfy the additional replica
+- cluster accelerator capacity can satisfy the additional replica
 - projected per-replica memory headroom can still satisfy vLLM KV cache initialization
 
 ### Suggested scale-down rules
@@ -831,7 +901,7 @@ Current implementation status:
 - per-model TTFT and latency (`待实现`)
 - per-model scaling behavior (`待实现`)
 - per-model rejection counts (`待实现`)
-- cluster GPU allocation summary (`待实现`)
+- cluster accelerator allocation summary (`待实现`)
 - degraded model states (`待实现`)
 - proxy upstream latency and error breakdown (`待实现`)
 - proxy stream lifecycle visibility (`待实现`)
@@ -926,8 +996,16 @@ src/
 config/
   settings.yaml
   models.yaml
+docker-compose.yml
+dockerfile
+pyproject.toml
+pyproject.ascend.toml
 tests/
 scripts/
+  run_gateway.py
+  run_serve_runtime.py
+  start_minimal.sh
+  start_minimal_ascend.sh
 ```
 
 ### Layout rationale
@@ -962,7 +1040,8 @@ Phase 1 should implement only the minimum platform needed to replace ad hoc pers
 
 The following should remain possible without architectural rework:
 - controlled dynamic registration
-- `vllm-ascend` backend substitution
+- deeper Ascend runtime hardening, including more explicit NPU health and
+  capacity reporting
 - richer rerank and multimodal support
 - stronger quota and rate-limit controls
 - admin APIs for model lifecycle operations

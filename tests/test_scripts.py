@@ -67,6 +67,7 @@ def test_run_serve_runtime_main_deploys_per_model_apps(monkeypatch, prepared_mod
     settings.service.name = 'infer-nexus'
     settings.model_store.root_dir = str(prepared_model_store)
     settings.runtime.backend_init_mode = 'stub'
+    settings.cluster.inference_device_type = 'npu'
     captured: dict[str, object] = {}
 
     monkeypatch.setattr(run_serve_runtime, 'parse_args', lambda: types.SimpleNamespace(
@@ -81,6 +82,7 @@ def test_run_serve_runtime_main_deploys_per_model_apps(monkeypatch, prepared_mod
 
     def fake_build_bindings(self, registry, *, serve=None, replica_cls=None):
         captured['registry_size'] = len(registry.list_models())
+        captured['inference_device_type'] = self.deployment_factory.inference_device_type
         return {
             'qwen3-32b-instruct': {'app': 'qwen'},
             'bge-large-zh-v1_5': {'app': 'embed'},
@@ -140,6 +142,7 @@ def test_run_serve_runtime_main_deploys_per_model_apps(monkeypatch, prepared_mod
     assert captured['proxy_location'] == 'Disabled'
     assert captured['runtime_env']['working_dir'] == '.'
     assert captured['registry_size'] == 3
+    assert captured['inference_device_type'] == 'npu'
     assert [item['name'] for item in captured_runs] == [
         'infer-nexus-model-qwen3-32b-instruct',
         'infer-nexus-model-bge-large-zh-v1_5',

@@ -1,0 +1,27 @@
+
+services:
+  infer-test:
+    image: infer:v1
+    container_name: infer-test
+    privileged: true
+    ports:
+      - "8000:8000"
+    environment:
+      - ASCEND_RT_VISIBLE_DEVICES=0
+      - ASCEND_VISIBLE_DEVICES=0
+      - PYTHONPATH=/app/infer-nexus/src:$PYTHONPATH
+    devices:
+      - /dev/davinci_manager
+      - /dev/devmm_svm
+      - /dev/hisi_hdc
+    volumes:
+      - /usr/local/Ascend/driver:/usr/local/Ascend/driver
+      - /usr/local/dcmi:/usr/local/dcmi
+      - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi
+      - /usr/local/sbin:/usr/local/sbin
+      - /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool
+      - /data1/models:/app/models
+      - .:/app/infer-nexus
+    command: /bin/bash -c "/app/infer-nexus/scripts/start_minimal_ascend.sh && tail -f /dev/null"
+    stdin_open: true
+    tty: true

@@ -105,6 +105,7 @@ graph TD
 
   subgraph Backend[后端适配]
     VB[src/infer_nexus/backends/vllm.py]
+    VN[src/infer_nexus/backends/vllm_native/*]
     BL[src/infer_nexus/backends/base.py]
   end
 
@@ -163,6 +164,7 @@ graph TD
   RE --> VB
 
   VB --> BL
+  VB --> VN
   VB --> SCH
   VB --> ENU
   VB --> ERR
@@ -211,13 +213,26 @@ graph TD
 
 #### vLLM Backend
 - Runs the actual model inference engines
-- Provides OpenAI-like behavior where possible
-- For local chat models, prefers replica-local `AsyncLLMEngine` and streams
-  native incremental text through the `infer-nexus` OpenAI SSE mapper
-- Keeps sync `vllm.LLM` as a compatibility fallback for non-streaming chat and
-  compatibility streaming when async engine initialization is unavailable
-- Keeps embedding and rerank on the existing sync vLLM paths in the current
-  implementation
+- Owns vLLM engine startup, shutdown, runtime spec validation, and task dispatch
+- Selects request behavior through `compat_mode`
+  - `vllm_native`: strict replica-local vLLM serving adapter path
+  - `local_best_effort`: existing local engine API path
+  - `strict_openai`: backward-compatible alias for `vllm_native` on chat configs
+- In `vllm_native` chat mode, delegates compatibility-sensitive OpenAI chat
+  behavior to `src/infer_nexus/backends/vllm_native/chat.py` and passes native
+  response or SSE chunks through without local delta reconstruction
+- In `vllm_native` embedding mode, uses an injected native embeddings serving
+  adapter contract and fails clearly if that adapter is unavailable; constructing
+  the real vLLM 0.18 embeddings serving object is still pending target-runtime
+  validation
+- In `local_best_effort` chat mode, uses replica-local `AsyncLLMEngine` where
+  available, maps cumulative vLLM `RequestOutput` objects to internal
+  `chat_delta` events, and lets `RuntimeExecutor` encode OpenAI-compatible SSE
+- Keeps sync `vllm.LLM` chat, `LLM.embed`, and `LLM.score` paths for
+  local-best-effort development, stubs, and fallback behavior
+- Keeps rerank local-best-effort only in the current implementation;
+  `vllm_native` rerank is rejected because vLLM rerank serving protocols are not
+  OpenAI-compatible
 - Supports the same backend abstraction on CUDA and Ascend environments; Ascend
   deployments rely on the environment-provided `vllm-ascend` runtime stack
 
@@ -351,19 +366,37 @@ Rationale:
 
 Implementation notes:
 - Keep backend abstraction thin to avoid hard-coupling gateway logic to one runtime.
-- For compatibility-sensitive multimodal models, prefer `vllm_openai_proxy`.
-- Keep local sync `LLM.chat()` path as fallback, not universal default.
-- The local `vllm` chat backend now prefers `AsyncLLMEngine` for real
-  incremental streaming. The backend consumes vLLM cumulative `RequestOutput`
+- `compat_mode` controls how much OpenAI/vLLM serving protocol behavior is
+  delegated to native serving internals:
+  - `vllm_native` means request/response semantics should follow vLLM native
+    serving as closely as possible; adapter initialization or invocation
+    failures are surfaced and must not silently degrade to local fallback logic
+  - `local_best_effort` means the backend may use local APIs such as
+    `AsyncLLMEngine.generate`, `LLM.chat`, `LLM.embed`, or `LLM.score` and
+    perform infer-nexus response shaping
+  - `strict_openai` is retained only as a backward-compatible alias for older
+    chat configurations
+- In `vllm_native` chat mode, the backend builds an OpenAI-style request payload
+  from `ChatCompletionsRequest`, rewrites only the served `model` name, merges
+  `extra_body`, and hands the payload to the replica-local native serving
+  adapter. Streaming bytes and strings are passed through unchanged, while dict
+  chunks are framed by the executor as SSE without semantic mutation.
+- In `local_best_effort` chat mode, the backend prefers `AsyncLLMEngine` for
+  real incremental streaming. It consumes vLLM cumulative `RequestOutput`
   objects, converts them into internal `chat_delta` events, and lets
   `RuntimeExecutor` encode those events as OpenAI-compatible SSE chunks.
-- `vllm.openai_serving.enabled` is preserved as model metadata and for
-  compatibility experiments, but local Ray Serve chat streaming no longer
-  depends on vLLM's private `OpenAIServingChat` interface.
-- If `AsyncLLMEngine` cannot be initialized, chat falls back to sync `LLM`.
-  Streaming remains available as an OpenAI-compatible stream in that case, but
-  it is compatibility streaming over a completed response rather than token-level
-  incremental streaming.
+- If `AsyncLLMEngine` cannot be initialized in local-best-effort mode, chat
+  falls back to sync `LLM`. Streaming remains available as an OpenAI-compatible
+  stream in that case, but it is compatibility streaming over a completed
+  response rather than token-level incremental streaming.
+- Native embedding has a backend contract and payload-preservation tests, but
+  real vLLM 0.18 embeddings serving construction still needs target-environment
+  validation. Until then, production embedding models should use
+  `local_best_effort` or `vllm_openai_proxy`.
+- Rerank remains `local_best_effort` for local vLLM. `vllm_native` rerank is
+  intentionally rejected in the first pass.
+- For compatibility-sensitive models that cannot yet use a validated native
+  adapter, prefer `vllm_openai_proxy`.
 - A Ray Serve LLM based option was considered: `from ray.serve.llm import
   LLMConfig, build_openai_app`. This could provide a more native Ray Serve
   wrapper around vLLM's OpenAI-compatible behavior. However, the API is still
@@ -433,8 +466,10 @@ Recommended later:
 - For proxy-backed models, upstream status code, body, and content type should be preserved where the failure occurs upstream rather than in the gateway
 - Proxy-backed embeddings and rerank requests are supported by the current implementation even though the original proxy rollout was described as chat-first
 - Streaming support for chat completions should be considered part of the design, even if implemented after the first non-streaming version
-  - local `vllm` path streaming plumbing exists end to end
-  - real local-engine chat streaming is implemented through replica-local
+  - local `vllm` streaming plumbing exists end to end
+  - `vllm_native` chat streams native serving chunks through without local delta
+    reconstruction
+  - `local_best_effort` chat streaming is implemented through replica-local
     `AsyncLLMEngine` when available
   - sync `LLM` fallback still emits OpenAI-compatible SSE, but without true
     token-level incrementality
@@ -509,7 +544,9 @@ Client request
   -> admission control check
   -> backend dispatch
       -> proxy backend: upstream OpenAI-compatible request/response passthrough
-      -> local backend: route to model-specific Ray Serve deployment -> vLLM inference -> OpenAI-compatible response/SSE adaptation
+      -> local backend:
+          -> vllm_native: route to model-specific Ray Serve deployment -> vLLM native serving adapter -> passthrough response/SSE
+          -> local_best_effort: route to model-specific Ray Serve deployment -> local vLLM engine API -> infer-nexus response/SSE adaptation
   -> client response
 ```
 
@@ -541,7 +578,11 @@ flowchart TD
   SR -->|stub| LR[Local replica]
   RH --> VB[VLLMBackend]
   LR --> VB
-  VB --> RESP[OpenAI JSON or SSE response adaptation]
+  VB --> CMODE{compat_mode?}
+  CMODE -->|vllm_native| NAD[vLLM native serving adapter]
+  CMODE -->|local_best_effort| LBE[Local vLLM engine API]
+  NAD --> RESP[Passthrough OpenAI JSON or SSE]
+  LBE --> RESP[OpenAI JSON or SSE response adaptation]
   RESP --> C
 
   PX --> HTTP[Forward request to upstream OpenAI-compatible endpoint]
@@ -585,6 +626,9 @@ Each model entry should include at least:
 - `alias`: external logical name used by clients
 - `task`: `chat`, `embedding`, `rerank`, or `vlm`
 - `backend`: initially `vllm` or `vllm_openai_proxy`
+- `compat_mode`: `local_best_effort` by default, or `vllm_native` for local
+  vLLM models that should use replica-local native serving semantics; legacy
+  `strict_openai` is accepted only as a chat alias
 - `model_path`: Hugging Face ID or local model path for locally hosted models
 - `deployment_name`: Ray Serve deployment identifier for locally hosted models
 - `dtype`
@@ -676,6 +720,12 @@ Current implementation note:
 - local `vllm` models now also support backend-scoped request behavior in
   configuration, including `vllm.request_defaults`, `vllm.request_policy`, and
   `vllm.openai_serving`
+- `compat_mode` defaults to `local_best_effort`; `vllm_native` is available for
+  local vLLM chat and embedding models, while local vLLM rerank explicitly stays
+  `local_best_effort`
+- `vllm_native` chat currently requires `vllm.openai_serving.enabled: true`
+  because the replica constructs vLLM OpenAI chat serving objects inside the
+  existing Ray Serve replica rather than starting a separate HTTP server
 - platform accelerator selection is configured in `config/settings.yaml` through
   `cluster.inference_device_type`, currently `cuda` or `npu`
 - on `cuda`, Serve deployments request Ray CUDA resources through `num_gpus`
@@ -732,6 +782,7 @@ models:
     alias: qwen3-chat
     task: chat
     backend: vllm
+    compat_mode: local_best_effort
     model_path: Qwen/Qwen3-32B-Instruct
     dtype: bfloat16
     tensor_parallel_size: 4
@@ -749,6 +800,7 @@ models:
     alias: bge-embedding
     task: embedding
     backend: vllm
+    compat_mode: local_best_effort
     model_path: BAAI/bge-large-zh-v1.5
     dtype: float16
     tensor_parallel_size: 1
@@ -967,6 +1019,11 @@ src/
     backends/
       base.py
       vllm.py
+      vllm_native/
+        __init__.py
+        chat.py
+        common.py
+        embedding.py
     catalog/
       models.py
       registry.py
@@ -1014,6 +1071,8 @@ scripts/
 - `control/` owns admission, scaling, and reconciliation logic
 - `runtime/` owns Ray Serve integration points
 - `backends/` isolates inference engine details
+- `backends/vllm_native/` isolates compatibility-sensitive vLLM native serving
+  wrappers from the local best-effort engine paths
 - `observability/` centralizes metrics and logging concerns
 
 ## 17. Phase 1 Implementation Scope
@@ -1032,7 +1091,8 @@ Phase 1 should implement only the minimum platform needed to replace ad hoc pers
 - API key authentication (`待实现`)
 
 ### Nice-to-have but not required for Phase 1
-- full local vLLM OpenAI-serving parity for streaming chat completions
+- full target-environment validation of `vllm_native` chat and embedding against
+  `vllm serve` behavior on Ray 2.48.0 + vLLM 0.18.x
 - native `responses` API support
 - config reload and deployment reconcile without full process restart
 

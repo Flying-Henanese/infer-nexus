@@ -11,205 +11,27 @@ import struct
 from io import BytesIO
 from pathlib import Path
 from collections.abc import AsyncIterator, Iterable
-from dataclasses import dataclass
 from time import time
-from typing import Any, Protocol
+from typing import Any
 from uuid import uuid4
 from urllib.parse import urlparse
 from urllib.request import urlopen
 
 from infer_nexus.backends.base import InferenceBackend
+from infer_nexus.backends.vllm_native import (
+    DynamicVLLMOpenAIChatServingAdapter,
+    OpenAIChatServingAdapter,
+    OpenAIEmbeddingServingAdapter,
+    OpenAIServingEngineClientCompatProxy,
+    ResolvedOpenAIServingImports,
+)
 from infer_nexus.catalog.models import ModelConfig
+from infer_nexus.core.enums import CompatibilityMode
 from infer_nexus.core.errors import BackendConfigurationError, BackendRequestValidationError
 from infer_nexus.core.schemas import ChatCompletionsRequest, EmbeddingRequest, RerankRequest
 
 
 logger = logging.getLogger(__name__)
-
-
-class OpenAIChatServingAdapter(Protocol):
-    """Backend-local contract for vLLM OpenAI serving passthrough."""
-
-    async def chat_completion(self, request_payload: dict[str, Any]) -> dict[str, Any]:
-        """Return a full OpenAI-compatible chat completion payload."""
-
-    async def chat_completion_stream(
-        self,
-        request_payload: dict[str, Any],
-    ) -> AsyncIterator[dict[str, Any] | bytes | str]:
-        """Yield OpenAI-compatible chat completion chunks."""
-
-
-@dataclass(frozen=True)
-class ResolvedOpenAIServingImports:
-    """Resolved vLLM serving imports for one supported internal layout."""
-
-    chat_request_cls: type[Any]
-    serving_chat_cls: type[Any]
-    serving_models_cls: type[Any]
-    base_model_path_cls: type[Any]
-    serving_render_cls: type[Any] | None = None
-
-
-class DynamicVLLMOpenAIChatServingAdapter:
-    """Wrap native vLLM serving objects behind the local adapter contract."""
-
-    def __init__(
-        self,
-        *,
-        chat_request_cls: type[Any],
-        serving_chat: Any,
-    ) -> None:
-        self.chat_request_cls = chat_request_cls
-        self.serving_chat = serving_chat
-
-    def _build_request(self, request_payload: dict[str, Any]) -> Any:
-        if hasattr(self.chat_request_cls, "model_validate"):
-            return self.chat_request_cls.model_validate(request_payload)
-        return self.chat_request_cls(**request_payload)
-
-    def _normalize_payload(self, payload: Any) -> dict[str, Any] | bytes | str:
-        if isinstance(payload, dict | bytes | str):
-            return payload
-        if hasattr(payload, "model_dump"):
-            return payload.model_dump(mode="json", exclude_none=True)
-        return payload
-
-    async def chat_completion(self, request_payload: dict[str, Any]) -> dict[str, Any]:
-        request = self._build_request(request_payload)
-        result = self.serving_chat.create_chat_completion(request, raw_request=None)
-        if inspect.isawaitable(result):
-            result = await result
-        if hasattr(result, "__aiter__"):
-            raise RuntimeError(
-                "vLLM OpenAI serving returned a stream for a non-streaming chat request."
-            )
-        normalized = self._normalize_payload(result)
-        if not isinstance(normalized, dict):
-            raise RuntimeError(
-                "vLLM OpenAI serving returned an unexpected non-streaming chat payload type."
-            )
-        return normalized
-
-    async def chat_completion_stream(
-        self,
-        request_payload: dict[str, Any],
-    ) -> AsyncIterator[dict[str, Any] | bytes | str]:
-        request = self._build_request(request_payload)
-        result = self.serving_chat.create_chat_completion(request, raw_request=None)
-        if inspect.isawaitable(result):
-            result = await result
-
-        if hasattr(result, "__aiter__"):
-            async for chunk in result:
-                yield self._normalize_payload(chunk)
-            return
-
-        yield self._normalize_payload(result)
-
-
-class OpenAIServingEngineClientCompatProxy:
-    """Compatibility proxy that augments engine clients with required serving attributes."""
-
-    def __init__(self, primary_client: Any, fallback_clients: list[Any]) -> None:
-        self._client = primary_client
-        self._fallback_clients = [candidate for candidate in fallback_clients if candidate is not None]
-
-    @property
-    def errored(self) -> bool:
-        for candidate in [self._client, *self._fallback_clients]:
-            if hasattr(candidate, "errored"):
-                return bool(getattr(candidate, "errored"))
-        return False
-
-    def generate(self, *args: Any, **kwargs: Any) -> Any:
-        def _wrap_iterable(iterable: Iterable[Any]) -> AsyncIterator[Any]:
-            async def iterator() -> AsyncIterator[Any]:
-                for item in iterable:
-                    yield item
-
-            return iterator()
-
-        def _wrap_awaitable(awaitable: Any) -> AsyncIterator[Any]:
-            async def iterator() -> AsyncIterator[Any]:
-                resolved = await awaitable
-                if hasattr(resolved, "__aiter__"):
-                    async for item in resolved:
-                        yield item
-                    return
-                if isinstance(resolved, Iterable) and not isinstance(resolved, (bytes, str, dict)):
-                    for item in resolved:
-                        yield item
-                    return
-                yield resolved
-
-            return iterator()
-
-        for candidate in [self._client, *self._fallback_clients]:
-            method = getattr(candidate, "generate", None)
-            if callable(method):
-                call_args = args
-                call_kwargs = kwargs
-                try:
-                    signature = inspect.signature(method)
-                except (TypeError, ValueError):
-                    signature = None
-
-                if signature is not None:
-                    parameters = signature.parameters
-                    accepts_var_args = any(
-                        parameter.kind == inspect.Parameter.VAR_POSITIONAL
-                        for parameter in parameters.values()
-                    )
-                    if not accepts_var_args:
-                        positional_limit = sum(
-                            1
-                            for parameter in parameters.values()
-                            if parameter.kind
-                            in (
-                                inspect.Parameter.POSITIONAL_ONLY,
-                                inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                            )
-                        )
-                        call_args = args[:positional_limit]
-
-                    accepts_var_kwargs = any(
-                        parameter.kind == inspect.Parameter.VAR_KEYWORD
-                        for parameter in parameters.values()
-                    )
-                    if not accepts_var_kwargs:
-                        allowed_names = {
-                            name
-                            for name, parameter in parameters.items()
-                            if parameter.kind
-                            in (
-                                inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                                inspect.Parameter.KEYWORD_ONLY,
-                            )
-                        }
-                        call_kwargs = {
-                            key: value
-                            for key, value in kwargs.items()
-                            if key in allowed_names
-                        }
-
-                result = method(*call_args, **call_kwargs)
-                if hasattr(result, "__aiter__"):
-                    return result
-                if inspect.isawaitable(result):
-                    return _wrap_awaitable(result)
-                if isinstance(result, Iterable) and not isinstance(result, (bytes, str, dict)):
-                    return _wrap_iterable(result)
-                return result
-        raise AttributeError("No compatible 'generate' method found on engine client candidates.")
-
-    def __getattr__(self, name: str) -> Any:
-        if hasattr(self._client, name):
-            return getattr(self._client, name)
-        for candidate in self._fallback_clients:
-            if hasattr(candidate, name):
-                return getattr(candidate, name)
-        raise AttributeError(name)
 
 
 class VLLMBackend(InferenceBackend):
@@ -265,7 +87,9 @@ class VLLMBackend(InferenceBackend):
         self.runtime_spec = runtime_spec
         self.engine: Any | None = None
         self.openai_serving_chat_adapter: OpenAIChatServingAdapter | None = None
+        self.openai_serving_embedding_adapter: OpenAIEmbeddingServingAdapter | None = None
         self.openai_serving_adapter_init_error: str | None = None
+        self.openai_serving_embedding_adapter_init_error: str | None = None
         self.async_engine_init_error: str | None = None
         self.engine_kind: str = "created"
         self.engine_state: str = "created"
@@ -288,6 +112,16 @@ class VLLMBackend(InferenceBackend):
                 f"Runtime spec backend mismatch for model '{runtime_context.get('model_name')}'. "
                 f"Expected 'vllm', got '{runtime_spec.get('backend')}'."
             )
+
+        if self._requires_openai_serving_adapter(runtime_spec):
+            openai_serving = runtime_spec.get("openai_serving") or {}
+            if runtime_spec.get("task_mode") == "generate" and not openai_serving.get("enabled"):
+                raise BackendConfigurationError(
+                    f"vllm_native local vLLM chat model '{runtime_context.get('model_name')}' "
+                    "requires openai_serving.enabled=true."
+                )
+        if self._is_vllm_native(runtime_spec) and runtime_spec.get("task_mode") == "score":
+            raise BackendConfigurationError("vllm_native is not supported for vLLM rerank models.")
 
     def _filter_kwargs_for_callable(self, callable_obj: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -333,7 +167,9 @@ class VLLMBackend(InferenceBackend):
         if init_mode != "real":
             self.engine = None
             self.openai_serving_chat_adapter = None
+            self.openai_serving_embedding_adapter = None
             self.openai_serving_adapter_init_error = None
+            self.openai_serving_embedding_adapter_init_error = None
             self.async_engine_init_error = None
             self.engine_kind = "stub"
             self.engine_state = "stub"
@@ -374,12 +210,16 @@ class VLLMBackend(InferenceBackend):
                 self.openai_serving_chat_adapter = self._initialize_openai_serving_chat_adapter()
                 if self.openai_serving_chat_adapter is not None:
                     logger.info("Initialized vLLM OpenAI serving adapter for async engine.")
+                elif self._requires_openai_serving_adapter():
+                    self._raise_openai_serving_unavailable()
                 elif self._should_use_openai_serving_adapter():
                     logger.warning(
                         "vLLM OpenAI serving adapter is disabled for async engine: %s",
                         self.openai_serving_adapter_init_error,
                     )
                 return
+            except BackendConfigurationError:
+                raise
             except Exception as exc:
                 self.async_engine_init_error = str(exc)
 
@@ -429,12 +269,23 @@ class VLLMBackend(InferenceBackend):
                 f"Supported tasks: {sorted(supported_tasks)}."
             )
         self.openai_serving_chat_adapter = self._initialize_openai_serving_chat_adapter()
+        if self.openai_serving_chat_adapter is None and self._requires_openai_serving_adapter():
+            self._raise_openai_serving_unavailable()
+        if self.openai_serving_chat_adapter is not None:
+            logger.info("Initialized vLLM OpenAI serving adapter for sync engine.")
+        elif self._should_use_openai_serving_adapter():
+            logger.warning(
+                "vLLM OpenAI serving adapter is disabled for sync engine: %s",
+                self.openai_serving_adapter_init_error,
+            )
         self.engine_state = "ready"
 
     def shutdown(self) -> None:
         self.engine = None
         self.openai_serving_chat_adapter = None
+        self.openai_serving_embedding_adapter = None
         self.openai_serving_adapter_init_error = None
+        self.openai_serving_embedding_adapter_init_error = None
         self.async_engine_init_error = None
         self.engine_kind = "stopped"
         self.engine_state = "stopped"
@@ -468,6 +319,7 @@ class VLLMBackend(InferenceBackend):
             "request_defaults": dict(model.vllm.request_defaults),
             "request_policy": model.vllm.request_policy.model_dump(mode="json"),
             "openai_serving": openai_serving_config,
+            "compat_mode": model.compat_mode.value,
             "model_loading_config": model.model_loading_config.model_dump(mode="json"),
             "served_model_name": model.served_model_name or model.alias or model.name,
         }
@@ -479,6 +331,44 @@ class VLLMBackend(InferenceBackend):
     def _request_policy(self, runtime_spec: dict[str, Any] | None = None) -> dict[str, Any]:
         spec = runtime_spec or self.runtime_spec
         return dict(spec.get("request_policy") or {})
+
+    def _compat_mode(self, runtime_spec: dict[str, Any] | None = None) -> str:
+        spec = runtime_spec or self.runtime_spec
+        return str(spec.get("compat_mode") or CompatibilityMode.LOCAL_BEST_EFFORT.value)
+
+    def _is_strict_openai(self, runtime_spec: dict[str, Any] | None = None) -> bool:
+        return self._compat_mode(runtime_spec) == CompatibilityMode.STRICT_OPENAI.value
+
+    def _is_vllm_native(self, runtime_spec: dict[str, Any] | None = None) -> bool:
+        return self._compat_mode(runtime_spec) in {
+            CompatibilityMode.VLLM_NATIVE.value,
+            CompatibilityMode.STRICT_OPENAI.value,
+        }
+
+    def _requires_openai_serving_adapter(
+        self,
+        runtime_spec: dict[str, Any] | None = None,
+    ) -> bool:
+        spec = runtime_spec or self.runtime_spec
+        return self._is_vllm_native(spec) and spec.get("task_mode") == "generate"
+
+    def _raise_openai_serving_unavailable(self, reason: str | None = None) -> None:
+        detail = reason or self.openai_serving_adapter_init_error or "adapter is not initialized"
+        raise BackendConfigurationError(
+            "vllm_native vLLM chat requires the replica-local vLLM OpenAI serving adapter, "
+            f"but it is unavailable: {detail}"
+        )
+
+    def _raise_openai_embedding_serving_unavailable(self, reason: str | None = None) -> None:
+        detail = (
+            reason
+            or self.openai_serving_embedding_adapter_init_error
+            or "adapter is not initialized"
+        )
+        raise BackendConfigurationError(
+            "vllm_native vLLM embedding requires the replica-local vLLM OpenAI embeddings "
+            f"serving adapter, but it is unavailable: {detail}"
+        )
 
     def _normalize_embedding_inputs(self, request: EmbeddingRequest) -> list[str]:
         inputs = request.input if isinstance(request.input, list) else [request.input]
@@ -1860,7 +1750,14 @@ class VLLMBackend(InferenceBackend):
             )
         except Exception as exc:
             self.openai_serving_adapter_init_error = str(exc)
-            logger.warning("Failed to initialize vLLM OpenAI serving adapter: %s", exc)
+            logger.warning(
+                "Failed to initialize vLLM OpenAI serving adapter for model_path='%s' "
+                "served_model_name='%s' engine_kind='%s': %s",
+                self.runtime_spec.get("model_path"),
+                self.runtime_spec.get("served_model_name"),
+                self.engine_kind,
+                exc,
+            )
             return None
 
         self.openai_serving_adapter_init_error = None
@@ -1881,27 +1778,33 @@ class VLLMBackend(InferenceBackend):
             exclude_none=True,
             exclude={"extra_body", "messages"},
         )
-
-        serialized_messages: list[dict[str, Any]] = []
-        allow_multimodal = self._supports_multimodal(runtime_context)
+        payload["messages"] = []
         for message in request.messages:
-            serialized = message.model_dump(mode="json", exclude_none=True)
+            serialized_message = message.model_dump(mode="json", exclude_none=True)
             if message.content is None:
-                serialized["content"] = None
-            else:
-                serialized["content"] = self._serialize_message_content(
-                    message.content,
-                    allow_multimodal=allow_multimodal,
-                )
-            serialized_messages.append(serialized)
-
-        payload["messages"] = serialized_messages
+                serialized_message["content"] = None
+            payload["messages"].append(serialized_message)
+        payload.update(request.extra_body or {})
         payload["model"] = (
             runtime_context.get("served_model_name")
             or runtime_spec.get("served_model_name")
             or request.model
         )
-        payload.update(request.extra_body or {})
+        return payload
+
+    def _build_openai_serving_embedding_request_payload(
+        self,
+        request: EmbeddingRequest,
+        *,
+        runtime_spec: dict[str, Any],
+        runtime_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        payload = request.model_dump(mode="json", exclude_none=True)
+        payload["model"] = (
+            runtime_context.get("served_model_name")
+            or runtime_spec.get("served_model_name")
+            or request.model
+        )
         return payload
 
     async def _call_openai_serving_chat_completion(
@@ -1940,6 +1843,19 @@ class VLLMBackend(InferenceBackend):
 
         for chunk in stream:
             yield chunk
+
+    async def _call_openai_serving_embedding(
+        self,
+        request_payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        adapter = self.openai_serving_embedding_adapter
+        if adapter is None:
+            raise RuntimeError("vLLM OpenAI embeddings serving adapter is not initialized")
+
+        result = adapter.embedding(request_payload)
+        if inspect.isawaitable(result):
+            result = await result
+        return result
 
     def _build_chat_stub_response(
         self,
@@ -2078,6 +1994,7 @@ class VLLMBackend(InferenceBackend):
         request: ChatCompletionsRequest,
         runtime_context: dict[str, Any],
     ) -> dict[str, Any]:
+        vllm_native = self._is_vllm_native(runtime_spec)
         if self.openai_serving_chat_adapter is not None:
             request_payload = self._build_openai_serving_request_payload(
                 request,
@@ -2087,10 +2004,19 @@ class VLLMBackend(InferenceBackend):
             try:
                 return await self._call_openai_serving_chat_completion(request_payload)
             except Exception as exc:
+                if vllm_native:
+                    logger.exception(
+                        "Native vLLM OpenAI serving chat invocation failed for model '%s' "
+                        "served_model_name '%s'.",
+                        runtime_context.get("model_name"),
+                        runtime_context.get("served_model_name") or runtime_spec.get("served_model_name"),
+                    )
+                    raise
                 self.openai_serving_adapter_init_error = str(exc)
                 self.openai_serving_chat_adapter = None
+        elif vllm_native:
+            self._raise_openai_serving_unavailable()
 
-        messages = self._build_chat_messages(request, runtime_context=runtime_context)
         sampling_params = self._build_sampling_params(request, runtime_spec=runtime_spec)
         chat_kwargs = self._build_chat_kwargs(request, runtime_spec=runtime_spec)
         if self.engine is None:
@@ -2124,6 +2050,7 @@ class VLLMBackend(InferenceBackend):
         request: ChatCompletionsRequest,
         runtime_context: dict[str, Any],
     ) -> AsyncIterator[dict[str, Any] | bytes | str]:
+        vllm_native = self._is_vllm_native(runtime_spec)
         if self.openai_serving_chat_adapter is not None:
             request_payload = self._build_openai_serving_request_payload(
                 request,
@@ -2135,8 +2062,18 @@ class VLLMBackend(InferenceBackend):
                     yield chunk
                 return
             except Exception as exc:
+                if vllm_native:
+                    logger.exception(
+                        "Native vLLM OpenAI serving stream invocation failed for model '%s' "
+                        "served_model_name '%s'.",
+                        runtime_context.get("model_name"),
+                        runtime_context.get("served_model_name") or runtime_spec.get("served_model_name"),
+                    )
+                    raise
                 self.openai_serving_adapter_init_error = str(exc)
                 self.openai_serving_chat_adapter = None
+        elif vllm_native:
+            self._raise_openai_serving_unavailable()
 
         sampling_params = self._build_sampling_params(request, runtime_spec=runtime_spec)
         chat_kwargs = self._build_chat_kwargs(request, runtime_spec=runtime_spec)
@@ -2181,6 +2118,16 @@ class VLLMBackend(InferenceBackend):
         request: EmbeddingRequest,
         runtime_context: dict[str, Any],
     ) -> dict[str, Any]:
+        if self._is_vllm_native(runtime_spec):
+            if self.openai_serving_embedding_adapter is None:
+                self._raise_openai_embedding_serving_unavailable()
+            request_payload = self._build_openai_serving_embedding_request_payload(
+                request,
+                runtime_spec=runtime_spec,
+                runtime_context=runtime_context,
+            )
+            return await self._call_openai_serving_embedding(request_payload)
+
         inputs = self._normalize_embedding_inputs(request)
         if self.engine is None:
             return self._build_embedding_stub_response(
@@ -2204,6 +2151,9 @@ class VLLMBackend(InferenceBackend):
         request: RerankRequest,
         runtime_context: dict[str, Any],
     ) -> dict[str, Any]:
+        if self._is_vllm_native(runtime_spec):
+            raise BackendConfigurationError("vllm_native is not supported for VLLM rerank.")
+
         documents = self._normalize_rerank_documents(request)
         if self.engine is None:
             return self._build_rerank_stub_response(

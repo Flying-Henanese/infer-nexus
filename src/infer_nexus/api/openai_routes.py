@@ -85,6 +85,7 @@ async def list_models(registry: ModelRegistry = Depends(get_registry)) -> ModelL
                 id=model.served_model_name or model.alias or model.name,
                 task=model.task,
                 backend=model.backend,
+                compat_mode=model.compat_mode,
                 status=model.status,
                 alias=model.alias,
             )

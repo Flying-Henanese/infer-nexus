@@ -89,6 +89,9 @@ models:
     gpu_memory_utilization: 0.3
     min_replicas: 1
     max_replicas: 1
+    vllm:
+      openai_serving:
+        enabled: true
     labels:
       - internal
       - embedding
@@ -125,15 +128,23 @@ models:
     gpu_memory_utilization: 0.7
     min_replicas: 1
     max_replicas: 1
+    compat_mode: strict_openai
     capabilities:
       - vision
     engine_kwargs:
       trust_remote_code: true
+      tool_call_parser: qwen3_coder
+      enable_auto_tool_choice: true
       limit_mm_per_prompt:
         image: 10
     vllm:
       request_policy:
+        allow_tools: true
         allow_reasoning: true
+      openai_serving:
+        enabled: true
+        enable_reasoning: true
+        reasoning_parser: qwen3
     labels:
       - internal
       - llm

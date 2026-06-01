@@ -17,8 +17,8 @@ import httpx
 from starlette.responses import JSONResponse, Response, StreamingResponse
 
 from infer_nexus.catalog.models import ProxyConfig
-from infer_nexus.core.enums import BackendType
-from infer_nexus.core.errors import RuntimeExecutionError, RuntimeNotConnectedError
+from infer_nexus.core.enums import BackendType, CompatibilityMode
+from infer_nexus.core.errors import BackendConfigurationError, RuntimeExecutionError, RuntimeNotConnectedError
 from infer_nexus.core.schemas import (
     ChatCompletionChoice,
     ChatCompletionsRequest,
@@ -154,9 +154,12 @@ class RuntimeExecutor:
     ) -> dict[str, Any]:
         """在本地进程内调用副本方法（stub/dev 路径）。"""
         # Local path is used for stub/dev mode without requiring Ray Serve connectivity.
-        replica = ModelRuntimeReplica(target.runtime_context)
-        method = getattr(replica, method_name)
-        return await method(payload)
+        try:
+            replica = ModelRuntimeReplica(target.runtime_context)
+            method = getattr(replica, method_name)
+            return await method(payload)
+        except BackendConfigurationError as exc:
+            raise RuntimeExecutionError(str(exc), code="backend_misconfigured") from exc
 
     async def _invoke_local_replica_stream(
         self,
@@ -166,9 +169,12 @@ class RuntimeExecutor:
         payload: dict[str, Any],
     ) -> AsyncIterator[dict[str, Any] | bytes | str]:
         """在本地进程内调用副本 streaming 方法（stub/dev 路径）。"""
-        replica = ModelRuntimeReplica(target.runtime_context)
-        method = getattr(replica, method_name)
-        return self._normalize_stream_result(method(payload))
+        try:
+            replica = ModelRuntimeReplica(target.runtime_context)
+            method = getattr(replica, method_name)
+            return self._normalize_stream_result(method(payload))
+        except BackendConfigurationError as exc:
+            raise RuntimeExecutionError(str(exc), code="backend_misconfigured") from exc
 
     async def _invoke_handle(
         self,
@@ -541,6 +547,7 @@ class RuntimeExecutor:
 
         message = str(exc)
         validation_signatures = (
+            "BackendConfigurationError",
             "BackendRequestValidationError",
             "RuntimeExecutionError: This model does not allow",
             "RuntimeExecutionError: Streaming chat completions are not supported",
@@ -548,6 +555,8 @@ class RuntimeExecutor:
             "RuntimeExecutionError: Multimodal chat content must include",
         )
         if any(signature in message for signature in validation_signatures):
+            if "BackendConfigurationError" in message:
+                return "backend_misconfigured"
             if "multimodal chat content" in message:
                 return "unsupported_message_content"
             if "must include at least one content block" in message:
@@ -566,6 +575,7 @@ class RuntimeExecutor:
         prefixes = (
             "RuntimeExecutionError: ",
             "BackendRequestValidationError: ",
+            "BackendConfigurationError: ",
             "RuntimeNotConnectedError: ",
         )
         for text in candidates:
@@ -686,6 +696,13 @@ class RuntimeExecutor:
         chunks: dict[str, Any] | AsyncIterator[dict[str, Any] | bytes | str],
     ) -> StreamingResponse:
         if not isinstance(chunks, dict):
+            runtime_spec = target.runtime_context.get("runtime_spec") or {}
+            compat_mode = target.runtime_context.get("compat_mode") or runtime_spec.get("compat_mode")
+            if str(compat_mode) in {
+                CompatibilityMode.VLLM_NATIVE.value,
+                CompatibilityMode.STRICT_OPENAI.value,
+            }:
+                return self._build_passthrough_stream_response(chunks)
             return self._build_mapped_chat_stream_response(request, target, chunks)
 
         payload = chunks

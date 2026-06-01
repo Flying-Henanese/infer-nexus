@@ -4,7 +4,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, model_validator
 
-from infer_nexus.core.enums import BackendType, ModelStatus, TaskType
+from infer_nexus.core.enums import BackendType, CompatibilityMode, ModelStatus, TaskType
 
 
 class ModelLoadingConfig(BaseModel):
@@ -104,6 +104,7 @@ class ModelConfig(BaseModel):
     alias: str | None = None
     task: TaskType
     backend: BackendType = BackendType.VLLM
+    compat_mode: CompatibilityMode = CompatibilityMode.LOCAL_BEST_EFFORT
     model_path: str | None = None
     model_loading_config: ModelLoadingConfig = Field(default_factory=ModelLoadingConfig)
     dtype: str | None = None
@@ -139,6 +140,19 @@ class ModelConfig(BaseModel):
             if self.proxy_config is None:
                 raise ValueError("proxy_config is required for vllm_openai_proxy backend")
             return self
+
+        if self.compat_mode in {
+            CompatibilityMode.VLLM_NATIVE,
+            CompatibilityMode.STRICT_OPENAI,
+        } and self.backend == BackendType.VLLM:
+            if self.task == TaskType.RERANK:
+                raise ValueError("vllm_native is not supported for local vllm rerank models")
+            if self.compat_mode == CompatibilityMode.STRICT_OPENAI and self.task != TaskType.CHAT:
+                raise ValueError("strict_openai is only supported as an alias for local vllm chat models")
+            if self.task == TaskType.CHAT and not self.vllm.openai_serving.enabled:
+                raise ValueError(
+                    "vllm_native local vllm chat models require vllm.openai_serving.enabled=true"
+                )
 
         if not self.model_path and not self.model_loading_config.model_id:
             raise ValueError("either model_path or model_loading_config.model_id must be set")

@@ -82,6 +82,7 @@ class ServeApplicationBuilder:
             "app_name": self.build_application_name(model.name),
             "served_model_name": model.served_model_name or model.alias or model.name,
             "task": model.task,
+            "compat_mode": model.compat_mode.value,
             "capabilities": list(model.capabilities),
             "deployment_name": self.deployment_factory.build_deployment_name(model),
             "resolved_model_path": str(model_reference),
@@ -115,4 +116,3 @@ class ServeApplicationBuilder:
             bindings[spec.model_name] = deployment.bind(runtime_context)
 
         return bindings
-

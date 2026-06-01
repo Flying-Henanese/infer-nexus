@@ -6,10 +6,10 @@ models:
     model_path: /nas_data/zhousj/qwen-vl
     dtype: bfloat16
     tensor_parallel_size: 1
-    max_model_len: 4096
+    max_model_len: 10000
     cpu_per_replica: 4
-    gpu_per_replica: 0.4
-    gpu_memory_utilization: 0.35
+    gpu_per_replica: 0.5
+    gpu_memory_utilization: 0.5
     min_replicas: 1
     max_replicas: 1
     capabilities:
@@ -35,10 +35,16 @@ models:
     min_replicas: 1
     max_replicas: 1
     vllm:
+      engine_kwargs:
+        enable_auto_tool_choice: true
+        tool_call_parser: hermes
       request_defaults:
+        tool_choice: auto
+        parallel_tool_calls: true
         chat_template_kwargs:
           enable_thinking: false
       request_policy:
+        allow_tools: true
         allow_reasoning: true
       openai_serving:
         enabled: true
@@ -105,3 +111,30 @@ models:
     labels:
       - internal
       - rerank
+
+  - name: Qwen3.5-9B
+    alias: qwen3.5-9b
+    task: chat
+    backend: vllm
+    model_path: /nas_data/models/Qwen/Qwen3.5-9B
+    dtype: auto
+    tensor_parallel_size: 1
+    max_model_len: 8192
+    cpu_per_replica: 4
+    gpu_per_replica: 0.7
+    gpu_memory_utilization: 0.7
+    min_replicas: 1
+    max_replicas: 1
+    capabilities:
+      - vision
+    engine_kwargs:
+      trust_remote_code: true
+      limit_mm_per_prompt:
+        image: 10
+    vllm:
+      request_policy:
+        allow_reasoning: true
+    labels:
+      - internal
+      - llm
+      - multimodal

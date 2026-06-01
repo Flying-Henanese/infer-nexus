@@ -12,7 +12,7 @@ from infer_nexus.catalog.registry import ModelRegistry
 from infer_nexus.backends.vllm import DynamicVLLMOpenAIChatServingAdapter
 from infer_nexus.backends.vllm import OpenAIServingEngineClientCompatProxy
 from infer_nexus.core.errors import BackendConfigurationError, BackendRequestValidationError
-from infer_nexus.core.enums import TaskType
+from infer_nexus.core.enums import CompatibilityMode, TaskType
 from infer_nexus.core.schemas import ChatCompletionsRequest, EmbeddingRequest, RerankRequest
 from infer_nexus.backends.vllm import VLLMBackend
 from infer_nexus.model_store import LocalModelStore
@@ -82,6 +82,18 @@ class FakeOpenAIChatServingAdapter:
         self.requests.append(request_payload)
         for chunk in self.stream_chunks:
             yield chunk
+
+
+class FakeOpenAIEmbeddingServingAdapter:
+    """模拟 vLLM OpenAI embeddings serving adapter。"""
+
+    def __init__(self, *, response: dict | None = None) -> None:
+        self.response = response or {}
+        self.requests: list[dict] = []
+
+    async def embedding(self, request_payload: dict[str, object]) -> dict:
+        self.requests.append(request_payload)
+        return self.response
 
 
 class FakeServingRequest:
@@ -1074,6 +1086,23 @@ def test_vllm_backend_rejects_runtime_spec_task_mode_mismatch() -> None:
         backend.validate_runtime_spec(runtime_spec, runtime_context)
 
 
+def test_vllm_backend_rejects_vllm_native_rerank_runtime_spec() -> None:
+    """vllm_native 初始阶段不支持 rerank。"""
+    backend = VLLMBackend({})
+    runtime_context = {
+        'model_name': 'bge-rerank',
+        'task': TaskType.RERANK,
+    }
+    runtime_spec = {
+        'backend': 'vllm',
+        'task_mode': 'score',
+        'compat_mode': CompatibilityMode.VLLM_NATIVE.value,
+    }
+
+    with pytest.raises(BackendConfigurationError, match='rerank'):
+        backend.validate_runtime_spec(runtime_spec, runtime_context)
+
+
 def test_vllm_backend_chat_completion_passthroughs_openai_serving_payload() -> None:
     """OpenAI serving adapter should receive a native OpenAI-style request payload."""
     runtime_spec = {
@@ -1194,6 +1223,143 @@ def test_vllm_backend_chat_completion_stream_passthroughs_openai_serving_chunks(
             'stream_options': {'include_usage': True},
         }
     ]
+
+
+def test_vllm_native_chat_missing_adapter_fails_without_local_fallback() -> None:
+    """vllm_native chat 缺少 native adapter 时不应退回本地协议重建。"""
+    runtime_spec = {
+        'backend': 'vllm',
+        'task_mode': 'generate',
+        'compat_mode': CompatibilityMode.VLLM_NATIVE.value,
+        'request_defaults': {},
+        'request_policy': {},
+        'openai_serving': {'enabled': True},
+        'served_model_name': 'qwen3-chat',
+        'capabilities': [],
+    }
+    runtime_context = {
+        'deployment_name': 'model-qwen3',
+        'served_model_name': 'qwen3-chat',
+    }
+    backend = VLLMBackend(runtime_spec)
+    backend.engine = None
+
+    with pytest.raises(BackendConfigurationError, match='vllm_native'):
+        asyncio.run(
+            backend.chat_completion(
+                runtime_spec,
+                ChatCompletionsRequest(
+                    model='qwen3-chat',
+                    messages=[{'role': 'user', 'content': 'hello'}],
+                ),
+                runtime_context,
+            )
+        )
+
+
+def test_vllm_native_chat_invocation_failure_does_not_fallback() -> None:
+    """vllm_native chat 调用 native adapter 失败时应直接暴露错误。"""
+    class FailingAdapter:
+        async def chat_completion(self, request_payload):
+            raise RuntimeError('native failed')
+
+    runtime_spec = {
+        'backend': 'vllm',
+        'task_mode': 'generate',
+        'compat_mode': CompatibilityMode.VLLM_NATIVE.value,
+        'request_defaults': {},
+        'request_policy': {},
+        'openai_serving': {'enabled': True},
+        'served_model_name': 'qwen3-chat',
+        'capabilities': [],
+    }
+    runtime_context = {
+        'deployment_name': 'model-qwen3',
+        'served_model_name': 'qwen3-chat',
+    }
+    backend = VLLMBackend(runtime_spec)
+    backend.openai_serving_chat_adapter = FailingAdapter()
+
+    with pytest.raises(RuntimeError, match='native failed'):
+        asyncio.run(
+            backend.chat_completion(
+                runtime_spec,
+                ChatCompletionsRequest(
+                    model='qwen3-chat',
+                    messages=[{'role': 'user', 'content': 'hello'}],
+                ),
+                runtime_context,
+            )
+        )
+
+
+def test_vllm_native_embedding_passthroughs_openai_serving_payload() -> None:
+    """vllm_native embedding 应保留请求字段并只重写 model。"""
+    runtime_spec = {
+        'backend': 'vllm',
+        'task_mode': 'embed',
+        'compat_mode': CompatibilityMode.VLLM_NATIVE.value,
+        'served_model_name': 'qwen3-embedding',
+    }
+    runtime_context = {
+        'deployment_name': 'model-qwen3-embedding',
+        'served_model_name': 'qwen3-embedding',
+    }
+    expected_response = {
+        'object': 'list',
+        'model': 'qwen3-embedding',
+        'data': [{'object': 'embedding', 'index': 0, 'embedding': [0.1, 0.2]}],
+        'usage': {'prompt_tokens': 2, 'total_tokens': 2},
+    }
+    adapter = FakeOpenAIEmbeddingServingAdapter(response=expected_response)
+    backend = VLLMBackend(runtime_spec)
+    backend.openai_serving_embedding_adapter = adapter
+
+    response = asyncio.run(
+        backend.embedding(
+            runtime_spec,
+            EmbeddingRequest(
+                model='client-facing-name',
+                input=['hello', 'world'],
+                encoding_format='float',
+                dimensions=2,
+                user='u1',
+            ),
+            runtime_context,
+        )
+    )
+
+    assert response == expected_response
+    assert adapter.requests == [
+        {
+            'model': 'qwen3-embedding',
+            'input': ['hello', 'world'],
+            'encoding_format': 'float',
+            'dimensions': 2,
+            'user': 'u1',
+        }
+    ]
+
+
+def test_vllm_native_embedding_missing_adapter_fails_without_local_fallback() -> None:
+    """vllm_native embedding 缺少 native adapter 时不应返回本地 stub。"""
+    runtime_spec = {
+        'backend': 'vllm',
+        'task_mode': 'embed',
+        'compat_mode': CompatibilityMode.VLLM_NATIVE.value,
+        'served_model_name': 'qwen3-embedding',
+    }
+    runtime_context = {'deployment_name': 'model-qwen3-embedding'}
+    backend = VLLMBackend(runtime_spec)
+
+    with pytest.raises(BackendConfigurationError, match='embedding'):
+        asyncio.run(
+            backend.embedding(
+                runtime_spec,
+                EmbeddingRequest(model='qwen3-embedding', input='hello'),
+                runtime_context,
+            )
+        )
 
 
 def test_vllm_backend_chat_completion_stream_uses_native_vllm_deltas() -> None:

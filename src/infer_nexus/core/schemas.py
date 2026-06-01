@@ -4,7 +4,7 @@ from typing import Annotated, Any, Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from infer_nexus.core.enums import BackendType, ModelStatus, TaskType
+from infer_nexus.core.enums import BackendType, CompatibilityMode, ModelStatus, TaskType
 
 
 class HealthResponse(BaseModel):
@@ -22,6 +22,7 @@ class ModelSummary(BaseModel):
     owned_by: str = "infer-nexus"
     task: TaskType
     backend: BackendType
+    compat_mode: CompatibilityMode = CompatibilityMode.LOCAL_BEST_EFFORT
     status: ModelStatus
     alias: str | None = None
 
@@ -40,6 +41,7 @@ class CatalogModelResponse(BaseModel):
     alias: str | None = None
     task: TaskType
     backend: BackendType
+    compat_mode: CompatibilityMode = CompatibilityMode.LOCAL_BEST_EFFORT
     model_path: str | None = None
     model_loading_config: dict[str, Any] = Field(default_factory=dict)
     dtype: str | None = None
@@ -198,9 +200,12 @@ class EmbeddingInputItem(BaseModel):
 class EmbeddingRequest(BaseModel):
     """OpenAI-compatible embeddings request."""
 
+    model_config = ConfigDict(extra="allow")
+
     model: str
     input: str | list[str]
     encoding_format: Literal["float", "base64"] | None = "float"
+    dimensions: int | None = Field(default=None, ge=1)
     user: str | None = None
 
 

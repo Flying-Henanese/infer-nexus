@@ -8,7 +8,7 @@ from infer_nexus.backends.base import InferenceBackend
 from infer_nexus.backends.vllm import VLLMBackend
 from infer_nexus.core.schemas import ChatCompletionsRequest, EmbeddingRequest, RerankRequest
 from infer_nexus.catalog.models import ModelConfig
-from infer_nexus.core.errors import BackendRequestValidationError, RuntimeExecutionError
+from infer_nexus.core.errors import BackendConfigurationError, BackendRequestValidationError, RuntimeExecutionError
 
 
 @dataclass(slots=True)
@@ -61,6 +61,8 @@ class ModelRuntimeReplica:
             )
         except BackendRequestValidationError as exc:
             raise RuntimeExecutionError(str(exc), code=exc.code) from exc
+        except BackendConfigurationError as exc:
+            raise RuntimeExecutionError(str(exc), code="backend_misconfigured") from exc
         if self._is_openai_chat_response(response):
             return response
         return {"status": "ok", **response}
@@ -77,6 +79,8 @@ class ModelRuntimeReplica:
                 yield chunk
         except BackendRequestValidationError as exc:
             raise RuntimeExecutionError(str(exc), code=exc.code) from exc
+        except BackendConfigurationError as exc:
+            raise RuntimeExecutionError(str(exc), code="backend_misconfigured") from exc
 
     def _is_openai_chat_response(self, payload: dict[str, Any]) -> bool:
         """Detect full OpenAI chat responses that should pass through unchanged."""
@@ -93,6 +97,8 @@ class ModelRuntimeReplica:
             )
         except BackendRequestValidationError as exc:
             raise RuntimeExecutionError(str(exc), code=exc.code) from exc
+        except BackendConfigurationError as exc:
+            raise RuntimeExecutionError(str(exc), code="backend_misconfigured") from exc
         return {"status": "ok", **response}
 
     async def rerank(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -106,6 +112,8 @@ class ModelRuntimeReplica:
             )
         except BackendRequestValidationError as exc:
             raise RuntimeExecutionError(str(exc), code=exc.code) from exc
+        except BackendConfigurationError as exc:
+            raise RuntimeExecutionError(str(exc), code="backend_misconfigured") from exc
         return {"status": "ok", **response}
 
     async def __call__(self, request: Any) -> dict[str, Any]:

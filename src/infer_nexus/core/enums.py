@@ -27,3 +27,13 @@ class BackendType(StrEnum):
 
     VLLM = "vllm"
     VLLM_OPENAI_PROXY = "vllm_openai_proxy"
+
+
+class CompatibilityMode(StrEnum):
+    """OpenAI compatibility behavior expected from a model runtime."""
+
+    VLLM_NATIVE = "vllm_native"
+    # Backward-compatible alias for older catalogs. New configs should use
+    # vllm_native.
+    STRICT_OPENAI = "strict_openai"
+    LOCAL_BEST_EFFORT = "local_best_effort"

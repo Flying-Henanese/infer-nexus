@@ -44,6 +44,7 @@ class RuntimeDispatcher:
                 "task": model.task,
                 "deployment_name": deployment_name,
                 "backend": model.backend,
+                "compat_mode": model.compat_mode.value,
                 "proxy_config": model.proxy_config.model_dump(mode="json") if model.proxy_config else {},
             }
         else:

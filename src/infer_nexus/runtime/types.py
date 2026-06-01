@@ -13,5 +13,6 @@ class RuntimeTarget:
     model_name: str
     model_alias: str | None
     backend: BackendType
+    app_name: str | None
     deployment_name: str
     runtime_context: dict[str, Any]

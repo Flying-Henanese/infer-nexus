@@ -1,12 +1,14 @@
 """Ray Serve deployment building blocks and per-model deployment specs."""
 
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from infer_nexus.backends.base import InferenceBackend
 from infer_nexus.backends.vllm import VLLMBackend
 from infer_nexus.core.schemas import ChatCompletionsRequest, EmbeddingRequest, RerankRequest
 from infer_nexus.catalog.models import ModelConfig
+from infer_nexus.core.errors import BackendRequestValidationError, RuntimeExecutionError
 
 
 @dataclass(slots=True)
@@ -51,31 +53,59 @@ class ModelRuntimeReplica:
     async def chat_completion(self, payload: dict[str, Any]) -> dict[str, Any]:
         """处理 chat completion 负载。"""
         request = ChatCompletionsRequest.model_validate(payload)
-        response = await self.backend.chat_completion(
-            self.runtime_context["runtime_spec"],
-            request,
-            self.runtime_context,
-        )
+        try:
+            response = await self.backend.chat_completion(
+                self.runtime_context["runtime_spec"],
+                request,
+                self.runtime_context,
+            )
+        except BackendRequestValidationError as exc:
+            raise RuntimeExecutionError(str(exc), code=exc.code) from exc
+        if self._is_openai_chat_response(response):
+            return response
         return {"status": "ok", **response}
+
+    async def chat_completion_stream(self, payload: dict[str, Any]) -> AsyncIterator[dict[str, Any] | bytes | str]:
+        """处理 streaming chat completion 负载。"""
+        request = ChatCompletionsRequest.model_validate(payload)
+        try:
+            async for chunk in self.backend.chat_completion_stream(
+                self.runtime_context["runtime_spec"],
+                request,
+                self.runtime_context,
+            ):
+                yield chunk
+        except BackendRequestValidationError as exc:
+            raise RuntimeExecutionError(str(exc), code=exc.code) from exc
+
+    def _is_openai_chat_response(self, payload: dict[str, Any]) -> bool:
+        """Detect full OpenAI chat responses that should pass through unchanged."""
+        return payload.get("object") == "chat.completion" and isinstance(payload.get("choices"), list)
 
     async def embedding(self, payload: dict[str, Any]) -> dict[str, Any]:
         """处理 embedding 负载。"""
         request = EmbeddingRequest.model_validate(payload)
-        response = await self.backend.embedding(
-            self.runtime_context["runtime_spec"],
-            request,
-            self.runtime_context,
-        )
+        try:
+            response = await self.backend.embedding(
+                self.runtime_context["runtime_spec"],
+                request,
+                self.runtime_context,
+            )
+        except BackendRequestValidationError as exc:
+            raise RuntimeExecutionError(str(exc), code=exc.code) from exc
         return {"status": "ok", **response}
 
     async def rerank(self, payload: dict[str, Any]) -> dict[str, Any]:
         """处理 rerank 负载。"""
         request = RerankRequest.model_validate(payload)
-        response = await self.backend.rerank(
-            self.runtime_context["runtime_spec"],
-            request,
-            self.runtime_context,
-        )
+        try:
+            response = await self.backend.rerank(
+                self.runtime_context["runtime_spec"],
+                request,
+                self.runtime_context,
+            )
+        except BackendRequestValidationError as exc:
+            raise RuntimeExecutionError(str(exc), code=exc.code) from exc
         return {"status": "ok", **response}
 
     async def __call__(self, request: Any) -> dict[str, Any]:
@@ -118,9 +148,21 @@ class RuntimeApplicationRoot:
 class DeploymentFactory:
     """Translate model catalog entries into Ray Serve deployment parameters."""
 
+    def __init__(self, inference_device_type: Literal["cuda", "npu"] = "cuda") -> None:
+        """Initialize deployment resource mapping for the configured inference device."""
+        self.inference_device_type = inference_device_type
+
     def build_deployment_name(self, model: ModelConfig) -> str:
         """Build stable per-model deployment names for one-model-per-deployment topology."""
         return f"model-{model.name}"
+
+    def build_accelerator_actor_options(self, accelerator_per_replica: int | float) -> dict[str, Any]:
+        """Map logical per-replica accelerator demand to Ray actor options."""
+        if self.inference_device_type == "cuda":
+            return {"num_gpus": accelerator_per_replica}
+        if self.inference_device_type == "npu":
+            return {"resources": {"NPU": accelerator_per_replica}}
+        raise ValueError(f"unsupported inference_device_type '{self.inference_device_type}'")
 
     def build_spec(self, model: ModelConfig) -> DeploymentSpec:
         """从模型配置生成部署规格。"""
@@ -132,8 +174,8 @@ class DeploymentFactory:
         autoscaling_config.update(model.deployment_config.autoscaling_config)
         ray_actor_options = {
             "num_cpus": model.cpu_per_replica,
-            "num_gpus": model.gpu_per_replica,
         }
+        ray_actor_options.update(self.build_accelerator_actor_options(model.gpu_per_replica))
         ray_actor_options.update(model.deployment_config.ray_actor_options)
         return DeploymentSpec(
             model_name=model.name,

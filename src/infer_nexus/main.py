@@ -1,6 +1,6 @@
 """FastAPI 应用入口与生命周期装配。"""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -20,24 +20,25 @@ from infer_nexus.runtime.serve_app import ServeApplicationBuilder
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """在应用启动阶段装配运行期依赖，并在关闭时释放生命周期上下文。"""
-    # 1) 加载配置并初始化日志。
+    # 1) 加载基础配置并初始化日志。
     settings = load_settings()
     configure_logging(settings.service.log_level)
-    # 2) 构建模型注册表和本地模型仓库。
+    # 2) 通过读取./config/models.yaml配置文件构建模型注册表和本地模型仓库。
     registry = ModelRegistry(load_model_catalog(settings.catalog.models_path))
     model_store = LocalModelStore.from_settings(settings.model_store)
     # 3) 生成 Serve 构建器并提前校验所有模型的运行时配置，尽早暴露配置错误。
     serve_builder = ServeApplicationBuilder(
         model_store=model_store,
         backend_init_mode=settings.runtime.backend_init_mode,
+        service_name=settings.service.name,
     )
     serve_builder.validate_registry_runtime_configs(registry)
     handle_resolver = None
     # 4) 仅在 serve 模式下准备句柄解析器；stub 模式不依赖 Ray Serve。
     if settings.runtime.execution_mode == "serve":
-        handle_resolver = ServeDeploymentHandleResolver(app_name=settings.service.name)
+        handle_resolver = ServeDeploymentHandleResolver()
     runtime_executor = RuntimeExecutor(
         mode=settings.runtime.execution_mode,
         handle_resolver=handle_resolver,

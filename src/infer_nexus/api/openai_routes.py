@@ -1,5 +1,7 @@
 """OpenAI 兼容接口路由。"""
 
+import logging
+
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 from starlette.responses import Response
@@ -18,6 +20,7 @@ from infer_nexus.core.errors import (
     BackendRequestValidationError,
     ModelArtifactMissingError,
     ModelNotFoundError,
+    RuntimeExecutionError,
     RuntimeNotConnectedError,
 )
 from infer_nexus.core.schemas import (
@@ -37,6 +40,7 @@ from infer_nexus.runtime.dispatcher import RuntimeDispatcher
 
 router = APIRouter(prefix="/v1", tags=["openai"])
 compat_router = APIRouter(tags=["openai"])
+logger = logging.getLogger(__name__)
 
 
 def openai_error_response(
@@ -52,6 +56,24 @@ def openai_error_response(
         error=OpenAIErrorDetail(message=message, type=error_type, param=param, code=code)
     )
     return JSONResponse(status_code=status_code, content=payload.model_dump())
+
+
+def runtime_not_connected_status(code: str) -> tuple[int, str]:
+    """Map gateway-stage runtime errors to stable OpenAI-style response classes."""
+    if code == "upstream_timeout":
+        return 504, "service_unavailable_error"
+    if code == "backend_misconfigured":
+        return 500, "internal_server_error"
+    if code == "unsupported_parameter":
+        return 400, "invalid_request_error"
+    return 501, "not_implemented_error"
+
+
+def runtime_execution_status(code: str) -> tuple[int, str]:
+    """Map backend execution failures to API-facing status classes when they reflect request shape."""
+    if code in {"unsupported_parameter", "unsupported_message_content", "invalid_input"}:
+        return 400, "invalid_request_error"
+    return 500, "internal_server_error"
 
 
 @router.get("/models", response_model=ModelListResponse)
@@ -83,6 +105,7 @@ async def create_chat_completion(
     # 第一步：检查请求模型是否已注册。
     try:
         model = registry.get(request.model)
+    # 如果找不到模型，则向接口返回 OpenAI 兼容的 404 错误响应
     except ModelNotFoundError:
         return openai_error_response(
             404,
@@ -92,7 +115,8 @@ async def create_chat_completion(
             code="model_not_found",
         )
 
-    # 第二步：检查模型任务类型，防止把 embedding/rerank 模型误用于 chat 接口。
+    # 第二步：检查模型任务类型
+    # 防止把 embedding/rerank 模型误用于当前链路中的chat 接口。
     if model.task is not TaskType.CHAT:
         return openai_error_response(
             400,
@@ -104,6 +128,9 @@ async def create_chat_completion(
 
     # 第三步：检查模型文件是否存在，并通过准入控制后进入运行时执行。
     try:
+        # 对于非 VLLM_OPENAI_PROXY 后端的模型，才检查模型文件路径是否存在。
+        # 因为 VLLM_OPENAI_PROXY 后端的模型是通过代理转发到外部 OpenAI API 的，
+        # 不涉及本地模型文件，所以不需要检查模型路径。
         if model.backend != BackendType.VLLM_OPENAI_PROXY:
             model_store.require_model_path(model)
         admission.check_model_request(model)
@@ -123,10 +150,20 @@ async def create_chat_completion(
             code=exc.code,
         )
     except RuntimeNotConnectedError as exc:
+        status_code, error_type = runtime_not_connected_status(exc.code)
         return openai_error_response(
-            501,
+            status_code,
             str(exc),
-            error_type="not_implemented_error",
+            error_type=error_type,
+            code=exc.code,
+        )
+    except RuntimeExecutionError as exc:
+        logger.exception("Chat completion runtime execution failed for model '%s'.", request.model)
+        status_code, error_type = runtime_execution_status(exc.code)
+        return openai_error_response(
+            status_code,
+            str(exc),
+            error_type=error_type,
             code=exc.code,
         )
     except BackendRequestValidationError as exc:
@@ -147,8 +184,10 @@ async def create_embedding(
     dispatcher: RuntimeDispatcher = Depends(get_runtime_dispatcher),
 ) -> EmbeddingResponse | JSONResponse | Response:
     """处理向量化请求，执行模型校验、准入校验和运行时分发。"""
+    # 第一步：检查请求模型是否已注册。
     try:
         model = registry.get(request.model)
+    # 如果找不到模型，则向接口返回 OpenAI 兼容的 404 错误响应。
     except ModelNotFoundError:
         return openai_error_response(
             404,
@@ -158,6 +197,8 @@ async def create_embedding(
             code="model_not_found",
         )
 
+    # 第二步：检查模型任务类型。
+    # 防止把 chat/rerank 模型误用于当前链路中的 embedding 接口。
     if model.task is not TaskType.EMBEDDING:
         return openai_error_response(
             400,
@@ -167,7 +208,11 @@ async def create_embedding(
             code="unsupported_task_type",
         )
 
+    # 第三步：检查模型文件是否存在，并通过准入控制后进入运行时执行。
     try:
+        # 对于非 VLLM_OPENAI_PROXY 后端的模型，才检查模型文件路径是否存在。
+        # 因为 VLLM_OPENAI_PROXY 后端的模型是通过代理转发到外部 OpenAI API 的，
+        # 不涉及本地模型文件，所以不需要检查模型路径。
         if model.backend != BackendType.VLLM_OPENAI_PROXY:
             model_store.require_model_path(model)
         admission.check_model_request(model)
@@ -187,10 +232,20 @@ async def create_embedding(
             code=exc.code,
         )
     except RuntimeNotConnectedError as exc:
+        status_code, error_type = runtime_not_connected_status(exc.code)
         return openai_error_response(
-            501,
+            status_code,
             str(exc),
-            error_type="not_implemented_error",
+            error_type=error_type,
+            code=exc.code,
+        )
+    except RuntimeExecutionError as exc:
+        logger.exception("Embedding runtime execution failed for model '%s'.", request.model)
+        status_code, error_type = runtime_execution_status(exc.code)
+        return openai_error_response(
+            status_code,
+            str(exc),
+            error_type=error_type,
             code=exc.code,
         )
     except BackendRequestValidationError as exc:
@@ -210,8 +265,10 @@ async def _create_rerank_impl(
     dispatcher: RuntimeDispatcher,
 ) -> RerankResponse | JSONResponse | Response:
     """Rerank 共享实现，供 `/v1/rerank` 与兼容路径复用。"""
+    # 第一步：检查请求模型是否已注册。
     try:
         model = registry.get(request.model)
+    # 如果找不到模型，则向接口返回 OpenAI 兼容的 404 错误响应。
     except ModelNotFoundError:
         return openai_error_response(
             404,
@@ -221,6 +278,8 @@ async def _create_rerank_impl(
             code="model_not_found",
         )
 
+    # 第二步：检查模型任务类型。
+    # 防止把 chat/embedding 模型误用于当前链路中的 rerank 接口。
     if model.task is not TaskType.RERANK:
         return openai_error_response(
             400,
@@ -230,7 +289,11 @@ async def _create_rerank_impl(
             code="unsupported_task_type",
         )
 
+    # 第三步：检查模型文件是否存在，并通过准入控制后进入运行时执行。
     try:
+        # 对于非 VLLM_OPENAI_PROXY 后端的模型，才检查模型文件路径是否存在。
+        # 因为 VLLM_OPENAI_PROXY 后端的模型是通过代理转发到外部 OpenAI API 的，
+        # 不涉及本地模型文件，所以不需要检查模型路径。
         if model.backend != BackendType.VLLM_OPENAI_PROXY:
             model_store.require_model_path(model)
         admission.check_model_request(model)
@@ -250,10 +313,20 @@ async def _create_rerank_impl(
             code=exc.code,
         )
     except RuntimeNotConnectedError as exc:
+        status_code, error_type = runtime_not_connected_status(exc.code)
         return openai_error_response(
-            501,
+            status_code,
             str(exc),
-            error_type="not_implemented_error",
+            error_type=error_type,
+            code=exc.code,
+        )
+    except RuntimeExecutionError as exc:
+        logger.exception("Rerank runtime execution failed for model '%s'.", request.model)
+        status_code, error_type = runtime_execution_status(exc.code)
+        return openai_error_response(
+            status_code,
+            str(exc),
+            error_type=error_type,
             code=exc.code,
         )
     except BackendRequestValidationError as exc:

@@ -1,6 +1,7 @@
 """后端适配器抽象接口。"""
 
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from typing import Any
 
 from infer_nexus.catalog.models import ModelConfig
@@ -38,6 +39,16 @@ class InferenceBackend(ABC):
         runtime_context: dict[str, Any],
     ) -> dict[str, Any]:
         """执行 chat completion 请求。"""
+        raise NotImplementedError
+
+    @abstractmethod
+    def chat_completion_stream(
+        self,
+        runtime_spec: dict[str, Any],
+        request: ChatCompletionsRequest,
+        runtime_context: dict[str, Any],
+    ) -> AsyncIterator[dict[str, Any] | bytes | str]:
+        """执行 streaming chat completion 请求。"""
         raise NotImplementedError
 
     @abstractmethod

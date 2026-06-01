@@ -4,8 +4,9 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from infer_nexus.core.errors import AdmissionRejectedError
+from infer_nexus.core.errors import AdmissionRejectedError, RuntimeExecutionError, RuntimeNotConnectedError
 from infer_nexus.main import create_app
+from infer_nexus.runtime.executor import RuntimeExecutor
 
 
 def test_health_and_ready_endpoints(prepared_model_store: Path) -> None:
@@ -180,21 +181,28 @@ def test_chat_completions_rejects_embedding_model(prepared_model_store: Path) ->
     assert response.json()['error']['code'] == 'unsupported_task_type'
 
 
-def test_chat_completions_rejects_streaming_in_phase1(prepared_model_store: Path) -> None:
-    """阶段一 chat 接口应拒绝流式参数。"""
+def test_chat_completions_returns_sse_stream_for_chat_model(prepared_model_store: Path) -> None:
+    """chat 接口应支持 OpenAI-style SSE 流式响应。"""
     app = create_app()
 
     payload = {
-        'model': 'qwen3-chat',
+        'model': 'qwen3-8b',
         'messages': [{'role': 'user', 'content': 'hello'}],
         'stream': True,
     }
 
     with TestClient(app) as client:
-        response = client.post('/v1/chat/completions', json=payload)
+        client.app.state.model_store.require_model_path = lambda _model: None
+        with client.stream('POST', '/v1/chat/completions', json=payload) as response:
+            body = b''.join(response.iter_bytes())
+            headers = dict(response.headers)
+            status_code = response.status_code
 
-    assert response.status_code == 400
-    assert response.json()['error']['code'] == 'unsupported_parameter'
+    assert status_code == 200
+    assert headers['content-type'].startswith('text/event-stream')
+    assert b'chat.completion.chunk' in body
+    assert b'backend stub response from vllm' in body
+    assert b'data: [DONE]\n\n' in body
 
 
 def test_chat_completions_accepts_multimodal_message_content_for_vision_model(
@@ -292,6 +300,82 @@ def test_chat_completions_returns_501_when_serve_handle_is_unavailable(
 
     assert response.status_code == 501
     assert response.json()['error']['code'] == 'runtime_not_connected'
+
+
+def test_chat_completions_maps_proxy_upstream_timeout_to_504(
+    prepared_model_store: Path,
+) -> None:
+    """Gateway-stage upstream timeouts should use a stable 504 error response."""
+    app = create_app()
+    payload = {
+        'model': 'qwen3-chat',
+        'messages': [{'role': 'user', 'content': 'hello'}],
+    }
+
+    with TestClient(app) as client:
+        async def raise_upstream_timeout(*, target, request):
+            raise RuntimeNotConnectedError('upstream timed out', code='upstream_timeout')
+
+        client.app.state.runtime_dispatcher.executor.execute_chat = raise_upstream_timeout
+        response = client.post('/v1/chat/completions', json=payload)
+
+    assert response.status_code == 504
+    assert response.json()['error']['type'] == 'service_unavailable_error'
+    assert response.json()['error']['code'] == 'upstream_timeout'
+
+
+def test_chat_completions_returns_500_when_serve_execution_fails(
+    prepared_model_store: Path,
+) -> None:
+    """serve 远端执行失败时 chat 接口应返回 500 而不是 501。"""
+    app = create_app()
+    payload = {
+        'model': 'qwen3-chat',
+        'messages': [{'role': 'user', 'content': 'hello'}],
+    }
+
+    with TestClient(app) as client:
+        async def raise_runtime_execution_error(*, target, request):
+            raise RuntimeExecutionError(
+                f"Serve execution failed for deployment '{target.deployment_name}' in app '{target.app_name}'."
+            )
+
+        client.app.state.runtime_dispatcher.executor.execute_chat = raise_runtime_execution_error
+        response = client.post('/v1/chat/completions', json=payload)
+
+    assert response.status_code == 500
+    assert response.json()['error']['code'] == 'runtime_execution_failed'
+
+
+def test_chat_completions_returns_400_when_runtime_validation_fails(
+    prepared_model_store: Path,
+    monkeypatch,
+) -> None:
+    """运行时参数校验错误应映射为 400 invalid_request_error。"""
+    app = create_app()
+    payload = {
+        'model': 'qwen3-8b',
+        'messages': [{'role': 'user', 'content': 'hello'}],
+    }
+
+    with TestClient(app) as client:
+        async def raise_runtime_validation_error(*, target, request):
+            raise RuntimeExecutionError(
+                'This model does not allow reasoning request fields.',
+                code='unsupported_parameter',
+            )
+
+        client.app.state.model_store.require_model_path = lambda _model: None
+        monkeypatch.setattr(
+            RuntimeExecutor,
+            'execute_chat',
+            raise_runtime_validation_error,
+        )
+        response = client.post('/v1/chat/completions', json=payload)
+
+    assert response.status_code == 400
+    assert response.json()['error']['type'] == 'invalid_request_error'
+    assert response.json()['error']['code'] == 'unsupported_parameter'
 
 
 def test_embeddings_returns_stub_embedding_response_for_embedding_model(prepared_model_store: Path) -> None:

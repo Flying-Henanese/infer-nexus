@@ -8,27 +8,27 @@ models:
     tensor_parallel_size: 1
     max_model_len: 10000
     cpu_per_replica: 4
-    gpu_per_replica: 0.5
-    gpu_memory_utilization: 0.5
+    gpu_per_replica: 0.4
+    gpu_memory_utilization: 0.35
     min_replicas: 1
-    max_replicas: 2
+    max_replicas: 1
     capabilities:
       - vision
     labels:
       - internal
       - llm
 
-  - name: Qwen3-8B
-    alias: qwen3-8b
+  - name: Qwen3-32B
+    alias: qwen3-32b
     task: chat
     backend: vllm
-    model_path: /nas_data/models/Qwen/Qwen3-8B
-    dtype: bfloat16
+    model_path: /nas_data/models/Qwen/Qwen3-32B
+    dtype: auto
     tensor_parallel_size: 1
-    max_model_len: 8192
+    max_model_len: 4096
     cpu_per_replica: 4
-    gpu_per_replica: 0.6
-    gpu_memory_utilization: 0.4
+    gpu_per_replica: 0.9
+    gpu_memory_utilization: 0.9
     min_replicas: 1
     max_replicas: 1
     vllm:
@@ -58,10 +58,10 @@ models:
     tensor_parallel_size: 1
     max_model_len: 8192
     cpu_per_replica: 4
-    gpu_per_replica: 0.4
-    gpu_memory_utilization: 0.4
+    gpu_per_replica: 0.35
+    gpu_memory_utilization: 0.35
     min_replicas: 1
-    max_replicas: 1
+    max_replicas: 2
     capabilities:
       - vision
     engine_kwargs:

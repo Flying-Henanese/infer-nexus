@@ -52,11 +52,17 @@ coverage.xml
 # Environments
 .env
 .venv
+.venv-metal/
 env/
 venv/
 ENV/
 env.bak/
 venv.bak/
+
+# Project-local Codex skills
+skills/
+hooks/
+subagents/
 
 # Models
 models/

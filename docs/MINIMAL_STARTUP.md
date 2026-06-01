@@ -21,6 +21,11 @@ This is enough to validate the end-to-end control flow before doing more product
 
 For proxy models (`backend: vllm_openai_proxy`), local Ray Serve model runtime is not required for that model; the gateway forwards to configured upstream endpoints.
 
+The proxy path uses a single configured upstream endpoint per model. If that
+endpoint is backed by Ray Serve, Ray Serve remains responsible for model replica
+pooling, health checks, and autoscaling; the gateway does not duplicate those
+instance-pool responsibilities.
+
 ## Prerequisites
 
 - Ubuntu x86_64

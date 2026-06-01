@@ -9,7 +9,7 @@ catalog:
   models_path: config/models.yaml
 
 cluster:
-  accelerator_type: cuda
+  inference_device_type: cuda
   device_pool_boundary: ray_runtime_visible_devices
   default_platform: cuda
 
@@ -41,5 +41,5 @@ runtime:
 
 model_store:
   root_dir: models
-  # use mirror endpoint to avoid inaccessibility in mainland China
+  # use mirror endpoint to prevent blocking in mainland China
   huggingface_endpoint: https://hf-mirror.com

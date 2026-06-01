@@ -1,9 +1,12 @@
 """运行时分发器测试。"""
 
 import asyncio
+import json
 
 import httpx
 import pytest
+from starlette.responses import Response
+from starlette.responses import StreamingResponse
 
 from infer_nexus.catalog.models import ModelCatalogFile, ModelConfig
 from infer_nexus.catalog.loader import load_model_catalog
@@ -16,6 +19,7 @@ from infer_nexus.runtime.dispatcher import RuntimeDispatcher
 from infer_nexus.runtime.executor import RuntimeExecutor
 from infer_nexus.runtime.handles import ServeDeploymentHandleResolver
 from infer_nexus.runtime.serve_app import ServeApplicationBuilder
+from infer_nexus.runtime.types import RuntimeTarget
 
 
 def make_dispatcher(executor: RuntimeExecutor | None = None) -> tuple[ModelRegistry, LocalModelStore, RuntimeDispatcher]:
@@ -45,8 +49,10 @@ def test_dispatcher_resolves_target_with_runtime_context() -> None:
 
     assert target.model_name == 'qwen3-32b-instruct'
     assert target.model_alias == 'qwen3-chat'
+    assert target.app_name == 'infer-nexus-model-qwen3-32b-instruct'
     assert target.deployment_name == 'model-qwen3-32b-instruct'
     assert target.runtime_context['resolved_model_path'].endswith('/models/Qwen/Qwen3-32B-Instruct')
+    assert target.runtime_context['app_name'] == 'infer-nexus-model-qwen3-32b-instruct'
     assert target.runtime_context['deployment_name'] == 'model-qwen3-32b-instruct'
 
 
@@ -65,6 +71,196 @@ def test_dispatch_chat_returns_stub_chat_completion() -> None:
     assert response.choices[0].message.role == 'assistant'
     assert 'backend stub response from vllm' in str(response.choices[0].message.content)
     assert 'model-qwen3-32b-instruct' in str(response.choices[0].message.content)
+
+
+def test_dispatch_chat_returns_sse_stream_when_requested() -> None:
+    """stub 模式下 stream=True 应返回 OpenAI-style SSE 响应。"""
+    registry, _, dispatcher = make_dispatcher()
+    request = ChatCompletionsRequest(
+        model='qwen3-chat',
+        messages=[{'role': 'user', 'content': 'hello'}],
+        stream=True,
+    )
+
+    response = asyncio.run(dispatcher.dispatch_chat(registry.get('qwen3-chat'), request))
+
+    assert isinstance(response, StreamingResponse)
+
+    async def collect() -> bytes:
+        chunks = []
+        async for chunk in response.body_iterator:
+            chunks.append(chunk)
+        return b''.join(chunks)
+
+    body = asyncio.run(collect())
+    assert response.media_type == 'text/event-stream'
+    assert b'chat.completion.chunk' in body
+    assert b'backend stub response from vllm' in body
+    assert body.endswith(b'data: [DONE]\n\n')
+
+
+def test_chat_stream_response_preserves_vllm_reasoning_deltas() -> None:
+    """Streaming adapter should preserve vLLM/OpenAI reasoning delta chunks."""
+    executor = RuntimeExecutor()
+    request = ChatCompletionsRequest(
+        model='qwen3-chat',
+        messages=[{'role': 'user', 'content': 'hello'}],
+        stream=True,
+    )
+    target = RuntimeTarget(
+        model_name='qwen3-32b-instruct',
+        model_alias='qwen3-chat',
+        backend=BackendType.VLLM,
+        app_name='infer-nexus-model-qwen3-32b-instruct',
+        deployment_name='model-qwen3-32b-instruct',
+        runtime_context={'served_model_name': 'qwen3-chat'},
+    )
+
+    response = executor._build_chat_stream_response(
+        request,
+        target,
+        {
+            'stream_chunks': [
+                {
+                    'id': 'chatcmpl-reasoning',
+                    'object': 'chat.completion.chunk',
+                    'created': 123,
+                    'model': 'qwen3-chat',
+                    'choices': [
+                        {
+                            'index': 0,
+                            'delta': {'role': 'assistant', 'reasoning_content': '先分析'},
+                            'finish_reason': None,
+                        }
+                    ],
+                },
+                {
+                    'id': 'chatcmpl-reasoning',
+                    'object': 'chat.completion.chunk',
+                    'created': 123,
+                    'model': 'qwen3-chat',
+                    'choices': [
+                        {
+                            'index': 0,
+                            'delta': {'content': '答案'},
+                            'finish_reason': None,
+                        }
+                    ],
+                },
+            ],
+        },
+    )
+
+    async def collect() -> bytes:
+        chunks = []
+        async for chunk in response.body_iterator:
+            chunks.append(chunk)
+        return b''.join(chunks)
+
+    body = asyncio.run(collect())
+    assert b'"reasoning_content":' in body
+    assert '先分析'.encode() in body
+    assert b'"content":' in body
+    assert '答案'.encode() in body
+    assert body.endswith(b'data: [DONE]\n\n')
+
+
+def test_chat_stream_response_forwards_raw_sse_bytes_unchanged() -> None:
+    """Raw SSE bytes from a backend should pass through without semantic rewriting."""
+    executor = RuntimeExecutor()
+    request = ChatCompletionsRequest(
+        model='qwen3-chat',
+        messages=[{'role': 'user', 'content': 'hello'}],
+        stream=True,
+    )
+    target = RuntimeTarget(
+        model_name='qwen3-32b-instruct',
+        model_alias='qwen3-chat',
+        backend=BackendType.VLLM,
+        app_name='infer-nexus-model-qwen3-32b-instruct',
+        deployment_name='model-qwen3-32b-instruct',
+        runtime_context={'served_model_name': 'qwen3-chat'},
+    )
+    raw = b'data: {"custom": true}\n\ndata: [DONE]\n\n'
+
+    response = executor._build_chat_stream_response(
+        request,
+        target,
+        {'stream_chunks': [raw]},
+    )
+
+    async def collect() -> bytes:
+        chunks = []
+        async for chunk in response.body_iterator:
+            chunks.append(chunk)
+        return b''.join(chunks)
+
+    assert asyncio.run(collect()) == raw
+
+
+def test_chat_stream_response_maps_standard_delta_events_to_openai_sse() -> None:
+    """Backend-standard delta events should be exposed as OpenAI-compatible SSE chunks."""
+    executor = RuntimeExecutor()
+    request = ChatCompletionsRequest(
+        model='qwen3-chat',
+        messages=[{'role': 'user', 'content': 'hello'}],
+        stream=True,
+    )
+    target = RuntimeTarget(
+        model_name='qwen3-32b-instruct',
+        model_alias='qwen3-chat',
+        backend=BackendType.VLLM,
+        app_name='infer-nexus-model-qwen3-32b-instruct',
+        deployment_name='model-qwen3-32b-instruct',
+        runtime_context={'served_model_name': 'qwen3-chat'},
+    )
+
+    async def chunks():
+        yield {
+            'type': 'chat_delta',
+            'id': 'chatcmpl-native',
+            'created': 123,
+            'model': 'qwen3-chat',
+            'delta_text': 'hel',
+            'finish_reason': None,
+        }
+        yield {
+            'type': 'chat_delta',
+            'id': 'chatcmpl-native',
+            'created': 123,
+            'model': 'qwen3-chat',
+            'delta_text': 'lo',
+            'finish_reason': None,
+        }
+        yield {
+            'type': 'chat_delta',
+            'id': 'chatcmpl-native',
+            'created': 123,
+            'model': 'qwen3-chat',
+            'delta_text': '',
+            'finish_reason': 'stop',
+        }
+
+    response = executor._build_chat_stream_response(request, target, chunks())
+
+    async def collect() -> list[dict | str]:
+        payloads = []
+        async for chunk in response.body_iterator:
+            text = chunk.decode('utf-8')
+            for line in text.splitlines():
+                if not line.startswith('data: '):
+                    continue
+                payload = line.removeprefix('data: ')
+                payloads.append('[DONE]' if payload == '[DONE]' else json.loads(payload))
+        return payloads
+
+    payloads = asyncio.run(collect())
+
+    assert payloads[0]['choices'][0]['delta'] == {'role': 'assistant'}
+    assert payloads[1]['choices'][0]['delta'] == {'content': 'hel'}
+    assert payloads[2]['choices'][0]['delta'] == {'content': 'lo'}
+    assert payloads[3]['choices'][0]['finish_reason'] == 'stop'
+    assert payloads[4] == '[DONE]'
 
 
 def test_dispatch_embedding_returns_stub_embedding_response() -> None:
@@ -160,18 +356,125 @@ class FakeDeploymentHandle:
         )
 
 
+class FakeStreamingDeploymentMethod:
+    """模拟 Serve 句柄上的 streaming 远程方法。"""
+
+    def __init__(self, captured_payloads: list[dict]) -> None:
+        self.captured_payloads = captured_payloads
+
+    def remote(self, request_payload: dict):
+        self.captured_payloads.append(request_payload)
+
+        async def iterator():
+            yield {
+                'id': 'chatcmpl-stream',
+                'object': 'chat.completion.chunk',
+                'created': 123,
+                'model': request_payload['model'],
+                'choices': [
+                    {
+                        'index': 0,
+                        'delta': {'role': 'assistant', 'content': 'hello'},
+                        'finish_reason': None,
+                    }
+                ],
+            }
+            yield {
+                'id': 'chatcmpl-stream',
+                'object': 'chat.completion.chunk',
+                'created': 123,
+                'model': request_payload['model'],
+                'choices': [
+                    {
+                        'index': 0,
+                        'delta': {},
+                        'finish_reason': 'stop',
+                    }
+                ],
+            }
+
+        return iterator()
+
+
+class FakeStreamingDeploymentHandle(FakeDeploymentHandle):
+    """模拟支持 streaming chat 的部署句柄。"""
+
+    def __init__(self, deployment_name: str, captured_payloads: list[dict]) -> None:
+        super().__init__(deployment_name)
+        self.chat_completion_stream = FakeStreamingDeploymentMethod(captured_payloads)
+        self.options_calls: list[dict] = []
+
+    def options(self, **kwargs):
+        self.options_calls.append(kwargs)
+        return self
+
+
+class FakeStreamingServe:
+    """模拟支持 streaming 方法的 Serve runtime。"""
+
+    def __init__(self) -> None:
+        self.captured_payloads: list[dict] = []
+        self.handles: list[FakeStreamingDeploymentHandle] = []
+
+    def get_deployment_handle(self, deployment_name: str, app_name: str) -> FakeStreamingDeploymentHandle:
+        assert app_name.startswith('infer-nexus-model-')
+        handle = FakeStreamingDeploymentHandle(deployment_name, self.captured_payloads)
+        self.handles.append(handle)
+        return handle
+
+
+class FakeOpenAIChatDeploymentHandle:
+    """模拟返回完整 OpenAI chat payload 的部署句柄。"""
+
+    def __init__(self) -> None:
+        self.chat_completion = FakeDeploymentMethod(
+            {
+                'object': 'chat.completion',
+                'id': 'chatcmpl-native',
+                'created': 123,
+                'model': 'qwen3-chat',
+                'choices': [
+                    {
+                        'index': 0,
+                        'message': {'role': 'assistant', 'content': 'first'},
+                        'finish_reason': 'stop',
+                    },
+                    {
+                        'index': 1,
+                        'message': {'role': 'assistant', 'content': 'second'},
+                        'finish_reason': 'stop',
+                    },
+                ],
+                'usage': {
+                    'prompt_tokens': 1,
+                    'completion_tokens': 2,
+                    'total_tokens': 3,
+                    'completion_tokens_details': {'reasoning_tokens': 1},
+                },
+            }
+        )
+
+
+class FakeOpenAIChatServe:
+    """模拟返回完整 OpenAI chat payload 的 Serve runtime。"""
+
+    def get_deployment_handle(self, deployment_name: str, app_name: str) -> FakeOpenAIChatDeploymentHandle:
+        assert app_name.startswith('infer-nexus-model-')
+        return FakeOpenAIChatDeploymentHandle()
+
+
 class FakeServe:
     """模拟 Serve runtime。"""
 
     def get_deployment_handle(self, deployment_name: str, app_name: str) -> FakeDeploymentHandle:
         """返回模拟部署句柄。"""
-        assert app_name == 'infer-nexus'
+        assert app_name.startswith('infer-nexus-model-')
         return FakeDeploymentHandle(deployment_name)
 
 
 def test_dispatch_chat_uses_serve_handle_in_serve_mode() -> None:
     """serve 模式下 chat 分发应通过 deployment handle 执行。"""
-    resolver = ServeDeploymentHandleResolver(app_name='infer-nexus', serve=FakeServe())
+    resolver = ServeDeploymentHandleResolver(serve=FakeServe())
     executor = RuntimeExecutor(mode='serve', handle_resolver=resolver)
     registry, _, dispatcher = make_dispatcher(executor)
     request = ChatCompletionsRequest(
@@ -187,9 +490,61 @@ def test_dispatch_chat_uses_serve_handle_in_serve_mode() -> None:
     assert 'model-qwen3-32b-instruct' in str(response.choices[0].message.content)
 
 
+def test_dispatch_chat_passthrough_openai_payload_without_collapsing_choices() -> None:
+    """完整 OpenAI chat payload 应原样透传，避免 choices 或 usage 扩展字段被裁剪。"""
+    resolver = ServeDeploymentHandleResolver(serve=FakeOpenAIChatServe())
+    executor = RuntimeExecutor(mode='serve', handle_resolver=resolver)
+    registry, _, dispatcher = make_dispatcher(executor)
+    request = ChatCompletionsRequest(
+        model='qwen3-chat',
+        messages=[{'role': 'user', 'content': 'hello'}],
+    )
+
+    response = asyncio.run(dispatcher.dispatch_chat(registry.get('qwen3-chat'), request))
+
+    assert isinstance(response, Response)
+    body = json.loads(response.body)
+    assert body['object'] == 'chat.completion'
+    assert len(body['choices']) == 2
+    assert body['choices'][1]['message']['content'] == 'second'
+    assert body['usage']['completion_tokens_details'] == {'reasoning_tokens': 1}
+
+
+def test_dispatch_chat_stream_uses_serve_streaming_handle_without_rewriting_request() -> None:
+    """serve 模式下 stream=True 应调用 deployment streaming 方法并保留 stream 字段。"""
+    fake_serve = FakeStreamingServe()
+    resolver = ServeDeploymentHandleResolver(serve=fake_serve)
+    executor = RuntimeExecutor(mode='serve', handle_resolver=resolver)
+    registry, _, dispatcher = make_dispatcher(executor)
+    request = ChatCompletionsRequest(
+        model='qwen3-chat',
+        messages=[{'role': 'user', 'content': 'hello'}],
+        stream=True,
+        extra_body={'top_k': 50},
+    )
+
+    response = asyncio.run(dispatcher.dispatch_chat(registry.get('qwen3-chat'), request))
+
+    assert isinstance(response, StreamingResponse)
+    assert fake_serve.captured_payloads[0]['stream'] is True
+    assert fake_serve.captured_payloads[0]['extra_body'] == {'top_k': 50}
+    assert fake_serve.handles[0].options_calls[0] == {'stream': True}
+
+    async def collect() -> bytes:
+        chunks = []
+        async for chunk in response.body_iterator:
+            chunks.append(chunk)
+        return b''.join(chunks)
+
+    body = asyncio.run(collect())
+    assert b'chat.completion.chunk' in body
+    assert b'"content": "hello"' in body
+    assert body.endswith(b'data: [DONE]\n\n')
+
+
 def test_dispatch_embedding_uses_serve_handle_in_serve_mode() -> None:
     """serve 模式下 embedding 分发应通过 deployment handle 执行。"""
-    resolver = ServeDeploymentHandleResolver(app_name='infer-nexus', serve=FakeServe())
+    resolver = ServeDeploymentHandleResolver(serve=FakeServe())
     executor = RuntimeExecutor(mode='serve', handle_resolver=resolver)
     registry, _, dispatcher = make_dispatcher(executor)
     request = EmbeddingRequest(
@@ -206,7 +561,7 @@ def test_dispatch_embedding_uses_serve_handle_in_serve_mode() -> None:
 
 def test_dispatch_rerank_uses_serve_handle_in_serve_mode() -> None:
     """serve 模式下 rerank 分发应通过 deployment handle 执行。"""
-    resolver = ServeDeploymentHandleResolver(app_name='infer-nexus', serve=FakeServe())
+    resolver = ServeDeploymentHandleResolver(serve=FakeServe())
     executor = RuntimeExecutor(mode='serve', handle_resolver=resolver)
     registry, _, dispatcher = make_dispatcher(executor)
     request = RerankRequest(
@@ -299,15 +654,19 @@ def _build_proxy_dispatcher() -> tuple[ModelRegistry, RuntimeDispatcher]:
     return registry, dispatcher
 
 
-def test_proxy_chat_dispatch_rewrites_model_and_parses_response(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_proxy_chat_dispatch_rewrites_only_model_and_passthrough_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     registry, dispatcher = _build_proxy_dispatcher()
     captured: dict[str, object] = {}
 
-    async def fake_request_proxy(self, *, proxy_config, path, payload):  # type: ignore[no-untyped-def]
+    async def fake_request_proxy(self, *, proxy_config, path, payload, request_id):  # type: ignore[no-untyped-def]
         captured["path"] = path
         captured["payload"] = payload
+        captured["request_id"] = request_id
         return httpx.Response(
             200,
+            headers={"content-type": "application/json"},
             json={
                 "id": "chatcmpl-proxy",
                 "object": "chat.completion",
@@ -320,23 +679,37 @@ def test_proxy_chat_dispatch_rewrites_model_and_parses_response(monkeypatch: pyt
 
     monkeypatch.setattr(RuntimeExecutor, "_request_proxy", fake_request_proxy)
 
-    request = ChatCompletionsRequest(model="mineru", messages=[{"role": "user", "content": "hello"}])
+    request = ChatCompletionsRequest(
+        model="mineru",
+        messages=[{"role": "user", "content": "hello"}],
+        temperature=0.2,
+        extra_body={"no_repeat_ngram_size": 16},
+    )
     response = asyncio.run(dispatcher.dispatch_chat(registry.get("mineru"), request))
 
-    assert response.model == "opendatalab/MinerU2.5-2509-1.2B"
+    assert isinstance(response, Response)
+    body = json.loads(response.body)
+    assert body["model"] == "opendatalab/MinerU2.5-2509-1.2B"
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/json"
+    assert response.headers["X-Infer-Nexus-Request-ID"] == captured["request_id"]
     assert captured["path"] == "/chat/completions"
     assert isinstance(captured["payload"], dict)
     assert captured["payload"]["model"] == "opendatalab/MinerU2.5-2509-1.2B"
+    assert captured["payload"]["messages"] == [{"role": "user", "content": "hello"}]
+    assert captured["payload"]["temperature"] == 0.2
+    assert captured["payload"]["extra_body"] == {"no_repeat_ngram_size": 16}
 
 
 def test_proxy_embedding_dispatch_passthrough(monkeypatch: pytest.MonkeyPatch) -> None:
     registry, dispatcher = _build_proxy_dispatcher()
 
-    async def fake_request_proxy(self, *, proxy_config, path, payload):  # type: ignore[no-untyped-def]
+    async def fake_request_proxy(self, *, proxy_config, path, payload, request_id):  # type: ignore[no-untyped-def]
         assert path == "/embeddings"
         assert payload["model"] == "BAAI/bge-large-zh-v1.5"
         return httpx.Response(
             200,
+            headers={"content-type": "application/json"},
             json={
                 "object": "list",
                 "data": [{"object": "embedding", "index": 0, "embedding": [0.1, 0.2]}],
@@ -348,18 +721,21 @@ def test_proxy_embedding_dispatch_passthrough(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(RuntimeExecutor, "_request_proxy", fake_request_proxy)
     request = EmbeddingRequest(model="bge-embedding-proxy", input="hello")
     response = asyncio.run(dispatcher.dispatch_embedding(registry.get("bge-embedding-proxy"), request))
-    assert response.model == "BAAI/bge-large-zh-v1.5"
-    assert response.data[0].embedding == [0.1, 0.2]
+    assert isinstance(response, Response)
+    body = json.loads(response.body)
+    assert body["model"] == "BAAI/bge-large-zh-v1.5"
+    assert body["data"][0]["embedding"] == [0.1, 0.2]
 
 
 def test_proxy_rerank_dispatch_passthrough(monkeypatch: pytest.MonkeyPatch) -> None:
     registry, dispatcher = _build_proxy_dispatcher()
 
-    async def fake_request_proxy(self, *, proxy_config, path, payload):  # type: ignore[no-untyped-def]
+    async def fake_request_proxy(self, *, proxy_config, path, payload, request_id):  # type: ignore[no-untyped-def]
         assert path == "/rerank"
         assert payload["model"] == "BAAI/bge-reranker-v2-m3"
         return httpx.Response(
             200,
+            headers={"content-type": "application/json"},
             json={
                 "id": "rerank-1",
                 "model": "BAAI/bge-reranker-v2-m3",
@@ -371,5 +747,28 @@ def test_proxy_rerank_dispatch_passthrough(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(RuntimeExecutor, "_request_proxy", fake_request_proxy)
     request = RerankRequest(model="bge-rerank-proxy", query="hello", documents=["hello"])
     response = asyncio.run(dispatcher.dispatch_rerank(registry.get("bge-rerank-proxy"), request))
-    assert response.model == "BAAI/bge-reranker-v2-m3"
-    assert response.results[0].relevance_score == 0.9
+    assert isinstance(response, Response)
+    body = json.loads(response.body)
+    assert body["model"] == "BAAI/bge-reranker-v2-m3"
+    assert body["results"][0]["relevance_score"] == 0.9
+
+
+def test_proxy_upstream_error_is_passthrough(monkeypatch: pytest.MonkeyPatch) -> None:
+    registry, dispatcher = _build_proxy_dispatcher()
+    upstream_error = b'{"error":{"message":"bad upstream request","code":"bad_request"}}'
+
+    async def fake_request_proxy(self, *, proxy_config, path, payload, request_id):  # type: ignore[no-untyped-def]
+        return httpx.Response(
+            400,
+            content=upstream_error,
+            headers={"content-type": "application/json"},
+        )
+
+    monkeypatch.setattr(RuntimeExecutor, "_request_proxy", fake_request_proxy)
+    request = ChatCompletionsRequest(model="mineru", messages=[{"role": "user", "content": "hello"}])
+    response = asyncio.run(dispatcher.dispatch_chat(registry.get("mineru"), request))
+
+    assert isinstance(response, Response)
+    assert response.status_code == 400
+    assert response.body == upstream_error
+    assert response.headers["content-type"] == "application/json"

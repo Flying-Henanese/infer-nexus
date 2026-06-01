@@ -1,6 +1,7 @@
 """应用配置模型与加载逻辑。"""
 
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel, Field
@@ -27,7 +28,7 @@ class CatalogSettings(BaseModel):
 class ClusterSettings(BaseModel):
     """Cluster-level runtime environment assumptions."""
 
-    accelerator_type: str = "cuda"
+    inference_device_type: Literal["cuda", "npu"] = "cuda"
     device_pool_boundary: str = "ray_runtime_visible_devices"
     default_platform: str = "cuda"
 

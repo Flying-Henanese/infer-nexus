@@ -36,6 +36,15 @@ class RuntimeNotConnectedError(InferNexusError):
         self.code = code
 
 
+class RuntimeExecutionError(InferNexusError):
+    """Raised when a runtime target is connected but execution fails inside the backend."""
+
+    def __init__(self, message: str, code: str = "runtime_execution_failed") -> None:
+        """Construct a runtime execution error with an API-facing error code."""
+        super().__init__(message)
+        self.code = code
+
+
 class BackendRequestValidationError(InferNexusError):
     """Raised when a backend cannot serve a valid API request within current support bounds."""
 

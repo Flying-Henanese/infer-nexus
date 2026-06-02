@@ -1493,6 +1493,7 @@ def test_vllm_backend_initializes_native_embedding_serving_adapter(
         'encoding_format': 'float',
     }
     assert adapter.serving_embedding.kwargs['supported_tasks'] == ('embed',)
+    assert adapter.serving_embedding.kwargs['request_logger'] is None
 
 
 def test_vllm_backend_startup_initializes_embedding_adapter_when_enabled(

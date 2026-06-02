@@ -1085,9 +1085,8 @@ class VLLMBackend(InferenceBackend):
             "return_tokens_as_token_ids": False,
             "log_error_stack": False,
         }
-        skip_if_none = {"request_logger", "chat_template"}
         for key, value in optional_kwargs.items():
-            if key in parameters and (value is not None or key not in skip_if_none):
+            if key in parameters:
                 kwargs[key] = value
 
         return serving_embedding_cls(*args, **kwargs)

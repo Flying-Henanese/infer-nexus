@@ -123,6 +123,9 @@ What has been verified in code and against a remote instance:
   - reasoning responses
   - tool calling with `tool_call_parser=qwen3_coder`
   - multimodal image input
+  - `2026-06-02` follow-up validation of thinking-enabled requests confirmed that
+    final-answer truncation tracks request `max_tokens` budget, not startup
+    `max_model_len`
 - a remote `qwen3-32b` instance was validated with:
   - non-stream chat
   - tool calling
@@ -148,6 +151,18 @@ Operational guidance discovered during validation:
   - default `chat_template_kwargs.enable_thinking=false`
   - explicitly enable thinking per request only for reasoning-heavy tasks
 - Request-level override using `extra_body.chat_template_kwargs.enable_thinking=false` was verified to restore concise final-answer behavior for `qwen3.5-9b`.
+- Additional `2026-06-02` runtime finding for `Qwen3.5-9B`:
+  - with `extra_body.chat_template_kwargs.enable_thinking=true`, the model can
+    spend most of the completion budget in the `reasoning` field before emitting
+    final `content`
+  - a short prompt (`prompt_tokens=31`) still hit `finish_reason="length"` when
+    `max_tokens=192`, which rules out startup `max_model_len` as the cause for
+    that failure mode
+  - the same prompt completed successfully with final `content` once
+    `max_tokens` was raised to `256` (`completion_tokens=232`)
+  - operationally, reasoning-enabled requests should budget completion tokens
+    explicitly; otherwise the model may terminate inside reasoning without ever
+    emitting the final answer
 
 What remains before this plan can be called fully closed:
 
@@ -163,6 +178,7 @@ Remote validation target:
 
 - host: `192.168.0.194:8000`
 - date: `2026-06-01`
+- follow-up date: `2026-06-02`
 
 Remote model set observed during validation:
 
@@ -181,6 +197,17 @@ Validation summary:
   - native reasoning field behavior verified
   - native SSE stream shape verified
   - multimodal request acceptance verified
+  - `2026-06-02` follow-up:
+    - non-stream request with `enable_thinking=false` returned concise final
+      `content` (`"OK"`) as expected
+    - streaming request returned native OpenAI-style
+      `chat.completion.chunk` SSE frames ending with `data: [DONE]`
+    - thinking-enabled requests with a short prompt and `max_tokens=192`
+      terminated with `finish_reason="length"` and reasoning-only output
+    - the same thinking-enabled prompt completed with final `content` at
+      `max_tokens=256`, `384`, and `512`
+    - this behavior indicates completion-budget exhaustion inside reasoning, not
+      a remote `max_model_len` bottleneck
 - `qwen3-32b`
   - local-best-effort chat verified
   - tool calling behavior verified

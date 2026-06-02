@@ -15,6 +15,7 @@ from uuid import uuid4
 from infer_nexus.backends.base import InferenceBackend
 from infer_nexus.backends.vllm_native import (
     DynamicVLLMOpenAIChatServingAdapter,
+    DynamicVLLMOpenAIEmbeddingServingAdapter,
     OpenAIChatServingAdapter,
     OpenAIEmbeddingServingAdapter,
     OpenAIServingEngineClientCompatProxy,
@@ -117,6 +118,13 @@ class VLLMBackend(InferenceBackend):
                     f"vllm_native local vLLM chat model '{runtime_context.get('model_name')}' "
                     "requires openai_serving.enabled=true."
                 )
+        if self._requires_openai_embedding_serving_adapter(runtime_spec):
+            openai_serving = runtime_spec.get("openai_serving") or {}
+            if runtime_spec.get("task_mode") == "embed" and not openai_serving.get("enabled"):
+                raise BackendConfigurationError(
+                    f"vllm_native local vLLM embedding model '{runtime_context.get('model_name')}' "
+                    "requires openai_serving.enabled=true."
+                )
         if self._is_vllm_native(runtime_spec) and runtime_spec.get("task_mode") == "score":
             raise BackendConfigurationError("vllm_native is not supported for vLLM rerank models.")
 
@@ -205,6 +213,7 @@ class VLLMBackend(InferenceBackend):
                 self.engine_kind = "async"
                 self.engine_state = "ready"
                 self.openai_serving_chat_adapter = self._initialize_openai_serving_chat_adapter()
+                self.openai_serving_embedding_adapter = None
                 if self.openai_serving_chat_adapter is not None:
                     logger.info("Initialized vLLM OpenAI serving adapter for async engine.")
                 elif self._requires_openai_serving_adapter():
@@ -274,6 +283,20 @@ class VLLMBackend(InferenceBackend):
             logger.warning(
                 "vLLM OpenAI serving adapter is disabled for sync engine: %s",
                 self.openai_serving_adapter_init_error,
+            )
+
+        self.openai_serving_embedding_adapter = self._initialize_openai_serving_embedding_adapter()
+        if (
+            self.openai_serving_embedding_adapter is None
+            and self._requires_openai_embedding_serving_adapter()
+        ):
+            self._raise_openai_embedding_serving_unavailable()
+        if self.openai_serving_embedding_adapter is not None:
+            logger.info("Initialized vLLM OpenAI embeddings serving adapter for sync engine.")
+        elif self._should_use_openai_serving_embedding_adapter():
+            logger.warning(
+                "vLLM OpenAI embeddings serving adapter is disabled for sync engine: %s",
+                self.openai_serving_embedding_adapter_init_error,
             )
         self.engine_state = "ready"
 
@@ -348,6 +371,13 @@ class VLLMBackend(InferenceBackend):
     ) -> bool:
         spec = runtime_spec or self.runtime_spec
         return self._is_vllm_native(spec) and spec.get("task_mode") == "generate"
+
+    def _requires_openai_embedding_serving_adapter(
+        self,
+        runtime_spec: dict[str, Any] | None = None,
+    ) -> bool:
+        spec = runtime_spec or self.runtime_spec
+        return self._is_vllm_native(spec) and spec.get("task_mode") == "embed"
 
     def _raise_openai_serving_unavailable(self, reason: str | None = None) -> None:
         detail = reason or self.openai_serving_adapter_init_error or "adapter is not initialized"
@@ -710,6 +740,14 @@ class VLLMBackend(InferenceBackend):
         openai_serving = spec.get("openai_serving") or {}
         return spec.get("task_mode") == "generate" and bool(openai_serving.get("enabled"))
 
+    def _should_use_openai_serving_embedding_adapter(
+        self,
+        runtime_spec: dict[str, Any] | None = None,
+    ) -> bool:
+        spec = runtime_spec or self.runtime_spec
+        openai_serving = spec.get("openai_serving") or {}
+        return spec.get("task_mode") == "embed" and bool(openai_serving.get("enabled"))
+
     def _import_vllm_symbol(self, module_path: str, symbol_name: str) -> Any:
         module = importlib.import_module(module_path)
         return getattr(module, symbol_name)
@@ -991,6 +1029,113 @@ class VLLMBackend(InferenceBackend):
         return DynamicVLLMOpenAIChatServingAdapter(
             chat_request_cls=imports.chat_request_cls,
             serving_chat=serving_chat,
+        )
+
+    def _resolve_openai_serving_embedding_imports(self) -> tuple[type[Any], type[Any]]:
+        candidates = [
+            (
+                ("vllm.entrypoints.pooling.embed.protocol", "EmbeddingRequest"),
+                ("vllm.entrypoints.pooling.embed.serving", "ServingEmbedding"),
+            ),
+            (
+                ("vllm.entrypoints.openai.protocol", "EmbeddingRequest"),
+                ("vllm.entrypoints.pooling.embed.serving", "ServingEmbedding"),
+            ),
+        ]
+
+        last_error: Exception | None = None
+        for request_candidate, serving_candidate in candidates:
+            try:
+                return (
+                    self._import_vllm_symbol(*request_candidate),
+                    self._import_vllm_symbol(*serving_candidate),
+                )
+            except (ImportError, AttributeError) as exc:
+                last_error = exc
+
+        if last_error is None:
+            raise ImportError("No supported vLLM embeddings serving import layout was found.")
+        raise ImportError(
+            f"Unable to resolve supported vLLM embeddings serving imports: {last_error}"
+        ) from last_error
+
+    def _build_openai_serving_embedding(
+        self,
+        *,
+        serving_embedding_cls: type[Any],
+        engine_client: Any,
+        serving_models: Any,
+    ) -> Any:
+        init_signature = inspect.signature(serving_embedding_cls)
+        parameters = init_signature.parameters
+        kwargs: dict[str, Any] = {}
+        args: list[Any] = []
+
+        if "engine_client" in parameters:
+            args.append(engine_client)
+        if "models" in parameters:
+            args.append(serving_models)
+
+        optional_kwargs = {
+            "supported_tasks": ("embed",),
+            "request_logger": None,
+            "chat_template": None,
+            "chat_template_content_format": "auto",
+            "trust_request_chat_template": False,
+            "return_tokens_as_token_ids": False,
+            "log_error_stack": False,
+        }
+        skip_if_none = {"request_logger", "chat_template"}
+        for key, value in optional_kwargs.items():
+            if key in parameters and (value is not None or key not in skip_if_none):
+                kwargs[key] = value
+
+        return serving_embedding_cls(*args, **kwargs)
+
+    def _initialize_openai_serving_embedding_adapter(self) -> OpenAIEmbeddingServingAdapter | None:
+        if not self._should_use_openai_serving_embedding_adapter():
+            self.openai_serving_embedding_adapter_init_error = None
+            return None
+        if self.engine is None:
+            self.openai_serving_embedding_adapter_init_error = (
+                "vLLM engine is not initialized, so OpenAI embeddings serving cannot be constructed."
+            )
+            return None
+
+        try:
+            embedding_request_cls, serving_embedding_cls = (
+                self._resolve_openai_serving_embedding_imports()
+            )
+            imports = self._resolve_openai_serving_imports()
+            engine_client = self._resolve_openai_serving_engine_client()
+            if engine_client is None:
+                raise RuntimeError("No compatible engine client was found on the initialized vLLM engine.")
+            serving_models = self._build_openai_serving_models(
+                serving_models_cls=imports.serving_models_cls,
+                base_model_path_cls=imports.base_model_path_cls,
+                engine_client=engine_client,
+            )
+            serving_embedding = self._build_openai_serving_embedding(
+                serving_embedding_cls=serving_embedding_cls,
+                engine_client=engine_client,
+                serving_models=serving_models,
+            )
+        except Exception as exc:
+            self.openai_serving_embedding_adapter_init_error = str(exc)
+            logger.warning(
+                "Failed to initialize vLLM OpenAI embeddings serving adapter for "
+                "model_path='%s' served_model_name='%s' engine_kind='%s': %s",
+                self.runtime_spec.get("model_path"),
+                self.runtime_spec.get("served_model_name"),
+                self.engine_kind,
+                exc,
+            )
+            return None
+
+        self.openai_serving_embedding_adapter_init_error = None
+        return DynamicVLLMOpenAIEmbeddingServingAdapter(
+            embedding_request_cls=embedding_request_cls,
+            serving_embedding=serving_embedding,
         )
 
     def _build_openai_serving_request_payload(

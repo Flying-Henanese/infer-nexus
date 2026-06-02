@@ -149,9 +149,10 @@ class ModelConfig(BaseModel):
                 raise ValueError("vllm_native is not supported for local vllm rerank models")
             if self.compat_mode == CompatibilityMode.STRICT_OPENAI and self.task != TaskType.CHAT:
                 raise ValueError("strict_openai is only supported as an alias for local vllm chat models")
-            if self.task == TaskType.CHAT and not self.vllm.openai_serving.enabled:
+            if self.task in {TaskType.CHAT, TaskType.EMBEDDING} and not self.vllm.openai_serving.enabled:
                 raise ValueError(
-                    "vllm_native local vllm chat models require vllm.openai_serving.enabled=true"
+                    "vllm_native local vllm chat and embedding models require "
+                    "vllm.openai_serving.enabled=true"
                 )
 
         if not self.model_path and not self.model_loading_config.model_id:

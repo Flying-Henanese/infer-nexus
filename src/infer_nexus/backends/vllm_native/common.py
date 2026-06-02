@@ -88,6 +88,13 @@ class OpenAIServingEngineClientCompatProxy:
                         parameter.kind == inspect.Parameter.VAR_KEYWORD
                         for parameter in parameters.values()
                     )
+                    if (
+                        method_name == "encode"
+                        and "pooling_task" not in call_kwargs
+                        and ("pooling_task" in parameters or accepts_var_kwargs)
+                    ):
+                        call_kwargs = dict(call_kwargs)
+                        call_kwargs["pooling_task"] = "embed"
                     if not accepts_var_kwargs:
                         allowed_names = {
                             name
@@ -100,7 +107,7 @@ class OpenAIServingEngineClientCompatProxy:
                         }
                         call_kwargs = {
                             key: value
-                            for key, value in kwargs.items()
+                            for key, value in call_kwargs.items()
                             if key in allowed_names
                         }
 

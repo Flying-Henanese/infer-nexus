@@ -10,6 +10,7 @@ from infer_nexus.catalog.loader import load_model_catalog
 from infer_nexus.catalog.models import ModelCatalogFile, ModelConfig
 from infer_nexus.catalog.registry import ModelRegistry
 from infer_nexus.backends.vllm import DynamicVLLMOpenAIChatServingAdapter
+from infer_nexus.backends.vllm import DynamicVLLMOpenAIEmbeddingServingAdapter
 from infer_nexus.backends.vllm import OpenAIServingEngineClientCompatProxy
 from infer_nexus.core.errors import BackendConfigurationError, BackendRequestValidationError
 from infer_nexus.core.enums import CompatibilityMode, TaskType
@@ -118,6 +119,15 @@ class FakeServingResponse:
         return dict(self.payload)
 
 
+class FakeJSONResponse:
+    """模拟 FastAPI JSONResponse 风格响应。"""
+
+    def __init__(self, payload: dict[str, object]) -> None:
+        import json
+
+        self.body = json.dumps(payload).encode('utf-8')
+
+
 class FakeBaseModelPath:
     """模拟 vLLM BaseModelPath。"""
 
@@ -203,6 +213,48 @@ class FakeOpenAIServingChatNative:
                 'object': 'chat.completion',
                 'model': request.payload['model'],
                 'choices': [{'index': 0, 'message': {'role': 'assistant', 'content': 'native'}}],
+            }
+        )
+
+
+class FakeServingEmbeddingNative:
+    """模拟 vLLM native embedding serving。"""
+
+    def __init__(
+        self,
+        engine_client: object,
+        models: FakeOpenAIServingModelsNative,
+        *,
+        supported_tasks: tuple[str, ...] | None = None,
+        request_logger: object = None,
+        chat_template: object = None,
+        chat_template_content_format: str = 'auto',
+        trust_request_chat_template: bool = False,
+        return_tokens_as_token_ids: bool = False,
+        log_error_stack: bool = False,
+        **_: object,
+    ) -> None:
+        self.engine_client = engine_client
+        self.models = models
+        self.kwargs = {
+            'supported_tasks': supported_tasks,
+            'request_logger': request_logger,
+            'chat_template': chat_template,
+            'chat_template_content_format': chat_template_content_format,
+            'trust_request_chat_template': trust_request_chat_template,
+            'return_tokens_as_token_ids': return_tokens_as_token_ids,
+            'log_error_stack': log_error_stack,
+        }
+        self.requests: list[FakeServingRequest] = []
+
+    async def create_embedding(self, request: FakeServingRequest, raw_request=None):
+        self.requests.append(request)
+        return FakeJSONResponse(
+            {
+                'object': 'list',
+                'model': request.payload['model'],
+                'data': [{'object': 'embedding', 'index': 0, 'embedding': [0.1, 0.2]}],
+                'usage': {'prompt_tokens': 2, 'total_tokens': 2},
             }
         )
 
@@ -1360,6 +1412,139 @@ def test_vllm_native_embedding_missing_adapter_fails_without_local_fallback() ->
                 runtime_context,
             )
         )
+
+
+def test_vllm_backend_initializes_native_embedding_serving_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Embedding native serving adapter should be constructed from vLLM serving symbols."""
+    runtime_spec = {
+        'backend': 'vllm',
+        'task_mode': 'embed',
+        'compat_mode': CompatibilityMode.VLLM_NATIVE.value,
+        'model_path': '/models/Qwen/Qwen3-Embedding-8B',
+        'request_defaults': {},
+        'openai_serving': {'enabled': True},
+        'served_model_name': 'qwen3-embedding',
+    }
+    backend = VLLMBackend(runtime_spec)
+    engine_client = types.SimpleNamespace(
+        model_config='model-config',
+        renderer='renderer',
+        vllm_config='vllm-config',
+    )
+    backend.engine = types.SimpleNamespace(llm_engine=engine_client)
+
+    module_map = {
+        'vllm.entrypoints.pooling.embed.protocol': types.SimpleNamespace(
+            EmbeddingRequest=FakeServingRequest
+        ),
+        'vllm.entrypoints.pooling.embed.serving': types.SimpleNamespace(
+            ServingEmbedding=FakeServingEmbeddingNative
+        ),
+        'vllm.entrypoints.openai.chat_completion.protocol': types.SimpleNamespace(
+            ChatCompletionRequest=FakeServingRequest
+        ),
+        'vllm.entrypoints.openai.chat_completion.serving': types.SimpleNamespace(
+            OpenAIServingChat=FakeOpenAIServingChatNative
+        ),
+        'vllm.entrypoints.openai.models.serving': types.SimpleNamespace(
+            OpenAIServingModels=FakeOpenAIServingModelsNative
+        ),
+        'vllm.entrypoints.openai.models.protocol': types.SimpleNamespace(
+            BaseModelPath=FakeBaseModelPath
+        ),
+        'vllm.entrypoints.serve.render.serving': types.SimpleNamespace(
+            OpenAIServingRender=FakeOpenAIServingRender
+        ),
+    }
+
+    def fake_import_module(name: str):
+        if name not in module_map:
+            raise ImportError(name)
+        return module_map[name]
+
+    monkeypatch.setattr('infer_nexus.backends.vllm.importlib.import_module', fake_import_module)
+
+    adapter = backend._initialize_openai_serving_embedding_adapter()
+
+    assert isinstance(adapter, DynamicVLLMOpenAIEmbeddingServingAdapter)
+    assert backend.openai_serving_embedding_adapter_init_error is None
+
+    response = asyncio.run(
+        adapter.embedding(
+            {
+                'model': 'qwen3-embedding',
+                'input': ['hello'],
+                'encoding_format': 'float',
+            }
+        )
+    )
+
+    assert response == {
+        'object': 'list',
+        'model': 'qwen3-embedding',
+        'data': [{'object': 'embedding', 'index': 0, 'embedding': [0.1, 0.2]}],
+        'usage': {'prompt_tokens': 2, 'total_tokens': 2},
+    }
+    assert adapter.serving_embedding.requests[0].payload == {
+        'model': 'qwen3-embedding',
+        'input': ['hello'],
+        'encoding_format': 'float',
+    }
+    assert adapter.serving_embedding.kwargs['supported_tasks'] == ('embed',)
+
+
+def test_vllm_backend_startup_initializes_embedding_adapter_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Embed runtimes should initialize the native embedding adapter during startup."""
+    captured_kwargs = {}
+
+    class FakeLLM:
+        def __init__(self, **kwargs) -> None:
+            captured_kwargs.update(kwargs)
+            self.supported_tasks = ['embed']
+            self.llm_engine = types.SimpleNamespace(
+                model_config='model-config',
+                renderer='renderer',
+                vllm_config='vllm-config',
+            )
+
+    fake_vllm = types.SimpleNamespace(LLM=FakeLLM)
+    monkeypatch.setitem(sys.modules, 'vllm', fake_vllm)
+    monkeypatch.setattr(
+        VLLMBackend,
+        '_initialize_openai_serving_embedding_adapter',
+        lambda self: FakeOpenAIEmbeddingServingAdapter(response={'ok': True}),
+    )
+    monkeypatch.setattr(
+        VLLMBackend,
+        '_initialize_openai_serving_chat_adapter',
+        lambda self: None,
+    )
+
+    backend = VLLMBackend(
+        {
+            'backend': 'vllm',
+            'model_path': 'Qwen/Qwen3-Embedding-8B',
+            'tensor_parallel_size': 1,
+            'dtype': 'auto',
+            'task_mode': 'embed',
+            'engine_kwargs': {},
+            'openai_serving': {'enabled': True},
+            'compat_mode': CompatibilityMode.VLLM_NATIVE.value,
+            'backend_init_mode': 'real',
+        }
+    )
+
+    backend.startup()
+
+    assert captured_kwargs['model'] == 'Qwen/Qwen3-Embedding-8B'
+    assert captured_kwargs['task'] == 'embed'
+    assert backend.engine_kind == 'sync'
+    assert backend.engine_state == 'ready'
+    assert isinstance(backend.openai_serving_embedding_adapter, FakeOpenAIEmbeddingServingAdapter)
 
 
 def test_vllm_backend_chat_completion_stream_uses_native_vllm_deltas() -> None:

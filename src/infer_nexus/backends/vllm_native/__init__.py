@@ -8,10 +8,14 @@ from infer_nexus.backends.vllm_native.common import (
     OpenAIServingEngineClientCompatProxy,
     ResolvedOpenAIServingImports,
 )
-from infer_nexus.backends.vllm_native.embedding import OpenAIEmbeddingServingAdapter
+from infer_nexus.backends.vllm_native.embedding import (
+    DynamicVLLMOpenAIEmbeddingServingAdapter,
+    OpenAIEmbeddingServingAdapter,
+)
 
 __all__ = [
     "DynamicVLLMOpenAIChatServingAdapter",
+    "DynamicVLLMOpenAIEmbeddingServingAdapter",
     "OpenAIChatServingAdapter",
     "OpenAIEmbeddingServingAdapter",
     "OpenAIServingEngineClientCompatProxy",

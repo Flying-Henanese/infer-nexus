@@ -3,6 +3,7 @@ models:
     alias: qwen3-vl-chat-8b-instruct
     task: chat
     backend: vllm
+    compat_mode: vllm_native
     model_path: /nas_data/zhousj/qwen-vl
     dtype: bfloat16
     tensor_parallel_size: 1
@@ -25,6 +26,7 @@ models:
     alias: qwen3-32b
     task: chat
     backend: vllm
+    compat_mode: vllm_native
     model_path: /nas_data/models/Qwen/Qwen3-32B
     dtype: auto
     tensor_parallel_size: 1
@@ -56,6 +58,7 @@ models:
     alias: mineru
     task: chat
     backend: vllm
+    compat_mode: vllm_native
     model_path: /nas_data/zhousj/mineru
     dtype: auto
     tensor_parallel_size: 1
@@ -75,11 +78,15 @@ models:
       - multimodal
       - ocr
       - llm
+    vllm:
+      openai_serving:
+        enabled: true
 
   - name: qwen3-embedding-8b
     alias: qwen3-embedding-8b
     task: embedding
     backend: vllm
+    compat_mode: vllm_native
     model_path: /nas_data/models/Qwen/Qwen3-Embedding-8B
     dtype: bfloat16
     tensor_parallel_size: 1
@@ -119,6 +126,7 @@ models:
     alias: qwen3.5-9b
     task: chat
     backend: vllm
+    compat_mode: vllm_native
     model_path: /nas_data/models/Qwen/Qwen3.5-9B
     dtype: auto
     tensor_parallel_size: 1
@@ -128,7 +136,6 @@ models:
     gpu_memory_utilization: 0.7
     min_replicas: 1
     max_replicas: 1
-    compat_mode: strict_openai
     capabilities:
       - vision
     engine_kwargs:

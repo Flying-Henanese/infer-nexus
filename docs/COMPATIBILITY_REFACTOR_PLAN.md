@@ -134,6 +134,9 @@ What has been verified in code and against a remote instance:
 - a remote `qwen3-embedding-8b` instance was validated with:
   - `/v1/embeddings`
   - non-empty vector output
+  - `2026-06-02` follow-up validation confirmed that the model runs correctly in
+    `compat_mode: vllm_native` after completing the replica-local native
+    embeddings serving adapter path
 - a remote `bge-reranker` instance was validated with:
   - `/v1/rerank`
   - correct ranking for a simple factual pair
@@ -163,6 +166,23 @@ Operational guidance discovered during validation:
   - operationally, reasoning-enabled requests should budget completion tokens
     explicitly; otherwise the model may terminate inside reasoning without ever
     emitting the final answer
+- Additional `2026-06-02` runtime finding for `qwen3-embedding-8b`:
+  - switching the model to `compat_mode: vllm_native` exposed multiple missing
+    pieces in the local native embeddings serving integration rather than a
+    problem in vLLM itself
+  - the integration was fixed incrementally by:
+    - adding explicit initialization of the replica-local native embeddings
+      serving adapter during backend startup
+    - passing required constructor kwargs such as `request_logger=None` to
+      vLLM's `ServingEmbedding(...)`
+    - constructing concrete `EmbeddingCompletionRequest` objects instead of
+      trying to instantiate the `EmbeddingRequest` union type alias
+    - extending the shared engine-client compat proxy to adapt `encode(...)`
+      calls, including dropping unsupported kwargs like `trace_headers`
+    - defaulting `pooling_task="embed"` when the native serving stack reaches a
+      generic local `LLM.encode(...)`
+  - after those fixes, remote `/v1/embeddings` requests succeeded for both a
+    single string input and a list input with `encoding_format="float"`
 
 What remains before this plan can be called fully closed:
 
@@ -215,6 +235,21 @@ Validation summary:
   - multimodal image prompt verified
 - `qwen3-embedding-8b`
   - embeddings endpoint verified
+  - `2026-06-02` native-serving follow-up:
+    - startup initially failed because `ServingEmbedding.__init__()` required
+      `request_logger`
+    - request handling then failed because the integration tried to instantiate
+      the `EmbeddingRequest` union alias instead of a concrete
+      `EmbeddingCompletionRequest`
+    - request handling then failed again because the native serving stack passed
+      `trace_headers` into a local `LLM.encode(...)` that did not accept that
+      kwarg
+    - request handling then failed once more because generic `LLM.encode(...)`
+      required `pooling_task="embed"`
+    - after fixing those four compatibility gaps, remote `/v1/embeddings`
+      succeeded for:
+      - `{"model":"qwen3-embedding-8b","input":"hello world"}`
+      - `{"model":"qwen3-embedding-8b","input":["hello","world"],"encoding_format":"float"}`
 - `bge-reranker`
   - rerank endpoint verified
 - `mineru`

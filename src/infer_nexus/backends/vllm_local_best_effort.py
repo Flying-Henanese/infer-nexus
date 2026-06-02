@@ -444,7 +444,7 @@ class LocalBestEffortVLLMExecutor:
                         "Async vLLM multimodal chat requires image_url.url to be a string.",
                         code="unsupported_parameter",
                     )
-                image_assets.append(self._load_async_engine_image_asset(image_url))
+                image_assets.append(self.backend._load_async_engine_image_asset(image_url))
 
         if not image_assets:
             return None

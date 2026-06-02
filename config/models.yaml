@@ -30,7 +30,7 @@ models:
     model_path: /nas_data/models/Qwen/Qwen3-32B
     dtype: auto
     tensor_parallel_size: 1
-    max_model_len: 4096
+    max_model_len: 30000
     cpu_per_replica: 4
     gpu_per_replica: 0.9
     gpu_memory_utilization: 0.9

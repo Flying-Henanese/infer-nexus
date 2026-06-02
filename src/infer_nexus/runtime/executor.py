@@ -157,7 +157,7 @@ class RuntimeExecutor:
         try:
             replica = ModelRuntimeReplica(target.runtime_context)
             method = getattr(replica, method_name)
-            return await method(payload)
+            return await method(request_payload=payload)
         except BackendConfigurationError as exc:
             raise RuntimeExecutionError(str(exc), code="backend_misconfigured") from exc
 
@@ -172,7 +172,7 @@ class RuntimeExecutor:
         try:
             replica = ModelRuntimeReplica(target.runtime_context)
             method = getattr(replica, method_name)
-            return self._normalize_stream_result(method(payload))
+            return self._normalize_stream_result(method(request_payload=payload))
         except BackendConfigurationError as exc:
             raise RuntimeExecutionError(str(exc), code="backend_misconfigured") from exc
 
@@ -216,7 +216,7 @@ class RuntimeExecutor:
             )
 
         try:
-            response = remote_method.remote(payload)
+            response = remote_method.remote(request_payload=payload)
             return await self._await_handle_response(response)
         except RuntimeNotConnectedError:
             raise
@@ -288,7 +288,7 @@ class RuntimeExecutor:
             if stream_remote_method is None or not hasattr(stream_remote_method, "remote"):
                 stream_remote_method = remote_method
 
-            response = stream_remote_method.remote(payload)
+            response = stream_remote_method.remote(request_payload=payload)
             return self._normalize_stream_result(response)
         except RuntimeNotConnectedError:
             raise

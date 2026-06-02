@@ -136,6 +136,11 @@ models:
     gpu_memory_utilization: 0.7
     min_replicas: 1
     max_replicas: 1
+    deployment_config:
+      request_router_config:
+        request_router_class: ray.serve.llm.request_router.PrefixCacheAffinityRouter
+        request_router_kwargs:
+          imbalanced_threshold: 16
     capabilities:
       - vision
     engine_kwargs:

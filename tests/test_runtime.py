@@ -2212,6 +2212,36 @@ def test_openai_serving_engine_client_proxy_adapts_sync_llm_generate_signature()
     }
 
 
+def test_openai_serving_engine_client_proxy_adapts_sync_llm_encode_signature() -> None:
+    """Compat proxy should drop unsupported serving kwargs for sync LLM.encode."""
+    captured = {}
+
+    class FakeSyncLLM:
+        model_config = 'model-config'
+
+        async def encode(self, inputs, pooling_params=None):
+            captured['inputs'] = inputs
+            captured['pooling_params'] = pooling_params
+            return {'data': ['embedding']}
+
+    proxy = OpenAIServingEngineClientCompatProxy(FakeSyncLLM(), [])
+    result = proxy.encode(
+        'hello world',
+        'pooling',
+        trace_headers={'x-request-id': '1'},
+        priority=5,
+    )
+
+    async def collect() -> list[dict[str, list[str]]]:
+        return [item async for item in result]
+
+    assert asyncio.run(collect()) == [{'data': ['embedding']}]
+    assert captured == {
+        'inputs': 'hello world',
+        'pooling_params': 'pooling',
+    }
+
+
 def test_vllm_backend_initializes_openai_serving_adapter_via_dynamic_imports(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

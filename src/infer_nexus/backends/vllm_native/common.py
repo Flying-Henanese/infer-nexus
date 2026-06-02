@@ -33,31 +33,31 @@ class OpenAIServingEngineClientCompatProxy:
                 return bool(getattr(candidate, "errored"))
         return False
 
-    def generate(self, *args: Any, **kwargs: Any) -> Any:
-        def _wrap_iterable(iterable: Iterable[Any]) -> AsyncIterator[Any]:
-            async def iterator() -> AsyncIterator[Any]:
-                for item in iterable:
+    def _wrap_iterable(self, iterable: Iterable[Any]) -> AsyncIterator[Any]:
+        async def iterator() -> AsyncIterator[Any]:
+            for item in iterable:
+                yield item
+
+        return iterator()
+
+    def _wrap_awaitable(self, awaitable: Any) -> AsyncIterator[Any]:
+        async def iterator() -> AsyncIterator[Any]:
+            resolved = await awaitable
+            if hasattr(resolved, "__aiter__"):
+                async for item in resolved:
                     yield item
+                return
+            if isinstance(resolved, Iterable) and not isinstance(resolved, (bytes, str, dict)):
+                for item in resolved:
+                    yield item
+                return
+            yield resolved
 
-            return iterator()
+        return iterator()
 
-        def _wrap_awaitable(awaitable: Any) -> AsyncIterator[Any]:
-            async def iterator() -> AsyncIterator[Any]:
-                resolved = await awaitable
-                if hasattr(resolved, "__aiter__"):
-                    async for item in resolved:
-                        yield item
-                    return
-                if isinstance(resolved, Iterable) and not isinstance(resolved, (bytes, str, dict)):
-                    for item in resolved:
-                        yield item
-                    return
-                yield resolved
-
-            return iterator()
-
+    def _call_compatible_method(self, method_name: str, *args: Any, **kwargs: Any) -> Any:
         for candidate in [self._client, *self._fallback_clients]:
-            method = getattr(candidate, "generate", None)
+            method = getattr(candidate, method_name, None)
             if callable(method):
                 call_args = args
                 call_kwargs = kwargs
@@ -108,11 +108,19 @@ class OpenAIServingEngineClientCompatProxy:
                 if hasattr(result, "__aiter__"):
                     return result
                 if inspect.isawaitable(result):
-                    return _wrap_awaitable(result)
+                    return self._wrap_awaitable(result)
                 if isinstance(result, Iterable) and not isinstance(result, (bytes, str, dict)):
-                    return _wrap_iterable(result)
+                    return self._wrap_iterable(result)
                 return result
-        raise AttributeError("No compatible 'generate' method found on engine client candidates.")
+        raise AttributeError(
+            f"No compatible '{method_name}' method found on engine client candidates."
+        )
+
+    def generate(self, *args: Any, **kwargs: Any) -> Any:
+        return self._call_compatible_method("generate", *args, **kwargs)
+
+    def encode(self, *args: Any, **kwargs: Any) -> Any:
+        return self._call_compatible_method("encode", *args, **kwargs)
 
     def __getattr__(self, name: str) -> Any:
         if hasattr(self._client, name):

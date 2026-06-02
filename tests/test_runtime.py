@@ -1437,7 +1437,7 @@ def test_vllm_backend_initializes_native_embedding_serving_adapter(
 
     module_map = {
         'vllm.entrypoints.pooling.embed.protocol': types.SimpleNamespace(
-            EmbeddingRequest=FakeServingRequest
+            EmbeddingCompletionRequest=FakeServingRequest
         ),
         'vllm.entrypoints.pooling.embed.serving': types.SimpleNamespace(
             ServingEmbedding=FakeServingEmbeddingNative

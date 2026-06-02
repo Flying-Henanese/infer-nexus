@@ -1034,11 +1034,11 @@ class VLLMBackend(InferenceBackend):
     def _resolve_openai_serving_embedding_imports(self) -> tuple[type[Any], type[Any]]:
         candidates = [
             (
-                ("vllm.entrypoints.pooling.embed.protocol", "EmbeddingRequest"),
+                ("vllm.entrypoints.pooling.embed.protocol", "EmbeddingCompletionRequest"),
                 ("vllm.entrypoints.pooling.embed.serving", "ServingEmbedding"),
             ),
             (
-                ("vllm.entrypoints.openai.protocol", "EmbeddingRequest"),
+                ("vllm.entrypoints.openai.protocol", "EmbeddingCompletionRequest"),
                 ("vllm.entrypoints.pooling.embed.serving", "ServingEmbedding"),
             ),
         ]

@@ -19,6 +19,7 @@ class DeploymentConfig(BaseModel):
 
     autoscaling_config: dict[str, Any] = Field(default_factory=dict)
     ray_actor_options: dict[str, Any] = Field(default_factory=dict)
+    request_router_config: dict[str, Any] = Field(default_factory=dict)
 
 
 class ProxyAuthConfig(BaseModel):
@@ -154,6 +155,14 @@ class ModelConfig(BaseModel):
                     "vllm_native local vllm chat and embedding models require "
                     "vllm.openai_serving.enabled=true"
                 )
+
+        if self.deployment_config.request_router_config and (
+            self.backend != BackendType.VLLM or self.task != TaskType.CHAT
+        ):
+            raise ValueError(
+                "deployment_config.request_router_config is currently only supported for "
+                "local vllm chat models"
+            )
 
         if not self.model_path and not self.model_loading_config.model_id:
             raise ValueError("either model_path or model_loading_config.model_id must be set")

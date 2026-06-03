@@ -314,6 +314,18 @@ class FakeDeploymentMethod:
         return result
 
 
+class FakeKeywordOnlyDeploymentMethod:
+    """模拟仅接受关键字载荷的 Serve 远程方法。"""
+
+    def __init__(self, payload: dict) -> None:
+        self.payload = payload
+
+    async def remote(self, *, request_payload: dict) -> dict:
+        result = dict(self.payload)
+        result['payload'] = request_payload
+        return result
+
+
 class FakeDeploymentHandle:
     """模拟单个模型部署句柄。"""
 
@@ -352,6 +364,20 @@ class FakeDeploymentHandle:
                         'relevance_score': 0.99,
                     }
                 ],
+            }
+        )
+
+
+class FakeKeywordOnlyDeploymentHandle(FakeDeploymentHandle):
+    """模拟仅接受关键字请求载荷的部署句柄。"""
+
+    def __init__(self, deployment_name: str) -> None:
+        super().__init__(deployment_name)
+        self.chat_completion = FakeKeywordOnlyDeploymentMethod(
+            {
+                'status': 'ok',
+                'deployment': deployment_name,
+                'model': 'qwen3-chat',
             }
         )
 
@@ -472,6 +498,14 @@ class FakeServe:
         return FakeDeploymentHandle(deployment_name)
 
 
+class FakeKeywordOnlyServe:
+    """模拟只接受关键字 payload 的 Serve runtime。"""
+
+    def get_deployment_handle(self, deployment_name: str, app_name: str) -> FakeKeywordOnlyDeploymentHandle:
+        assert app_name.startswith('infer-nexus-model-')
+        return FakeKeywordOnlyDeploymentHandle(deployment_name)
+
+
 def test_dispatch_chat_uses_serve_handle_in_serve_mode() -> None:
     """serve 模式下 chat 分发应通过 deployment handle 执行。"""
     resolver = ServeDeploymentHandleResolver(serve=FakeServe())
@@ -488,6 +522,23 @@ def test_dispatch_chat_uses_serve_handle_in_serve_mode() -> None:
     assert response.model == 'qwen3-chat'
     assert 'serve chat response from deployment' in str(response.choices[0].message.content)
     assert 'model-qwen3-32b-instruct' in str(response.choices[0].message.content)
+
+
+def test_dispatch_chat_uses_keyword_request_payload_when_invoking_serve_handle() -> None:
+    """Serve chat dispatch should send request payload as an explicit keyword argument."""
+    resolver = ServeDeploymentHandleResolver(serve=FakeKeywordOnlyServe())
+    executor = RuntimeExecutor(mode='serve', handle_resolver=resolver)
+    registry, _, dispatcher = make_dispatcher(executor)
+    request = ChatCompletionsRequest(
+        model='qwen3-chat',
+        messages=[{'role': 'user', 'content': 'hello'}],
+    )
+
+    response = asyncio.run(dispatcher.dispatch_chat(registry.get('qwen3-chat'), request))
+
+    assert response.object == 'chat.completion'
+    assert response.model == 'qwen3-chat'
+    assert 'serve chat response from deployment' in str(response.choices[0].message.content)
 
 
 def test_dispatch_chat_passthrough_openai_payload_without_collapsing_choices() -> None:

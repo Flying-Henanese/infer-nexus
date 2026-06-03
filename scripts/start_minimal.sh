@@ -39,6 +39,9 @@ INSTALL=1
 RELOAD=0
 CUDA_VISIBLE_DEVICES_VALUE="0,1,2,3"
 NUM_GPUS="4"
+PYTHON_BIN="${PYTHON_BIN:-python}"
+RAY_BIN="${RAY_BIN:-ray}"
+UV_BIN="${UV_BIN:-uv}"
 
 usage() {
   cat <<'EOF'
@@ -58,6 +61,11 @@ Options:
 Examples:
   scripts/start_minimal.sh --cuda-visible-devices 0,1,2,3 --num-gpus 4
   scripts/start_minimal.sh --no-install --ray-address auto
+
+Environment overrides:
+  PYTHON_BIN=/path/to/python  Python interpreter for gateway and Serve runtime
+  RAY_BIN=/path/to/ray        Ray CLI used for `ray status` and `ray start`
+  UV_BIN=/path/to/uv          uv binary used only for optional dependency sync
 EOF
 }
 
@@ -109,26 +117,29 @@ if [[ -n "${CUDA_VISIBLE_DEVICES_VALUE}" ]]; then
   export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES_VALUE}"
 fi
 
-# `uv` is the package manager and runner used by this repo. Without it we cannot
-# install dependencies or launch the Python entrypoints in the expected env.
-if ! command -v uv >/dev/null 2>&1; then
-  echo "Missing 'uv' in PATH. Install uv first." >&2
-  exit 1
-fi
-
 # Optionally sync the project environment before startup.
 # This ensures `ray`, `serve`, `vllm`, and any extras are available.
 if [[ "${INSTALL}" -eq 1 ]]; then
+  if ! "${UV_BIN}" --version >/dev/null 2>&1; then
+    echo "Missing '${UV_BIN}' for dependency sync. Install uv first or pass --no-install." >&2
+    exit 1
+  fi
   if [[ "${INSTALL_ARTIFACTS}" -eq 1 ]]; then
-    uv sync --preview-features extra-build-dependencies --extra serve --extra vllm --extra artifacts
+    "${UV_BIN}" sync --preview-features extra-build-dependencies --extra serve --extra vllm --extra artifacts
   else
-    uv sync --preview-features extra-build-dependencies --extra serve --extra vllm
+    "${UV_BIN}" sync --preview-features extra-build-dependencies --extra serve --extra vllm
   fi
 fi
 
+# The runtime launcher and gateway should both use the same selected Python interpreter.
+if ! "${PYTHON_BIN}" -V >/dev/null 2>&1; then
+  echo "Configured PYTHON_BIN='${PYTHON_BIN}' is not executable." >&2
+  exit 1
+fi
+
 # Ray is a hard dependency for the runtime deployment step.
-if ! command -v ray >/dev/null 2>&1; then
-  echo "Missing 'ray' in PATH. Did you run: uv sync --extra serve ?" >&2
+if ! "${RAY_BIN}" --version >/dev/null 2>&1; then
+  echo "Configured RAY_BIN='${RAY_BIN}' is not executable. Did you install ray in the selected environment?" >&2
   exit 1
 fi
 
@@ -137,7 +148,7 @@ fi
 # there is no live Ray head to talk to.
 ray_is_running() {
   # "ray status" exits non-zero if it can't connect to a running head.
-  ray status >/dev/null 2>&1
+  "${RAY_BIN}" status >/dev/null 2>&1
 }
 
 # Start a local Ray head only if we cannot already talk to one.
@@ -162,7 +173,7 @@ EOF
 
   # Ray prints useful diagnostics during startup; capture them in the Ray log.
   # Note: Ray daemonizes, so the command itself returns quickly after spawn.
-  (ray "${args[@]}" >"${LOG_DIR}/ray.log" 2>&1) || {
+  (exec "${RAY_BIN}" "${args[@]}" >"${LOG_DIR}/ray.log" 2>&1) || {
     echo "Failed to start Ray head. See ${LOG_DIR}/ray.log" >&2
     exit 1
   }
@@ -240,7 +251,7 @@ if pid_is_running "${SERVE_PID_FILE}"; then
   echo "Serve runtime already running (pid $(cat "${SERVE_PID_FILE}"))."
 else
   (
-    exec uv run python scripts/run_serve_runtime.py \
+    exec "${PYTHON_BIN}" scripts/run_serve_runtime.py \
       --settings "${SETTINGS}" \
       --ray-address "${RAY_ADDRESS}" \
       --proxy-location "${PROXY_LOCATION}"
@@ -265,13 +276,13 @@ if pid_is_running "${GATEWAY_PID_FILE}"; then
   echo "Gateway already running (pid $(cat "${GATEWAY_PID_FILE}"))."
 else
   # Build the gateway command first so we can add `--reload` only when asked.
-  gateway_args=(python scripts/run_gateway.py --settings "${SETTINGS}")
+  gateway_args=("${PYTHON_BIN}" scripts/run_gateway.py --settings "${SETTINGS}")
   if [[ "${RELOAD}" -eq 1 ]]; then
     gateway_args+=(--reload)
   fi
 
   # Start the gateway in the background and capture its stdout/stderr in a log.
-  (exec uv run "${gateway_args[@]}") >"${LOG_DIR}/gateway.log" 2>&1 &
+  (exec "${gateway_args[@]}") >"${LOG_DIR}/gateway.log" 2>&1 &
   echo $! >"${GATEWAY_PID_FILE}"
 fi
 

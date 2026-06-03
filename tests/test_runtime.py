@@ -342,6 +342,44 @@ def test_build_serve_bindings_from_fake_serve(
     )
 
 
+def test_build_serve_bindings_include_request_router_config_for_local_chat_model() -> None:
+    """Chat deployments should forward explicit Ray request-router config to Serve."""
+    builder = ServeApplicationBuilder(model_store=LocalModelStore('models'))
+
+    registry = ModelRegistry(
+        ModelCatalogFile(
+            models=[
+                ModelConfig(
+                    name='qwen3.5-9b',
+                    alias='qwen3.5-9b',
+                    task=TaskType.CHAT,
+                    backend='vllm',
+                    model_path='Qwen/Qwen3.5-9B',
+                    tensor_parallel_size=1,
+                    cpu_per_replica=2,
+                    gpu_per_replica=1,
+                    min_replicas=1,
+                    max_replicas=2,
+                    deployment_config={
+                        'request_router_config': {
+                            'request_router_class': 'ray.serve.llm.request_router.PrefixCacheAffinityRouter',
+                            'request_router_kwargs': {'imbalanced_threshold': 16},
+                        }
+                    },
+                )
+            ]
+        )
+    )
+
+    bindings = builder.build_serve_bindings(registry, serve=FakeServe())
+
+    binding = bindings['qwen3.5-9b']
+    assert binding['deployment_kwargs']['request_router_config'] == {
+        'request_router_class': 'ray.serve.llm.request_router.PrefixCacheAffinityRouter',
+        'request_router_kwargs': {'imbalanced_threshold': 16},
+    }
+
+
 def test_deployment_factory_applies_llmconfig_style_overrides() -> None:
     """Deployment config should be able to override autoscaling and actor options."""
     spec = ServeApplicationBuilder(model_store=LocalModelStore('models')).deployment_factory.build_spec(
@@ -373,6 +411,31 @@ def test_deployment_factory_applies_llmconfig_style_overrides() -> None:
     }
     assert spec.ray_actor_options['num_cpus'] == 6
     assert spec.ray_actor_options['num_gpus'] == 1
+
+
+def test_request_router_config_is_rejected_for_non_local_chat_models() -> None:
+    """Request-router config should remain scoped to local chat deployments for now."""
+    with pytest.raises(
+        ValueError,
+        match="deployment_config.request_router_config is currently only supported for local vllm chat models",
+    ):
+        ModelConfig(
+            name='bge-reranker',
+            alias='bge-reranker',
+            task=TaskType.RERANK,
+            backend='vllm',
+            model_path='BAAI/bge-reranker-v2-m3',
+            tensor_parallel_size=1,
+            cpu_per_replica=2,
+            gpu_per_replica=1,
+            min_replicas=1,
+            max_replicas=1,
+            deployment_config={
+                'request_router_config': {
+                    'request_router_class': 'ray.serve.llm.request_router.PrefixCacheAffinityRouter',
+                }
+            },
+        )
 
 
 def test_deployment_factory_maps_npu_resources_to_custom_ray_resource() -> None:

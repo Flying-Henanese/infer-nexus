@@ -25,6 +25,7 @@ class DeploymentSpec:
     max_model_len: int | None
     autoscaling_config: dict[str, int] = field(default_factory=dict)
     ray_actor_options: dict[str, Any] = field(default_factory=dict)
+    request_router_config: dict[str, Any] = field(default_factory=dict)
 
 
 class ModelRuntimeReplica:
@@ -50,9 +51,27 @@ class ModelRuntimeReplica:
             return VLLMBackend(self.runtime_context["runtime_spec"])
         raise ValueError(f"unsupported backend '{backend_name}'")
 
-    async def chat_completion(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _resolve_request_payload(
+        self,
+        request_payload: dict[str, Any] | None = None,
+        *,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        resolved_payload = request_payload if request_payload is not None else payload
+        if resolved_payload is None:
+            raise TypeError("request_payload is required")
+        return resolved_payload
+
+    async def chat_completion(
+        self,
+        request_payload: dict[str, Any] | None = None,
+        *,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """处理 chat completion 负载。"""
-        request = ChatCompletionsRequest.model_validate(payload)
+        request = ChatCompletionsRequest.model_validate(
+            self._resolve_request_payload(request_payload, payload=payload)
+        )
         try:
             response = await self.backend.chat_completion(
                 self.runtime_context["runtime_spec"],
@@ -67,9 +86,16 @@ class ModelRuntimeReplica:
             return response
         return {"status": "ok", **response}
 
-    async def chat_completion_stream(self, payload: dict[str, Any]) -> AsyncIterator[dict[str, Any] | bytes | str]:
+    async def chat_completion_stream(
+        self,
+        request_payload: dict[str, Any] | None = None,
+        *,
+        payload: dict[str, Any] | None = None,
+    ) -> AsyncIterator[dict[str, Any] | bytes | str]:
         """处理 streaming chat completion 负载。"""
-        request = ChatCompletionsRequest.model_validate(payload)
+        request = ChatCompletionsRequest.model_validate(
+            self._resolve_request_payload(request_payload, payload=payload)
+        )
         try:
             async for chunk in self.backend.chat_completion_stream(
                 self.runtime_context["runtime_spec"],
@@ -86,9 +112,16 @@ class ModelRuntimeReplica:
         """Detect full OpenAI chat responses that should pass through unchanged."""
         return payload.get("object") == "chat.completion" and isinstance(payload.get("choices"), list)
 
-    async def embedding(self, payload: dict[str, Any]) -> dict[str, Any]:
+    async def embedding(
+        self,
+        request_payload: dict[str, Any] | None = None,
+        *,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """处理 embedding 负载。"""
-        request = EmbeddingRequest.model_validate(payload)
+        request = EmbeddingRequest.model_validate(
+            self._resolve_request_payload(request_payload, payload=payload)
+        )
         try:
             response = await self.backend.embedding(
                 self.runtime_context["runtime_spec"],
@@ -101,9 +134,16 @@ class ModelRuntimeReplica:
             raise RuntimeExecutionError(str(exc), code="backend_misconfigured") from exc
         return {"status": "ok", **response}
 
-    async def rerank(self, payload: dict[str, Any]) -> dict[str, Any]:
+    async def rerank(
+        self,
+        request_payload: dict[str, Any] | None = None,
+        *,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """处理 rerank 负载。"""
-        request = RerankRequest.model_validate(payload)
+        request = RerankRequest.model_validate(
+            self._resolve_request_payload(request_payload, payload=payload)
+        )
         try:
             response = await self.backend.rerank(
                 self.runtime_context["runtime_spec"],
@@ -196,12 +236,27 @@ class DeploymentFactory:
             max_model_len=model.max_model_len,
             autoscaling_config=autoscaling_config,
             ray_actor_options=ray_actor_options,
+            request_router_config=dict(model.deployment_config.request_router_config),
         )
+
+    def build_request_router_config(self, request_router_config: dict[str, Any]) -> Any:
+        """Materialize request router config when Ray Serve is available."""
+        if not request_router_config:
+            return None
+        try:
+            from ray.serve.config import RequestRouterConfig
+        except ImportError:
+            return dict(request_router_config)
+        return RequestRouterConfig(**request_router_config)
 
     def build_serve_deployment_kwargs(self, spec: DeploymentSpec) -> dict[str, Any]:
         """Produce kwargs passed to `serve.deployment(...)`."""
-        return {
+        kwargs = {
             "name": spec.deployment_name,
             "ray_actor_options": dict(spec.ray_actor_options),
             "autoscaling_config": dict(spec.autoscaling_config),
         }
+        request_router_config = self.build_request_router_config(spec.request_router_config)
+        if request_router_config is not None:
+            kwargs["request_router_config"] = request_router_config
+        return kwargs

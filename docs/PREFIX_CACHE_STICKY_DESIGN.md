@@ -1,593 +1,345 @@
-# infer-nexus Prefix-Cache Sticky Routing Design Draft
+# infer-nexus Prefix Cache Affinity Design Note
 
 ## 1. Goal
 
-Design a prefix-cache-friendly sticky routing strategy for `infer-nexus` when requests are proxied to self-hosted upstream Ray/vLLM replicas.
+Re-evaluate how `infer-nexus` should improve KV/prefix cache locality for chat models.
 
-The primary objective is:
+Updated conclusion:
 
-- increase prefix cache locality
-- improve cache hit probability for repeated multi-turn requests
-- preserve OpenAI-compatible request semantics
-- avoid hard pinning that can overload one upstream replica
+- do not continue with a gateway-owned sticky-session design
+- do not treat `session_id` stickiness as the primary solution
+- prefer Ray Serve's replica-level prefix-cache-aware routing as the first-class direction
+- keep the optimization scope limited to `task: chat`
 
-This design is intentionally scoped to routing affinity for cache locality.
-It does not introduce server-side conversation state management.
-
----
-
-## 2. Background
-
-In the current architecture, `infer-nexus` acts as a gateway:
-
-```text
-Client
-  -> infer-nexus gateway (/v1/*)
-      -> model routing by request.model
-          -> upstream OpenAI-compatible vLLM endpoints
-              -> Ray Serve / vLLM replicas
-```
-
-Each upstream vLLM replica maintains its own KV cache and its own prefix cache locality.
-There is no cache sharing across replicas.
-
-This means:
-
-- routing related requests to the same replica can improve prefix cache reuse
-- routing related requests to different replicas reduces cache locality
-- strong stickiness can create hotspots and hurt tail latency
-
-So the design target is not "always send to the same replica".
-The design target is "prefer the same cache island unless health or load says otherwise".
+This document records the updated design position after investigating Ray Serve and vLLM capabilities.
 
 ---
 
-## 3. Non-Goals
+## 2. Why The Previous Sticky-Session Draft Is No Longer Preferred
 
-This draft does not attempt to solve:
+The earlier design direction assumed `infer-nexus` should implement its own affinity layer using conversation or prefix-derived hashes at the gateway/proxy layer.
 
-- cross-session shared cache reuse by default
-- server-side chat memory persistence
-- sticky routing for local `vllm` backend inside one Ray Serve deployment
-- exact replica-level addressing inside Ray Serve internal scheduling
-- stream resume or mid-stream failover
-
-The first implementation target is the `vllm_openai_proxy` backend only.
-
----
-
-## 4. Design Principles
-
-1. Affinity should be soft, not absolute.
-2. Routing should remain stateless where possible.
-3. Isolation boundaries must be stronger than cache-sharing boundaries.
-4. Sticky decisions should happen before proxying upstream.
-5. Streaming requests may select an upstream once, but must not switch mid-stream.
-6. Overload protection is more important than preserving affinity.
-
----
-
-## 5. Why Prefix-Hash Routing
-
-For this project, prefix-hash routing is a better fit than plain session stickiness.
+That design is no longer preferred for this project.
 
 Reasons:
 
-- the optimization target is prefix cache locality, not server-side session state
-- the current system is already request-oriented and stateless at the gateway layer
-- multiple gateway replicas can independently compute the same routing result
-- it avoids a centralized sticky table for the common path
+- the real optimization target is vLLM prefix/KV cache reuse, not business-session stickiness
+- `session_id` is only an indirect proxy for cache locality
+- Ray Serve already provides a more direct routing abstraction for this exact problem
+- vLLM cache locality is replica-local, so replica-level routing is more fundamental than gateway-level sticky bookkeeping
+- a gateway-owned sticky table or gateway-owned prefix-hash routing would duplicate logic that is better placed closer to replica scheduling
 
-Compared with conversation-only stickiness:
-
-- conversation stickiness is simpler
-- prefix-hash routing is more aligned with cache locality
-- conversation stickiness can still be used as an input signal when available
-
-This draft therefore uses prefix-hash routing as the primary mechanism.
+The old session-oriented approach is therefore demoted from "planned implementation direction" to "fallback idea only if Ray-native routing proves unusable".
 
 ---
 
-## 6. Scope of Cache Sharing
+## 3. Updated Architectural Position
 
-Default position:
-
-- do not assume cross-session cache sharing is desirable
-- do not intentionally merge unrelated users or tenants into one cache domain
-- only allow affinity within a defined isolation boundary
-
-Recommended cache-sharing boundary:
-
-- `tenant/workspace + model`
-
-This means a prefix fingerprint may be reused for routing decisions only within the same isolation domain.
-
-Suggested rule:
-
-- same tenant + same model + similar prefix -> eligible for the same upstream preference
-- different tenant -> never intentionally share prefix affinity
-
-This reduces both accidental cache interference and side-channel exposure risk.
-
----
-
-## 7. Routing Layer Placement
-
-The affinity logic should be implemented in the gateway proxy routing layer, not in Ray Serve internal replica routing.
-
-Recommended routing flow:
+For local `backend: vllm` chat models served through Ray Serve, the most promising route is:
 
 ```text
-request
-  -> resolve model
-  -> load upstream pool for this model
-  -> derive affinity context
-  -> compute prefix fingerprint
-  -> rank upstream instances by affinity score
-  -> filter by health / enabled / overload
-  -> select best candidate
-  -> proxy request
+Client
+  -> infer-nexus FastAPI gateway
+  -> RuntimeDispatcher / RuntimeExecutor
+  -> Ray Serve deployment handle
+  -> Ray Serve replica-level request router
+  -> chosen vLLM replica
+  -> vLLM APC / prefix cache reuse
 ```
 
-Why not place it inside Ray Serve deployment routing:
-
-- current local `vllm` path uses deployment handles, not replica-addressable routing
-- Ray Serve internal scheduling is not exposed here as stable replica affinity control
-- upstream proxy mode already gives a natural instance-selection layer
-
-In practice, the gateway should target distinct upstream vLLM instances or stable upstream instance endpoints.
-
-If `upstream_base_url` points to an external load balancer instead of a concrete instance, affinity value will be reduced.
-
----
-
-## 8. Affinity Model
-
-The affinity key should be derived from:
-
-- isolation boundary
-- model identity
-- normalized prefix signal
-
-Recommended logical affinity key:
+This is more direct than:
 
 ```text
-affinity_key = hash(
-  tenant_id
-  + model_name
-  + prefix_fingerprint
-)
+Client
+  -> infer-nexus
+  -> gateway-owned sticky routing
+  -> manually selected upstream instance
 ```
 
-Optional augmentation:
-
-- if a client provides a stable conversation id, it may be added
-- if no tenant id exists, use the strongest available authenticated principal id
-
-Important:
-
-- do not use raw prompt text as a routing key
-- do not log raw prefix material
-- only log hashes or short opaque identifiers
+because the actual cache island lives inside the vLLM replica, not at the HTTP gateway boundary.
 
 ---
 
-## 9. Prefix Fingerprint Strategy
+## 4. Scope
 
-### 9.1 Objective
+This design note applies only to:
 
-The prefix fingerprint should approximate "same cache-relevant prefix" without performing expensive deep parsing or tokenization in the gateway.
+- `task: chat`
+- local `backend: vllm`
+- Ray Serve managed replicas
+- vLLM prefix/KV cache locality
 
-### 9.2 First-Version Strategy
+This design note does not apply to:
 
-For `chat/completions`, compute the fingerprint from stable early prompt structure:
+- `embedding`
+- `rerank`
+- `mineru`-style one-shot multimodal parsing workloads
+- `vllm_openai_proxy` as the primary target
 
-- `model`
-- normalized `system` messages
-- first `K` messages, where `K` is small
-- optional tool schema summary
-- optional response-format shape
+Current position:
 
-Normalization rules:
-
-- strip known volatile fields
-- collapse repeated whitespace
-- ignore timestamps, trace ids, random request ids
-- ignore temporary file URLs if they are not part of semantic prompt identity
-
-Recommended first version:
-
-- use only `system` content + tool schema summary + first 1-2 stable messages
-- avoid full-payload hashing
-- avoid tokenizer-dependent fingerprinting at the gateway
-
-### 9.3 Fingerprint Safety Notes
-
-The fingerprint should be:
-
-- one-way hashed
-- non-reversible in practice
-- never emitted with raw source material in logs
-
-This does not eliminate side-channel risk entirely, but it significantly reduces accidental leakage from observability.
+- only chat models are considered worth cache-affinity work
+- non-chat tasks should continue using standard routing unless a separate workload-specific reason appears later
 
 ---
 
-## 10. Upstream Pool Model
+## 5. What Ray Serve And vLLM Already Provide
 
-This design assumes each proxy model can define multiple upstream instances.
+### 5.1 Ray Serve
 
-Example:
+Ray Serve already has a replica-level routing layer and a built-in `PrefixCacheAffinityRouter` in the Ray Serve LLM stack.
 
-```yaml
-proxy_config:
-  upstreams:
-    - name: mineru-a
-      base_url: http://10.0.0.21:8001/v1
-      enabled: true
-      weight: 1
-    - name: mineru-b
-      base_url: http://10.0.0.22:8001/v1
-      enabled: true
-      weight: 1
-```
+Why this matters:
 
-Each upstream should represent a stable cache island.
+- cache locality is created or lost at replica selection time
+- the router works at the same layer where replica choice is actually made
+- this is a better fit than trying to emulate replica affinity from the gateway
 
-Best case:
+The key design implication is:
 
-- one upstream entry maps to one vLLM engine process or one tightly controlled Ray Serve app endpoint
+- if Ray Serve's prefix-cache-aware routing can be used in our deployment topology, it should be preferred over custom gateway sticky routing
 
-Less ideal:
+### 5.2 vLLM
 
-- one upstream entry points to a separate load balancer that may still redistribute requests internally
+vLLM APC/prefix caching is based on prompt-prefix reuse, not session identity.
 
-The more stable the instance identity, the higher the cache-locality benefit.
+Implications:
+
+- `session_id` is not a native cache key inside vLLM
+- routing requests by prefix similarity is more faithful to the real optimization target than routing by conversation ID alone
+- `cache_salt` is a cache-isolation control, not a sticky-session mechanism
 
 ---
 
-## 11. Routing Algorithm
+## 6. Core Design Decision
 
-Recommended algorithm:
+The primary direction for future investigation is:
 
-- use Rendezvous Hashing over the enabled and healthy upstream set
+- use Ray Serve's prefix-cache-aware routing rather than implementing session-based sticky routing in `infer-nexus`
 
-Why:
+Restated more concretely:
 
-- deterministic across multiple gateway replicas
-- low remapping churn when upstream membership changes
-- no shared in-memory sticky map required for the common path
+1. `infer-nexus` should continue owning northbound OpenAI-compatible APIs and model selection.
+2. Ray Serve should be treated as the preferred layer for replica-level cache-affinity decisions.
+3. vLLM should remain responsible for the actual APC/prefix-cache behavior inside each replica.
 
-Selection flow:
+This is a cleaner responsibility split than trying to make the gateway itself simulate cache-affinity ownership.
 
-1. Build candidate upstream list for the target model.
-2. Remove disabled upstreams.
-3. Remove unhealthy upstreams unless no healthy upstream remains.
-4. Compute affinity score for each candidate:
+---
+
+## 7. What This Replaces
+
+The following ideas from the earlier draft are no longer preferred:
+
+- gateway-owned session stickiness
+- conversation-ID-driven affinity as the main mechanism
+- gateway-computed prefix fingerprints as the primary routing primitive
+- a custom upstream-instance rendezvous hash design as the default future path
+- treating `vllm_openai_proxy` as the first implementation target for prefix-cache affinity
+
+These are not forbidden forever, but they are no longer the recommended baseline.
+
+---
+
+## 8. Current Fit With infer-nexus
+
+### 8.1 What already aligns well
+
+The current `infer-nexus` architecture already routes local `backend: vllm` requests through Ray Serve deployment handles:
 
 ```text
-score = hash(affinity_key + upstream.name)
+FastAPI gateway
+  -> RuntimeDispatcher
+  -> RuntimeExecutor
+  -> handle.chat_completion.remote(payload)
 ```
 
-5. Rank by score.
-6. If load-shedding is enabled, reject overloaded candidates.
-7. Select the highest-ranked acceptable candidate.
-8. If no affinity key is available, fall back to standard routing such as round-robin.
+This is good news because:
+
+- replica selection already happens on the Ray Serve side
+- the current stack does not need to invent a fake "replica address" abstraction
+- the right routing layer is already present in the execution path
+
+### 8.2 What does not line up yet
+
+The current codebase does not yet configure any Serve request router for model deployments.
+
+Today, the local `vllm` path:
+
+- creates one deployment per model
+- binds `ModelRuntimeReplica`
+- gets a deployment handle by app/deployment name
+- calls replica methods with a dict payload
+
+What is missing:
+
+- deployment-level `RequestRouterConfig`
+- a verified integration of `PrefixCacheAffinityRouter`
+- proof that the built-in router correctly understands our current request shape
+
+So the situation is:
+
+- the architecture is compatible in principle
+- the integration is not yet proven in this codebase
 
 ---
 
-## 12. Soft Affinity and Overload Protection
+## 9. Known Integration Risks
 
-Hard stickiness is not recommended.
+These are the main reasons this should still be treated as an investigation, not as a closed implementation plan.
 
-Instead, affinity should be honored only when the preferred upstream is:
+### 9.1 Request-shape compatibility is not yet proven
 
-- enabled
-- healthy
-- below overload threshold
+Ray Serve's built-in prefix-aware routing is documented in the Ray Serve LLM stack.
 
-Suggested break conditions:
+Our current path does not use Ray Serve's standard OpenAI ingress objects.
+Instead, `infer-nexus` serializes `ChatCompletionsRequest` into a plain payload dict and calls deployment methods directly.
 
-- upstream health check failed
-- recent timeout/error rate exceeded threshold
-- in-flight request count exceeded threshold
-- moving average latency exceeded threshold
+Open question:
 
-Suggested behavior:
+- can `PrefixCacheAffinityRouter` derive useful prefix-affinity signals from our current handle-call payload shape without additional adaptation?
 
-- `affinity honored`: preferred upstream is selected
-- `affinity broken`: a different healthy upstream is selected
-- `affinity unavailable`: no valid affinity key, use standard routing
+This is the most important unresolved risk.
 
-This is the main protection against "all similar tool requests collapse onto one replica".
+### 9.2 API maturity risk
 
----
+Ray Serve request-router APIs are still relatively new and documented with evolving/alpha-style caveats.
 
-## 13. Streaming Behavior
+Implication:
 
-For `stream=true` requests:
+- even if the design direction is correct, we should expect integration details to be somewhat version-sensitive
 
-- choose upstream once before connection establishment
-- do not switch upstream mid-stream
-- if stream setup fails before any bytes are returned, retry policy may choose another upstream
-- if stream breaks after bytes are emitted, return failure to the client; no transparent migration
+### 9.3 Current code path is custom, not Ray Serve LLM stock ingress
 
-Reason:
+We use:
 
-- mid-stream failover breaks response semantics
-- prefix-cache affinity is only meaningful at stream start
+- custom FastAPI gateway
+- custom dispatcher/executor
+- custom replica methods
 
----
+We do not use:
 
-## 14. Isolation and Security Analysis
+- Ray Serve LLM's stock ingress path end-to-end
 
-### 14.1 Why Cross-Session Sharing Is Not the Default
+Implication:
 
-Cross-session sharing can be low-value and higher-risk when:
-
-- prompt similarity across sessions is weak
-- tenant isolation matters
-- request timing or cache-hit behavior may leak weak signals
-
-### 14.2 Security Risks if Isolation Is Too Broad
-
-Potential risks:
-
-- cache-sharing boundary does not align with tenant boundary
-- routing/latency side channels reveal that a similar prefix was recently used
-- explicit cache identifiers, if introduced later, are not access-controlled strongly enough
-
-### 14.3 Recommended Boundary
-
-Affinity computation should never intentionally cross:
-
-- tenant
-- workspace
-- project
-
-depending on the platform's true security boundary.
-
-### 14.4 Recommended Safe Inputs
-
-Good candidates for stable prefix reuse:
-
-- common system prompts
-- fixed tool schemas
-- standardized response-format directives
-- common app-level instructions within one tenant
-
-Avoid treating these as shareable across sessions without extra care:
-
-- user-uploaded files
-- PII-heavy prompts
-- secrets in system instructions
-- tenant-specific private context mixed into prompt prefixes
+- "Ray has this feature" does not automatically mean "we can enable it without adaptation"
 
 ---
 
-## 15. Request Metadata Contract
+## 10. Updated Non-Goals
 
-This design should not require body changes.
+This design note does not propose:
 
-Recommended inputs:
-
-- authenticated principal identity
-- tenant/workspace id
-- model
-- optional stable conversation id from request header
-
-Suggested optional header:
-
-```text
-X-Conversation-ID
-```
-
-This header is not required for prefix-hash routing, but it can improve stability for true multi-turn conversations.
-
-The gateway should not require cookies for affinity.
+- implementing a new session-based sticky router in the gateway
+- introducing gateway-managed sticky tables
+- requiring `session_id` as a new first-class API field
+- treating `session_id` as the canonical cache-affinity key
+- extending affinity logic to embedding or rerank
+- changing the strict OpenAI request/response compatibility strategy
 
 ---
 
-## 16. Observability
+## 11. Interim Recommendation
 
-The system must expose enough data to validate whether affinity helps or harms.
+Until the Ray-native path is validated, the correct position is:
 
-Recommended log fields:
+- do not implement the original session-sticky design
+- do not add speculative `session_id` plumbing just to prepare for sticky routing
+- keep the design centered on investigating Ray Serve prefix-aware routing first
 
-- `request_id`
-- `public_model`
-- `tenant_scope_hash`
-- `prefix_fingerprint_hash`
-- `affinity_enabled`
-- `affinity_candidate_count`
-- `selected_upstream`
-- `affinity_honored`
-- `affinity_break_reason`
-- `status_code`
-- `latency_ms`
-- `stream`
+This avoids building a second-best routing system before confirming whether the first-class one is viable.
 
-Recommended metrics:
+---
 
-- `proxy_requests_total`
-- `proxy_affinity_requests_total`
-- `proxy_affinity_honored_total`
-- `proxy_affinity_broken_total`
-- `proxy_affinity_break_reason_total`
-- `proxy_upstream_selected_total{model,instance}`
-- `proxy_upstream_inflight{model,instance}`
-- `proxy_prefix_cache_affinity_enabled_total{model}`
+## 12. Investigation Checklist
 
-The key success metrics are not just routing statistics.
-They should also include:
+The next stage should answer these questions in order.
+
+### 12.1 Can our deployments attach a Serve request router?
+
+Need to verify:
+
+- deployment-level configuration shape in the exact Ray version we run
+- whether `RequestRouterConfig` can be applied to our one-model-per-deployment topology
+
+### 12.2 Can `PrefixCacheAffinityRouter` work with our current request path?
+
+Need to verify:
+
+- whether it can inspect the payload produced by `handle.chat_completion.remote(payload)`
+- whether the current payload contains enough stable prompt structure for useful routing decisions
+
+### 12.3 If not, what is the smallest adaptation layer?
+
+Possible outcomes:
+
+- no adaptation needed
+- minor payload-shape adaptation before handle invocation
+- custom thin router needed for our payload format
+
+The preferred fallback, if needed, is:
+
+- a thin Ray-side prefix-aware router adapted to our payload format
+
+The non-preferred fallback is:
+
+- reviving the old gateway-owned sticky-session design
+
+### 12.4 Does it materially help real chat workloads?
+
+Need to measure:
 
 - TTFT
 - prefill latency
 - p95/p99 latency
-- upstream timeout rate
-- load skew by instance
+- timeout/error rate
+- cache-locality-related improvements under repeated chat turns
 
 ---
 
-## 17. Failure and Recovery Semantics
+## 13. If Ray-Native Routing Proves Unusable
 
-Recommended rules:
+Only if the Ray-native route fails for structural reasons should we reopen a custom design.
 
-1. If preferred upstream is unhealthy before send, select the next-ranked healthy upstream.
-2. If non-streaming request fails with connect/read timeout before response, retry may pick the next-ranked candidate.
-3. If upstream returns a valid application-level response, do not second-guess it for affinity reasons.
-4. If all upstreams are unavailable, return gateway error.
-5. Do not attempt automatic fallback from proxy backend to local `vllm` backend.
+If that happens, the fallback order should be:
 
-This keeps semantics predictable and avoids "surprising success paths" that weaken correctness.
+1. custom Ray-side router adapted to our payload shape
+2. only then reconsider gateway-owned affinity logic
 
----
-
-## 18. Hotspot Risk Analysis
-
-### Concern
-
-If many similar tool requests share the same prefix structure, prefix-hash routing may concentrate them on one upstream.
-
-### Reality
-
-Yes, this can happen.
-
-This is not a reason to avoid affinity entirely.
-It is a reason to keep affinity soft and to add overload escape hatches.
-
-### Mitigations
-
-1. Apply overload thresholds per upstream.
-2. Break affinity when inflight or latency thresholds are exceeded.
-3. Keep upstream pool size > 1 for sticky-enabled models.
-4. Consider weighted rendezvous hashing if instances have different capacities.
-5. Consider splitting extremely hot traffic classes at the product level rather than forcing one cache domain.
-
-The design should prefer:
-
-- better cache locality under normal load
-- graceful degradation under hotspot conditions
-
-not:
-
-- perfect cache locality at any cost
+Even in fallback mode, session stickiness should still be viewed as an approximation, not the ideal target.
 
 ---
 
-## 19. Suggested Config Draft
+## 14. Required Project Touch Points For Future Evaluation
 
-```yaml
-models:
-  - name: mineru
-    alias: mineru
-    task: chat
-    backend: vllm_openai_proxy
-    served_model_name: mineru
-    proxy_config:
-      upstreams:
-        - name: mineru-a
-          base_url: http://10.0.0.21:8001/v1
-          enabled: true
-          weight: 1
-        - name: mineru-b
-          base_url: http://10.0.0.22:8001/v1
-          enabled: true
-          weight: 1
-      timeout:
-        connect_seconds: 3
-        read_seconds: 180
-        write_seconds: 30
-        pool_seconds: 5
-      retry:
-        max_attempts: 2
-        backoff_ms: 100
-        retry_on_status: [502, 503, 504]
-      streaming:
-        enabled: true
-        passthrough_sse: true
-      headers_policy:
-        pass_request_id: true
-        forward_authorization: false
-      affinity:
-        enabled: true
-        strategy: rendezvous_hash
-        isolation_scope: tenant_model
-        include_conversation_id: true
-        break_on_unhealthy: true
-        break_on_overload: true
-        overload:
-          max_inflight: 64
-          max_latency_ms: 5000
-          max_error_rate: 0.2
-```
+If we continue this work later, the most likely files to examine or update are:
 
----
-
-## 20. Proposed Implementation Phases
-
-### Phase 1: Instance Pool Foundation
-
-- add multi-upstream config
-- add health state tracking
-- add explicit upstream selection result to runtime context/logs
-
-### Phase 2: Basic Prefix-Hash Affinity
-
-- implement prefix fingerprinting
-- implement rendezvous hash selection
-- honor affinity only when upstream is healthy
-
-### Phase 3: Overload-Aware Soft Affinity
-
-- track per-upstream inflight and latency
-- break affinity on overload
-- expose observability fields and metrics
-
-### Phase 4: Validation
-
-- compare cache-hit-related latency before and after affinity
-- verify no unacceptable hotspot amplification
-- verify tenant isolation boundaries
-
----
-
-## 21. Required Project Touch Points
-
-Likely files to change later if this is implemented:
-
-- `src/infer_nexus/catalog/models.py`
-- `src/infer_nexus/runtime/types.py`
-- `src/infer_nexus/runtime/dispatcher.py`
+- `src/infer_nexus/runtime/serve_app.py`
+- `src/infer_nexus/runtime/deployments.py`
+- `src/infer_nexus/runtime/handles.py`
 - `src/infer_nexus/runtime/executor.py`
 - `src/infer_nexus/api/openai_routes.py`
 - `tests/test_runtime.py`
-- `tests/test_proxy_health_routing.py`
-- `tests/test_proxy_streaming.py`
+- future integration or contract tests for Serve routing behavior
 
-Additional docs likely needed:
-
-- rollout guide
-- observability guide
-- security boundary note for affinity-enabled models
+This list is intentionally smaller and more focused than the previous draft because the preferred path has moved from gateway routing logic to Ray Serve deployment routing.
 
 ---
 
-## 22. Final Recommendation
+## 15. Final Recommendation
 
-For this project, the best first implementation is:
+The previous session-based sticky design should be considered superseded.
 
-- proxy-backend only
-- multiple explicit upstream vLLM instances
-- prefix-hash routing with rendezvous hashing
-- tenant-scoped cache affinity
-- soft stickiness with overload break
+The current recommended direction is:
 
-This balances:
+- for local `backend: vllm` chat models, investigate Ray Serve `PrefixCacheAffinityRouter` first
+- treat prefix-aware replica routing as the primary solution candidate
+- keep `infer-nexus` focused on gateway, compatibility, and model dispatch responsibilities
+- avoid building a custom gateway sticky-affinity system unless Ray-native integration proves insufficient
 
-- cache locality
-- safety
-- operational simplicity
-- future extensibility
+In short:
 
-It also fits the current `infer-nexus` architecture much better than trying to force replica-level affinity inside local Ray Serve deployment routing.
+- session stickiness is not the right primary abstraction
+- prefix-aware replica routing is the more direct and more correct optimization target
+- the remaining work is integration validation, not a fresh routing design from scratch

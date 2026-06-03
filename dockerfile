@@ -1,5 +1,5 @@
 # 基础镜像：mineru:npu-latest，由docker load 命令导入
-# 导入所用的 tar 包来源于 https://atomgit.com/Ascend-SACT/Mineru-Optimization.git 仓库中的大文件mineru-ascend.tar
+# 导入所用的 tar 包来源于 https://atomgit.com/Ascend-SACT/Mineru-Optimization.git 仓库中的镜像mineru-ascend.tar
 FROM mineru:npu-latest
 
 # 设置工作目录
@@ -12,6 +12,7 @@ RUN pip install --no-cache-dir uv -i https://mirrors.aliyun.com/pypi/simple/
 
 # 本地的 pyproject.ascend.toml 复制到容器内并重命名为 pyproject.toml
 COPY pyproject.ascend.toml ./pyproject.toml
+# 满足UV安装依赖时需要的 README.md 文件
 COPY README.md ./README.md
 
 # 使用 uv 安装依赖

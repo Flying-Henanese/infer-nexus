@@ -111,6 +111,15 @@ Status as of `2026-06-01`:
 
 What has been verified in code and against a remote instance:
 
+- the local `backend: vllm` implementation has now been structurally split into:
+  - `src/infer_nexus/backends/vllm.py` as the facade / lifecycle / dispatch layer
+  - `src/infer_nexus/backends/vllm_local_best_effort.py` for the legacy
+    `local_best_effort` chat path
+  - `src/infer_nexus/backends/vllm_strict.py` for replica-local native
+    `vllm_native` / strict serving
+- after that split, `VLLMBackend` still remains the single external backend
+  entrypoint, but strict and local-best-effort execution now dispatch through
+  dedicated executors instead of one monolithic implementation file
 - `compat_mode` is implemented in model config and runtime spec propagation.
 - strict local `backend: vllm` chat models require `vllm.openai_serving.enabled=true`.
 - strict local chat requests do not silently fall back to local `LLM.chat(...)` when the native serving adapter is unavailable.
@@ -183,6 +192,19 @@ Operational guidance discovered during validation:
       generic local `LLM.encode(...)`
   - after those fixes, remote `/v1/embeddings` requests succeeded for both a
     single string input and a list input with `encoding_format="float"`
+- Additional `2026-06-02` refactor validation finding:
+  - after splitting `vllm.py` into facade + `vllm_local_best_effort.py` +
+    `vllm_strict.py`, the remote smoke suite still passed for the current
+    deployed model set
+  - verified paths after the split included:
+    - strict/native non-stream chat
+    - strict/native stream chat
+    - strict/native tool calling
+    - strict/native multimodal chat
+    - native embeddings
+    - local-best-effort rerank
+  - this gives high confidence that the structural extraction itself did not
+    regress the primary runtime paths
 
 What remains before this plan can be called fully closed:
 
@@ -231,8 +253,21 @@ Validation summary:
 - `qwen3-32b`
   - local-best-effort chat verified
   - tool calling behavior verified
+  - `2026-06-02` post-refactor follow-up:
+    - non-stream strict/native request returned `"OK"`
+    - streaming request returned native OpenAI-style
+      `chat.completion.chunk` SSE frames ending with `data: [DONE]`
 - `qwen3-vl-chat-8b-instruct`
   - multimodal image prompt verified
+  - `2026-06-02` post-refactor follow-up:
+    - multimodal request with an externally hosted `https` image URL succeeded
+      and returned the expected color description (`"white"`)
+    - multimodal request with a real local JPEG carried as
+      `data:image/jpeg;base64,...` also succeeded and produced a correct
+      one-sentence scene description
+    - an earlier failing request using a tiny inline PNG data URL appears to be
+      a sample-specific `vLLM + Pillow` decode edge case rather than a general
+      strict/native multimodal regression
 - `qwen3-embedding-8b`
   - embeddings endpoint verified
   - `2026-06-02` native-serving follow-up:
@@ -245,15 +280,29 @@ Validation summary:
       `trace_headers` into a local `LLM.encode(...)` that did not accept that
       kwarg
     - request handling then failed once more because generic `LLM.encode(...)`
-      required `pooling_task="embed"`
+        required `pooling_task="embed"`
     - after fixing those four compatibility gaps, remote `/v1/embeddings`
       succeeded for:
       - `{"model":"qwen3-embedding-8b","input":"hello world"}`
       - `{"model":"qwen3-embedding-8b","input":["hello","world"],"encoding_format":"float"}`
 - `bge-reranker`
   - rerank endpoint verified
+  - `2026-06-02` post-refactor follow-up:
+    - rerank behavior remained correct after the executor split
 - `mineru`
   - OpenAI-style multimodal smoke test returned a non-informative payload during this run, but separate validation outside this document confirmed the model itself is operational
+  - `2026-06-02` post-refactor follow-up:
+    - simple OpenAI-style chat smoke request still returned successfully,
+      indicating that the facade / executor split did not break request routing
+- `qwen3.5-9b`
+  - `2026-06-02` post-refactor multimodal follow-up:
+    - multimodal request with an externally hosted `https` image URL succeeded
+      and returned `"white"`
+    - multimodal request with the local JPEG carried as
+      `data:image/jpeg;base64,...` also succeeded and produced a correct
+      one-sentence scene description
+    - this confirms that strict/native multimodal handling is still working
+      after the extraction to `vllm_strict.py`
 
 Closure decision for this plan:
 

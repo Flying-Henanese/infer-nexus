@@ -7,6 +7,7 @@ publishes them under the configured service name.
 from __future__ import annotations
 
 import argparse
+import sys
 import time
 from typing import Any
 
@@ -164,6 +165,9 @@ def main() -> None:
     from ray import serve
 
     runtime_env = {
+        # Force Serve workers to reuse the same Python interpreter as the
+        # deployment driver process instead of letting Ray/uv infer one.
+        "py_executable": sys.executable,
         "working_dir": ".",
         # 排除这些文件，防止 Ray 自动触发环境构建逻辑
         "excludes": ["pyproject.toml", "uv.lock", ".venv", ".git"],

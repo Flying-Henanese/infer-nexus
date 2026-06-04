@@ -1,4 +1,9 @@
-"""vLLM backend adapter implementation."""
+"""vLLM 后端适配器实现。
+
+本模块负责 vLLM 后端的生命周期、runtime spec 校验和请求分发衔接。
+兼容模式相关的执行细节会委托给严格/原生执行器和本地 best-effort
+执行器，同时保留 infer-nexus 其他部分依赖的公共后端接口。
+"""
 
 from __future__ import annotations
 
@@ -33,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 
 class VLLMBackend(InferenceBackend):
-    """Adapt local vLLM engine lifecycle and request handling."""
+    """适配本地 vLLM 引擎生命周期和请求处理。"""
 
     TASK_TO_MODE = {
         "chat": "generate",
@@ -82,6 +87,7 @@ class VLLMBackend(InferenceBackend):
     UNSUPPORTED_KWARG_PATTERN = re.compile(r"Unexpected keyword argument '([^']+)'")
 
     def __init__(self, runtime_spec: dict[str, Any]) -> None:
+        """根据已解析的 runtime spec 创建 vLLM 后端。"""
         self.runtime_spec = runtime_spec
         self.engine: Any | None = None
         self.openai_serving_chat_adapter: OpenAIChatServingAdapter | None = None
@@ -95,6 +101,7 @@ class VLLMBackend(InferenceBackend):
         self.strict_executor = StrictNativeVLLMExecutor(self)
 
     def validate_runtime_spec(self, runtime_spec: dict[str, Any], runtime_context: dict[str, Any]) -> None:
+        """校验 runtime spec 是否能够服务当前请求任务。"""
         task = getattr(runtime_context.get("task"), "value", runtime_context.get("task"))
         if task not in self.TASK_TO_MODE:
             raise BackendConfigurationError(f"vLLM backend does not support task '{task}'.")
@@ -131,6 +138,7 @@ class VLLMBackend(InferenceBackend):
             raise BackendConfigurationError("vllm_native is not supported for vLLM rerank models.")
 
     def _filter_kwargs_for_callable(self, callable_obj: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
+        """移除 callable 签名不支持的关键字参数。"""
         try:
             signature = inspect.signature(callable_obj)
         except (TypeError, ValueError):
@@ -153,6 +161,7 @@ class VLLMBackend(InferenceBackend):
         return {key: value for key, value in kwargs.items() if key in allowed_names}
 
     def _create_async_vllm_engine(self, llm_kwargs: dict[str, Any]) -> Any:
+        """在受支持的 vLLM 版本中创建异步 vLLM 引擎。"""
         try:
             try:
                 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -170,6 +179,7 @@ class VLLMBackend(InferenceBackend):
         return AsyncLLMEngine(engine_args)
 
     def startup(self) -> None:
+        """初始化配置指定的 vLLM 引擎和可选 serving adapter。"""
         init_mode = self.runtime_spec.get("backend_init_mode", "stub")
         if init_mode != "real":
             self.engine = None
@@ -303,6 +313,7 @@ class VLLMBackend(InferenceBackend):
         self.engine_state = "ready"
 
     def shutdown(self) -> None:
+        """释放该后端持有的引擎和 adapter 引用。"""
         self.engine = None
         self.openai_serving_chat_adapter = None
         self.openai_serving_embedding_adapter = None
@@ -313,6 +324,7 @@ class VLLMBackend(InferenceBackend):
         self.engine_state = "stopped"
 
     def build_runtime_spec(self, model: ModelConfig, resolved_model_reference: str) -> dict[str, Any]:
+        """为 catalog 模型构建 vLLM runtime spec。"""
         task_mode = self.TASK_TO_MODE.get(model.task.value)
         if task_mode is None:
             raise BackendConfigurationError(
@@ -347,21 +359,26 @@ class VLLMBackend(InferenceBackend):
         }
 
     def _request_defaults(self, runtime_spec: dict[str, Any] | None = None) -> dict[str, Any]:
+        """返回 runtime spec 中的请求默认值。"""
         spec = runtime_spec or self.runtime_spec
         return dict(spec.get("request_defaults") or {})
 
     def _request_policy(self, runtime_spec: dict[str, Any] | None = None) -> dict[str, Any]:
+        """返回 runtime spec 中的请求策略配置。"""
         spec = runtime_spec or self.runtime_spec
         return dict(spec.get("request_policy") or {})
 
     def _compat_mode(self, runtime_spec: dict[str, Any] | None = None) -> str:
+        """返回已配置的兼容模式。"""
         spec = runtime_spec or self.runtime_spec
         return str(spec.get("compat_mode") or CompatibilityMode.LOCAL_BEST_EFFORT.value)
 
     def _is_strict_openai(self, runtime_spec: dict[str, Any] | None = None) -> bool:
+        """返回运行时是否使用严格 OpenAI 兼容模式。"""
         return self._compat_mode(runtime_spec) == CompatibilityMode.STRICT_OPENAI.value
 
     def _is_vllm_native(self, runtime_spec: dict[str, Any] | None = None) -> bool:
+        """返回运行时是否需要原生 vLLM serving。"""
         return self._compat_mode(runtime_spec) in {
             CompatibilityMode.VLLM_NATIVE.value,
             CompatibilityMode.STRICT_OPENAI.value,
@@ -371,6 +388,7 @@ class VLLMBackend(InferenceBackend):
         self,
         runtime_spec: dict[str, Any] | None = None,
     ) -> bool:
+        """返回聊天任务是否需要 OpenAI serving adapter。"""
         spec = runtime_spec or self.runtime_spec
         return self._is_vllm_native(spec) and spec.get("task_mode") == "generate"
 
@@ -378,16 +396,20 @@ class VLLMBackend(InferenceBackend):
         self,
         runtime_spec: dict[str, Any] | None = None,
     ) -> bool:
+        """返回 embedding 任务是否需要 OpenAI serving adapter。"""
         spec = runtime_spec or self.runtime_spec
         return self._is_vllm_native(spec) and spec.get("task_mode") == "embed"
 
     def _raise_openai_serving_unavailable(self, reason: str | None = None) -> None:
+        """抛出严格执行器的 chat serving 不可用错误。"""
         self.strict_executor._raise_openai_serving_unavailable(reason)
 
     def _raise_openai_embedding_serving_unavailable(self, reason: str | None = None) -> None:
+        """抛出严格执行器的 embedding serving 不可用错误。"""
         self.strict_executor._raise_openai_embedding_serving_unavailable(reason)
 
     def _normalize_embedding_inputs(self, request: EmbeddingRequest) -> list[str]:
+        """把 embedding 输入规范化为非空字符串列表。"""
         inputs = request.input if isinstance(request.input, list) else [request.input]
         if not inputs:
             raise BackendRequestValidationError(
@@ -397,6 +419,7 @@ class VLLMBackend(InferenceBackend):
         return inputs
 
     def _encode_embedding_base64(self, embedding: list[float]) -> str:
+        """把浮点 embedding 向量编码为 OpenAI 兼容的 base64。"""
         packed = struct.pack(f"<{len(embedding)}f", *embedding)
         return base64.b64encode(packed).decode("ascii")
 
@@ -407,6 +430,7 @@ class VLLMBackend(InferenceBackend):
         runtime_context: dict[str, Any],
         inputs: list[str],
     ) -> dict[str, Any]:
+        """构建确定性的 stub embedding 响应。"""
         data = []
         for index, item in enumerate(inputs):
             embedding = [
@@ -444,6 +468,7 @@ class VLLMBackend(InferenceBackend):
         runtime_context: dict[str, Any],
         result: Any,
     ) -> dict[str, Any]:
+        """把 vLLM embedding 输出转换为后端响应结构。"""
         if not result:
             raise RuntimeError("vLLM embed returned no result")
 
@@ -479,6 +504,7 @@ class VLLMBackend(InferenceBackend):
         }
 
     def _normalize_rerank_documents(self, request: RerankRequest) -> list[str]:
+        """把 rerank 文档规范化为非空字符串列表。"""
         documents = request.documents if isinstance(request.documents, list) else [request.documents]
         if not documents:
             raise BackendRequestValidationError(
@@ -488,6 +514,7 @@ class VLLMBackend(InferenceBackend):
         return documents
 
     def _score_stub_document(self, query: str, document: str) -> float:
+        """为 stub rerank 计算简单的词面相关性分数。"""
         query_terms = {term for term in query.lower().split() if term}
         document_terms = {term for term in document.lower().split() if term}
         overlap = len(query_terms & document_terms)
@@ -501,6 +528,7 @@ class VLLMBackend(InferenceBackend):
         runtime_context: dict[str, Any],
         documents: list[str],
     ) -> dict[str, Any]:
+        """构建确定性的 stub rerank 响应。"""
         scored = [
             {
                 "index": index,
@@ -535,6 +563,7 @@ class VLLMBackend(InferenceBackend):
         documents: list[str],
         result: Any,
     ) -> dict[str, Any]:
+        """把 vLLM score 输出转换为 rerank 响应结构。"""
         if not result:
             raise RuntimeError("vLLM score returned no result")
 
@@ -573,6 +602,7 @@ class VLLMBackend(InferenceBackend):
         *,
         runtime_spec: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """通过本地 best-effort 执行器合并聊天请求扩展参数。"""
         return self.local_best_effort_executor._merge_request_extras(
             request,
             runtime_spec=runtime_spec,
@@ -584,6 +614,7 @@ class VLLMBackend(InferenceBackend):
         *,
         runtime_spec: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """通过本地 best-effort 执行器构建采样参数。"""
         return self.local_best_effort_executor._build_sampling_params(
             request,
             runtime_spec=runtime_spec,
@@ -595,6 +626,7 @@ class VLLMBackend(InferenceBackend):
         *,
         runtime_spec: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """通过本地 best-effort 执行器构建 chat kwargs。"""
         return self.local_best_effort_executor._build_chat_kwargs(
             request,
             runtime_spec=runtime_spec,
@@ -606,6 +638,7 @@ class VLLMBackend(InferenceBackend):
         *,
         sampling_params_cls: type[Any],
     ) -> Any:
+        """通过本地执行器实例化 vLLM sampling params。"""
         return self.local_best_effort_executor._build_sampling_params_instance(
             sampling_params,
             sampling_params_cls=sampling_params_cls,
@@ -617,30 +650,37 @@ class VLLMBackend(InferenceBackend):
         *,
         sampling_params_cls: type[Any],
     ) -> dict[str, Any]:
+        """通过本地执行器过滤 vLLM 采样参数。"""
         return self.local_best_effort_executor._filter_sampling_params_for_vllm(
             sampling_params,
             sampling_params_cls=sampling_params_cls,
         )
 
     def _filter_chat_kwargs_for_vllm(self, chat_kwargs: dict[str, Any]) -> dict[str, Any]:
+        """通过本地执行器过滤 vLLM chat kwargs。"""
         return self.local_best_effort_executor._filter_chat_kwargs_for_vllm(chat_kwargs)
 
     def _is_async_engine(self) -> bool:
+        """返回当前引擎是否为异步引擎。"""
         return self.local_best_effort_executor._is_async_engine()
 
     async def _maybe_await(self, value: Any) -> Any:
+        """仅在值可等待时执行 await。"""
         return await self.local_best_effort_executor._maybe_await(value)
 
     async def _get_async_engine_tokenizer(self) -> Any:
+        """从异步 vLLM 引擎获取 tokenizer。"""
         return await self.local_best_effort_executor._get_async_engine_tokenizer()
 
     def _load_async_engine_image_asset(self, image_url: str) -> Any:
+        """为异步引擎多模态输入加载图片资源。"""
         return self.local_best_effort_executor._load_async_engine_image_asset(image_url)
 
     def _build_async_engine_multi_modal_data(
         self,
         messages: list[dict[str, Any]],
     ) -> dict[str, Any] | None:
+        """为异步引擎生成构建多模态数据。"""
         return self.local_best_effort_executor._build_async_engine_multi_modal_data(messages)
 
     def _build_async_engine_generate_input(
@@ -649,6 +689,7 @@ class VLLMBackend(InferenceBackend):
         prompt: str,
         multi_modal_data: dict[str, Any] | None,
     ) -> tuple[Any, dict[str, Any]]:
+        """构建异步引擎 generate 输入和 kwargs。"""
         return self.local_best_effort_executor._build_async_engine_generate_input(
             generate,
             prompt,
@@ -660,12 +701,14 @@ class VLLMBackend(InferenceBackend):
         messages: list[dict[str, Any]],
         chat_kwargs: dict[str, Any],
     ) -> tuple[str, dict[str, Any] | None]:
+        """把聊天消息渲染为异步引擎 prompt。"""
         return await self.local_best_effort_executor._build_async_engine_chat_prompt(
             messages,
             chat_kwargs,
         )
 
     def _build_async_engine_sampling_params_instance(self, sampling_params: dict[str, Any]) -> Any:
+        """为异步引擎生成构建 sampling params。"""
         return self.local_best_effort_executor._build_async_engine_sampling_params_instance(
             sampling_params
         )
@@ -678,6 +721,7 @@ class VLLMBackend(InferenceBackend):
         chat_kwargs: dict[str, Any],
         request_id: str,
     ) -> Any:
+        """通过本地执行器调用异步引擎聊天流。"""
         return await self.local_best_effort_executor._invoke_async_engine_chat_stream(
             messages,
             sampling_params,
@@ -686,18 +730,23 @@ class VLLMBackend(InferenceBackend):
         )
 
     def _supports_multimodal(self, runtime_context: dict[str, Any] | None = None) -> bool:
+        """返回运行时上下文是否支持多模态输入。"""
         return self.local_best_effort_executor._supports_multimodal(runtime_context)
 
     def _normalize_data_url(self, url: str) -> str:
+        """规范化供多模态加载使用的 data URL。"""
         return self.local_best_effort_executor._normalize_data_url(url)
 
     def _serialize_content_block(self, block: Any) -> dict[str, Any]:
+        """为 vLLM 序列化聊天内容块。"""
         return self.local_best_effort_executor._serialize_content_block(block)
 
     def _is_text_only_content(self, content: Any) -> bool:
+        """返回消息内容是否只包含文本。"""
         return self.local_best_effort_executor._is_text_only_content(content)
 
     def _collapse_text_only_content(self, content: list[Any]) -> str:
+        """把纯文本内容块折叠为字符串。"""
         return self.local_best_effort_executor._collapse_text_only_content(content)
 
     def _serialize_message_content(
@@ -706,6 +755,7 @@ class VLLMBackend(InferenceBackend):
         *,
         allow_multimodal: bool,
     ) -> str | list[dict[str, Any]]:
+        """为本地 best-effort 聊天序列化消息内容。"""
         return self.local_best_effort_executor._serialize_message_content(
             content,
             allow_multimodal=allow_multimodal,
@@ -717,6 +767,7 @@ class VLLMBackend(InferenceBackend):
         *,
         runtime_context: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
+        """从 OpenAI 风格请求构建 vLLM 聊天消息。"""
         return self.local_best_effort_executor._build_chat_messages(
             request,
             runtime_context=runtime_context,
@@ -726,24 +777,30 @@ class VLLMBackend(InferenceBackend):
         self,
         runtime_spec: dict[str, Any] | None = None,
     ) -> bool:
+        """返回聊天是否应使用严格 OpenAI serving。"""
         return self.strict_executor._should_use_openai_serving_adapter(runtime_spec)
 
     def _should_use_openai_serving_embedding_adapter(
         self,
         runtime_spec: dict[str, Any] | None = None,
     ) -> bool:
+        """返回 embeddings 是否应使用严格 OpenAI serving。"""
         return self.strict_executor._should_use_openai_serving_embedding_adapter(runtime_spec)
 
     def _import_vllm_symbol(self, module_path: str, symbol_name: str) -> Any:
+        """通过严格执行器导入 vLLM 符号。"""
         return self.strict_executor._import_vllm_symbol(module_path, symbol_name)
 
     def _resolve_openai_serving_imports(self) -> ResolvedOpenAIServingImports:
+        """通过严格执行器解析 OpenAI serving 导入。"""
         return self.strict_executor._resolve_openai_serving_imports()
 
     def _resolve_openai_serving_engine_client(self) -> Any | None:
+        """通过严格执行器解析 OpenAI serving engine client。"""
         return self.strict_executor._resolve_openai_serving_engine_client()
 
     def _build_openai_serving_base_model_path(self, base_model_path_cls: type[Any]) -> Any:
+        """通过严格执行器构建 vLLM serving base model path。"""
         return self.strict_executor._build_openai_serving_base_model_path(base_model_path_cls)
 
     def _build_openai_serving_models(
@@ -753,6 +810,7 @@ class VLLMBackend(InferenceBackend):
         base_model_path_cls: type[Any],
         engine_client: Any,
     ) -> Any:
+        """通过严格执行器构建 OpenAI serving models。"""
         return self.strict_executor._build_openai_serving_models(
             serving_models_cls=serving_models_cls,
             base_model_path_cls=base_model_path_cls,
@@ -766,6 +824,7 @@ class VLLMBackend(InferenceBackend):
         engine_client: Any,
         serving_models: Any,
     ) -> Any:
+        """通过严格执行器构建 OpenAI serving render 支持。"""
         return self.strict_executor._build_openai_serving_render(
             serving_render_cls=serving_render_cls,
             engine_client=engine_client,
@@ -780,6 +839,7 @@ class VLLMBackend(InferenceBackend):
         serving_models: Any,
         serving_render: Any | None,
     ) -> Any:
+        """通过严格执行器构建 OpenAI chat serving。"""
         return self.strict_executor._build_openai_serving_chat(
             serving_chat_cls=serving_chat_cls,
             engine_client=engine_client,
@@ -788,9 +848,11 @@ class VLLMBackend(InferenceBackend):
         )
 
     def _initialize_openai_serving_chat_adapter(self) -> OpenAIChatServingAdapter | None:
+        """通过严格执行器初始化 chat serving adapter。"""
         return self.strict_executor._initialize_openai_serving_chat_adapter()
 
     def _resolve_openai_serving_embedding_imports(self) -> tuple[type[Any], type[Any]]:
+        """通过严格执行器解析 embedding serving 导入。"""
         return self.strict_executor._resolve_openai_serving_embedding_imports()
 
     def _build_openai_serving_embedding(
@@ -800,6 +862,7 @@ class VLLMBackend(InferenceBackend):
         engine_client: Any,
         serving_models: Any,
     ) -> Any:
+        """通过严格执行器构建 OpenAI embedding serving。"""
         return self.strict_executor._build_openai_serving_embedding(
             serving_embedding_cls=serving_embedding_cls,
             engine_client=engine_client,
@@ -807,6 +870,7 @@ class VLLMBackend(InferenceBackend):
         )
 
     def _initialize_openai_serving_embedding_adapter(self) -> OpenAIEmbeddingServingAdapter | None:
+        """通过严格执行器初始化 embedding serving adapter。"""
         return self.strict_executor._initialize_openai_serving_embedding_adapter()
 
     def _build_openai_serving_request_payload(
@@ -816,6 +880,7 @@ class VLLMBackend(InferenceBackend):
         runtime_spec: dict[str, Any],
         runtime_context: dict[str, Any],
     ) -> dict[str, Any]:
+        """通过严格执行器构建 chat serving 请求 payload。"""
         return self.strict_executor._build_openai_serving_request_payload(
             request,
             runtime_spec=runtime_spec,
@@ -829,6 +894,7 @@ class VLLMBackend(InferenceBackend):
         runtime_spec: dict[str, Any],
         runtime_context: dict[str, Any],
     ) -> dict[str, Any]:
+        """通过严格执行器构建 embedding serving 请求 payload。"""
         return self.strict_executor._build_openai_serving_embedding_request_payload(
             request,
             runtime_spec=runtime_spec,
@@ -839,12 +905,14 @@ class VLLMBackend(InferenceBackend):
         self,
         request_payload: dict[str, Any],
     ) -> dict[str, Any]:
+        """通过严格执行器调用 chat serving。"""
         return await self.strict_executor._call_openai_serving_chat_completion(request_payload)
 
     async def _iter_openai_serving_stream(
         self,
         request_payload: dict[str, Any],
     ) -> AsyncIterator[dict[str, Any] | bytes | str]:
+        """通过严格执行器迭代 chat serving 流式分块。"""
         async for chunk in self.strict_executor._iter_openai_serving_stream(request_payload):
             yield chunk
 
@@ -852,6 +920,7 @@ class VLLMBackend(InferenceBackend):
         self,
         request_payload: dict[str, Any],
     ) -> dict[str, Any]:
+        """通过严格执行器调用 embedding serving。"""
         return await self.strict_executor._call_openai_serving_embedding(request_payload)
 
     def _build_chat_stub_response(
@@ -862,6 +931,7 @@ class VLLMBackend(InferenceBackend):
         sampling_params: dict[str, Any],
         chat_kwargs: dict[str, Any],
     ) -> dict[str, Any]:
+        """构建确定性的 stub chat completion 响应。"""
         content = (
             f"backend stub response from {runtime_spec['backend']} "
             f"for deployment '{runtime_context['deployment_name']}' "
@@ -955,6 +1025,7 @@ class VLLMBackend(InferenceBackend):
         sampling_params: dict[str, Any],
         chat_kwargs: dict[str, Any],
     ) -> dict[str, Any]:
+        """把 vLLM chat 输出转换为后端响应结构。"""
         if not result:
             raise RuntimeError("vLLM chat returned no result")
 
@@ -991,6 +1062,7 @@ class VLLMBackend(InferenceBackend):
         request: ChatCompletionsRequest,
         runtime_context: dict[str, Any],
     ) -> dict[str, Any]:
+        """执行非流式 chat completion。"""
         return await self.strict_executor.chat_completion(
             runtime_spec,
             request,
@@ -1003,6 +1075,7 @@ class VLLMBackend(InferenceBackend):
         request: ChatCompletionsRequest,
         runtime_context: dict[str, Any],
     ) -> AsyncIterator[dict[str, Any] | bytes | str]:
+        """流式执行 chat completion。"""
         async for event in self.strict_executor.chat_completion_stream(
             runtime_spec,
             request,
@@ -1016,6 +1089,7 @@ class VLLMBackend(InferenceBackend):
         request: EmbeddingRequest,
         runtime_context: dict[str, Any],
     ) -> dict[str, Any]:
+        """执行 embedding 请求。"""
         if self._is_vllm_native(runtime_spec):
             return await self.strict_executor.embedding(runtime_spec, request, runtime_context)
 
@@ -1042,6 +1116,7 @@ class VLLMBackend(InferenceBackend):
         request: RerankRequest,
         runtime_context: dict[str, Any],
     ) -> dict[str, Any]:
+        """通过 vLLM scoring 执行 rerank 请求。"""
         if self._is_vllm_native(runtime_spec):
             raise BackendConfigurationError("vllm_native is not supported for VLLM rerank.")
 

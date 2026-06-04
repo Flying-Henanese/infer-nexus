@@ -1,4 +1,8 @@
-"""Strict/native vLLM OpenAI serving execution paths."""
+"""严格/原生 vLLM OpenAI serving 执行路径。
+
+本模块负责把 infer-nexus 请求接入副本本地的 vLLM OpenAI serving adapter。
+只有在运行时配置允许时，才会回退到本地 best-effort 执行路径。
+"""
 
 from __future__ import annotations
 
@@ -26,15 +30,17 @@ logger = logging.getLogger(__name__)
 
 
 class StrictNativeVLLMExecutor:
-    """Encapsulate replica-local native vLLM OpenAI serving behavior."""
+    """封装副本本地的原生 vLLM OpenAI serving 行为。"""
 
     def __init__(self, backend: VLLMBackend) -> None:
+        """创建绑定到 vLLM 后端实例的执行器。"""
         self.backend = backend
 
     def _should_use_openai_serving_adapter(
         self,
         runtime_spec: dict[str, Any] | None = None,
     ) -> bool:
+        """返回聊天生成是否应使用 OpenAI serving。"""
         spec = runtime_spec or self.backend.runtime_spec
         openai_serving = spec.get("openai_serving") or {}
         return spec.get("task_mode") == "generate" and bool(openai_serving.get("enabled"))
@@ -43,11 +49,13 @@ class StrictNativeVLLMExecutor:
         self,
         runtime_spec: dict[str, Any] | None = None,
     ) -> bool:
+        """返回 embedding 是否应使用 OpenAI embeddings serving。"""
         spec = runtime_spec or self.backend.runtime_spec
         openai_serving = spec.get("openai_serving") or {}
         return spec.get("task_mode") == "embed" and bool(openai_serving.get("enabled"))
 
     def _raise_openai_serving_unavailable(self, reason: str | None = None) -> None:
+        """在聊天 serving 不可用时抛出配置错误。"""
         detail = reason or self.backend.openai_serving_adapter_init_error or "adapter is not initialized"
         raise BackendConfigurationError(
             "vllm_native vLLM chat requires the replica-local vLLM OpenAI serving adapter, "
@@ -55,6 +63,7 @@ class StrictNativeVLLMExecutor:
         )
 
     def _raise_openai_embedding_serving_unavailable(self, reason: str | None = None) -> None:
+        """在 embeddings serving 不可用时抛出配置错误。"""
         detail = (
             reason
             or self.backend.openai_serving_embedding_adapter_init_error
@@ -66,12 +75,14 @@ class StrictNativeVLLMExecutor:
         )
 
     def _import_vllm_symbol(self, module_path: str, symbol_name: str) -> Any:
+        """通过后端模块的导入机制加载 vLLM 符号。"""
         from infer_nexus.backends import vllm as vllm_module
 
         module = vllm_module.importlib.import_module(module_path)
         return getattr(module, symbol_name)
 
     def _resolve_openai_serving_imports(self) -> ResolvedOpenAIServingImports:
+        """在受支持的 vLLM 布局中解析 OpenAI serving 导入。"""
         candidates = [
             {
                 "chat_request": (
@@ -127,6 +138,7 @@ class StrictNativeVLLMExecutor:
         ) from last_error
 
     def _resolve_openai_serving_embedding_imports(self) -> tuple[type[Any], type[Any]]:
+        """在受支持的 vLLM 布局中解析 embeddings serving 导入。"""
         candidates = [
             (
                 ("vllm.entrypoints.pooling.embed.protocol", "EmbeddingCompletionRequest"),
@@ -155,7 +167,9 @@ class StrictNativeVLLMExecutor:
         ) from last_error
 
     def _resolve_openai_serving_engine_client(self) -> Any | None:
+        """查找或包装兼容 OpenAI serving 的 engine client。"""
         def _is_compatible(client: Any) -> bool:
+            """返回候选对象是否暴露必需的模型配置。"""
             return hasattr(client, "model_config")
 
         candidates = [
@@ -186,6 +200,7 @@ class StrictNativeVLLMExecutor:
         return None
 
     def _build_openai_serving_base_model_path(self, base_model_path_cls: type[Any]) -> Any:
+        """为 served model 构建 vLLM base model path 对象。"""
         served_model_name = (
             self.backend.runtime_spec.get("served_model_name")
             or self.backend.runtime_spec.get("model_name")
@@ -218,6 +233,7 @@ class StrictNativeVLLMExecutor:
         base_model_path_cls: type[Any],
         engine_client: Any,
     ) -> Any:
+        """构建 vLLM OpenAI serving models 注册表。"""
         return serving_models_cls(
             engine_client,
             [self._build_openai_serving_base_model_path(base_model_path_cls)],
@@ -230,6 +246,7 @@ class StrictNativeVLLMExecutor:
         engine_client: Any,
         serving_models: Any,
     ) -> Any:
+        """在 vLLM 支持时构建 OpenAI serving renderer。"""
         model_registry = getattr(serving_models, "registry", None)
         if model_registry is None:
             raise RuntimeError("OpenAIServingModels did not expose a model registry.")
@@ -276,6 +293,7 @@ class StrictNativeVLLMExecutor:
         serving_models: Any,
         serving_render: Any | None,
     ) -> Any:
+        """构建 vLLM OpenAI chat serving 对象。"""
         openai_serving_config = self.backend.runtime_spec.get("openai_serving") or {}
         engine_kwargs = self.backend.runtime_spec.get("engine_kwargs") or {}
         enable_auto_tool_choice = engine_kwargs.get("enable_auto_tool_choice")
@@ -333,6 +351,7 @@ class StrictNativeVLLMExecutor:
         engine_client: Any,
         serving_models: Any,
     ) -> Any:
+        """构建 vLLM OpenAI embeddings serving 对象。"""
         init_signature = inspect.signature(serving_embedding_cls)
         parameters = init_signature.parameters
         kwargs: dict[str, Any] = {}
@@ -359,6 +378,7 @@ class StrictNativeVLLMExecutor:
         return serving_embedding_cls(*args, **kwargs)
 
     def _initialize_openai_serving_chat_adapter(self) -> OpenAIChatServingAdapter | None:
+        """在配置启用时初始化动态 chat serving adapter。"""
         if not self._should_use_openai_serving_adapter():
             self.backend.openai_serving_adapter_init_error = None
             return None
@@ -410,6 +430,7 @@ class StrictNativeVLLMExecutor:
         )
 
     def _initialize_openai_serving_embedding_adapter(self) -> OpenAIEmbeddingServingAdapter | None:
+        """在配置启用时初始化动态 embeddings serving adapter。"""
         if not self._should_use_openai_serving_embedding_adapter():
             self.backend.openai_serving_embedding_adapter_init_error = None
             return None
@@ -462,6 +483,7 @@ class StrictNativeVLLMExecutor:
         runtime_spec: dict[str, Any],
         runtime_context: dict[str, Any],
     ) -> dict[str, Any]:
+        """把 chat completion 请求序列化为 vLLM OpenAI serving payload。"""
         payload = request.model_dump(
             mode="json",
             exclude_none=True,
@@ -488,6 +510,7 @@ class StrictNativeVLLMExecutor:
         runtime_spec: dict[str, Any],
         runtime_context: dict[str, Any],
     ) -> dict[str, Any]:
+        """把 embedding 请求序列化为 vLLM OpenAI serving payload。"""
         payload = request.model_dump(mode="json", exclude_none=True)
         payload["model"] = (
             runtime_context.get("served_model_name")
@@ -500,6 +523,7 @@ class StrictNativeVLLMExecutor:
         self,
         request_payload: dict[str, Any],
     ) -> dict[str, Any]:
+        """调用已初始化的 chat serving adapter。"""
         adapter = self.backend.openai_serving_chat_adapter
         if adapter is None:
             raise RuntimeError("vLLM OpenAI serving adapter is not initialized")
@@ -513,6 +537,7 @@ class StrictNativeVLLMExecutor:
         self,
         request_payload: dict[str, Any],
     ) -> AsyncIterator[dict[str, Any] | bytes | str]:
+        """从已初始化的 chat streaming adapter 产出分块。"""
         adapter = self.backend.openai_serving_chat_adapter
         if adapter is None:
             raise RuntimeError("vLLM OpenAI serving adapter is not initialized")
@@ -537,6 +562,7 @@ class StrictNativeVLLMExecutor:
         self,
         request_payload: dict[str, Any],
     ) -> dict[str, Any]:
+        """调用已初始化的 embeddings serving adapter。"""
         adapter = self.backend.openai_serving_embedding_adapter
         if adapter is None:
             raise RuntimeError("vLLM OpenAI embeddings serving adapter is not initialized")
@@ -552,6 +578,7 @@ class StrictNativeVLLMExecutor:
         request: ChatCompletionsRequest,
         runtime_context: dict[str, Any],
     ) -> dict[str, Any]:
+        """通过严格/原生 vLLM 执行非流式 chat completion。"""
         vllm_native = self.backend._is_vllm_native(runtime_spec)
         if self.backend.openai_serving_chat_adapter is not None:
             request_payload = self._build_openai_serving_request_payload(
@@ -586,6 +613,7 @@ class StrictNativeVLLMExecutor:
         request: ChatCompletionsRequest,
         runtime_context: dict[str, Any],
     ) -> AsyncIterator[dict[str, Any] | bytes | str]:
+        """通过严格/原生 vLLM 流式执行 chat completion。"""
         vllm_native = self.backend._is_vllm_native(runtime_spec)
         if self.backend.openai_serving_chat_adapter is not None:
             request_payload = self._build_openai_serving_request_payload(
@@ -623,6 +651,7 @@ class StrictNativeVLLMExecutor:
         request: EmbeddingRequest,
         runtime_context: dict[str, Any],
     ) -> dict[str, Any]:
+        """通过严格/原生 vLLM serving 执行 embedding 请求。"""
         if self.backend.openai_serving_embedding_adapter is None:
             self._raise_openai_embedding_serving_unavailable()
         request_payload = self._build_openai_serving_embedding_request_payload(

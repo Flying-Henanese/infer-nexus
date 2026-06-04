@@ -1,4 +1,10 @@
-"""Local best-effort chat execution path for the vLLM backend."""
+"""vLLM 后端的本地 best-effort 聊天执行路径。
+
+当 infer-nexus 未通过更严格的原生 vLLM OpenAI serving adapter 路由聊天请求时，
+本模块提供回退执行器。它会把 OpenAI 风格聊天请求适配到运行时可用的 vLLM
+引擎 API，包括同步 LLM 实例、异步引擎、stub 响应、best-effort 流式输出和
+有限的多模态 prompt 准备。
+"""
 
 from __future__ import annotations
 
@@ -22,9 +28,10 @@ if TYPE_CHECKING:
 
 
 class LocalBestEffortVLLMExecutor:
-    """Encapsulate fallback local chat behavior for non-native vLLM modes."""
+    """封装非原生 vLLM 模式下的本地聊天回退行为。"""
 
     def __init__(self, backend: VLLMBackend) -> None:
+        """把执行器绑定到所属的 vLLM 后端适配器。"""
         self.backend = backend
 
     def _merge_request_extras(
@@ -33,6 +40,7 @@ class LocalBestEffortVLLMExecutor:
         *,
         runtime_spec: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """合并后端默认值、模型扩展和请求 extra_body 字段。"""
         merged = dict(self.backend._request_defaults(runtime_spec))
         model_extra = getattr(request, "model_extra", None) or {}
         merged.update(model_extra)
@@ -45,6 +53,7 @@ class LocalBestEffortVLLMExecutor:
         *,
         runtime_spec: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """从 OpenAI 风格聊天请求构建 vLLM 采样参数。"""
         merged = self._merge_request_extras(request, runtime_spec=runtime_spec)
         max_tokens = (
             request.max_tokens
@@ -97,6 +106,7 @@ class LocalBestEffortVLLMExecutor:
         *,
         runtime_spec: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """在执行请求策略的同时构建非采样 chat kwargs。"""
         merged = self._merge_request_extras(request, runtime_spec=runtime_spec)
         policy = self.backend._request_policy(runtime_spec)
         allow_tools = bool(policy.get("allow_tools"))
@@ -161,12 +171,14 @@ class LocalBestEffortVLLMExecutor:
         return chat_kwargs
 
     def _supports_multimodal(self, runtime_context: dict[str, Any] | None = None) -> bool:
+        """返回当前运行时是否声明支持 vision。"""
         capabilities = self.backend.runtime_spec.get("capabilities")
         if capabilities is None and runtime_context is not None:
             capabilities = runtime_context.get("capabilities", [])
         return "vision" in (capabilities or [])
 
     def _normalize_data_url(self, url: str) -> str:
+        """规范化 base64 data URL，便于图片解码器可靠读取。"""
         if not url.startswith("data:") or ";base64," not in url:
             return url
 
@@ -179,6 +191,7 @@ class LocalBestEffortVLLMExecutor:
         return f"{prefix},{normalized}"
 
     def _serialize_content_block(self, block: Any) -> dict[str, Any]:
+        """把带类型的消息内容块序列化为 JSON 兼容数据。"""
         payload = block.model_dump(mode="json", exclude_none=True)
         if payload.get("type") == "image_url":
             image_url = payload.get("image_url") or {}
@@ -188,6 +201,7 @@ class LocalBestEffortVLLMExecutor:
         return payload
 
     def _is_text_only_content(self, content: Any) -> bool:
+        """返回 multipart 内容是否只包含文本块。"""
         if not isinstance(content, list) or not content:
             return False
         for block in content:
@@ -197,6 +211,7 @@ class LocalBestEffortVLLMExecutor:
         return True
 
     def _collapse_text_only_content(self, content: list[Any]) -> str:
+        """把纯文本 multipart 内容折叠为普通 prompt 字符串。"""
         parts: list[str] = []
         for block in content:
             payload = self._serialize_content_block(block)
@@ -211,6 +226,7 @@ class LocalBestEffortVLLMExecutor:
         *,
         allow_multimodal: bool,
     ) -> str | list[dict[str, Any]]:
+        """序列化消息内容，并在不支持时拒绝多模态输入。"""
         if isinstance(content, str):
             return content
 
@@ -237,6 +253,7 @@ class LocalBestEffortVLLMExecutor:
         *,
         runtime_context: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
+        """把已校验的聊天消息转换为 vLLM 兼容的消息字典。"""
         allow_multimodal = self._supports_multimodal(runtime_context)
         messages: list[dict[str, Any]] = []
         for message in request.messages:
@@ -264,6 +281,7 @@ class LocalBestEffortVLLMExecutor:
         *,
         sampling_params_cls: type[Any],
     ) -> Any:
+        """使用兼容 kwargs 实例化 vLLM SamplingParams 风格的类。"""
         filtered_sampling_params = self._filter_sampling_params_for_vllm(
             sampling_params,
             sampling_params_cls=sampling_params_cls,
@@ -291,6 +309,7 @@ class LocalBestEffortVLLMExecutor:
         *,
         sampling_params_cls: type[Any],
     ) -> dict[str, Any]:
+        """移除已安装 vLLM 版本不支持的采样参数。"""
         try:
             signature = inspect.signature(sampling_params_cls.__init__)
         except (TypeError, ValueError):
@@ -321,6 +340,7 @@ class LocalBestEffortVLLMExecutor:
         }
 
     def _filter_chat_kwargs_for_vllm(self, chat_kwargs: dict[str, Any]) -> dict[str, Any]:
+        """移除已安装引擎 chat 方法不支持的 chat kwargs。"""
         if self.backend.engine is None:
             return dict(chat_kwargs)
         try:
@@ -354,14 +374,17 @@ class LocalBestEffortVLLMExecutor:
         }
 
     def _is_async_engine(self) -> bool:
+        """返回后端当前是否包装异步 vLLM 引擎。"""
         return self.backend.engine is not None and self.backend.engine_kind == "async"
 
     async def _maybe_await(self, value: Any) -> Any:
+        """仅在值可等待时执行 await。"""
         if inspect.isawaitable(value):
             return await value
         return value
 
     async def _get_async_engine_tokenizer(self) -> Any:
+        """查找异步引擎或其嵌套 client 暴露的 tokenizer。"""
         if self.backend.engine is None:
             raise RuntimeError("vLLM engine is not initialized")
 
@@ -386,7 +409,7 @@ class LocalBestEffortVLLMExecutor:
         )
 
     def _load_async_engine_image_asset(self, image_url: str) -> Any:
-        """Load a vision asset into a vLLM-friendly in-memory image object."""
+        """把 vision 资源加载为 vLLM 友好的图片对象。"""
         try:
             from PIL import Image
         except ImportError as exc:
@@ -428,6 +451,7 @@ class LocalBestEffortVLLMExecutor:
         self,
         messages: list[dict[str, Any]],
     ) -> dict[str, Any] | None:
+        """从聊天消息中收集供异步引擎生成使用的图片输入。"""
         image_assets: list[Any] = []
         for message in messages:
             content = message.get("content")
@@ -456,6 +480,7 @@ class LocalBestEffortVLLMExecutor:
         prompt: str,
         multi_modal_data: dict[str, Any] | None,
     ) -> tuple[Any, dict[str, Any]]:
+        """为有无多模态 kwargs 的引擎整理异步 generate 输入。"""
         if multi_modal_data is None:
             return prompt, {}
 
@@ -482,6 +507,7 @@ class LocalBestEffortVLLMExecutor:
         messages: list[dict[str, Any]],
         chat_kwargs: dict[str, Any],
     ) -> tuple[str, dict[str, Any] | None]:
+        """把聊天消息渲染为 prompt 和可选的多模态 payload。"""
         tokenizer = await self._get_async_engine_tokenizer()
         apply_chat_template = getattr(tokenizer, "apply_chat_template", None)
         if not callable(apply_chat_template):
@@ -511,6 +537,7 @@ class LocalBestEffortVLLMExecutor:
         return prompt, multi_modal_data
 
     def _build_async_engine_sampling_params_instance(self, sampling_params: dict[str, Any]) -> Any:
+        """在可导入 vLLM 时构建异步引擎采样参数。"""
         try:
             from vllm import SamplingParams
         except ImportError:
@@ -528,6 +555,7 @@ class LocalBestEffortVLLMExecutor:
         chat_kwargs: dict[str, Any],
         request_id: str,
     ) -> Any:
+        """启动异步引擎聊天生成流。"""
         if self.backend.engine is None:
             raise RuntimeError("vLLM engine is not initialized")
         generate = getattr(self.backend.engine, "generate", None)
@@ -560,6 +588,7 @@ class LocalBestEffortVLLMExecutor:
         sampling_params: dict[str, Any],
         chat_kwargs: dict[str, Any],
     ) -> dict[str, Any]:
+        """收集异步引擎最终输出并组装为非流式响应。"""
         messages = self.backend._build_chat_messages(request, runtime_context=runtime_context)
         request_id = f"chatcmpl-{uuid4().hex}"
         stream = await self.backend._invoke_async_engine_chat_stream(
@@ -590,6 +619,7 @@ class LocalBestEffortVLLMExecutor:
         sampling_params: dict[str, Any],
         chat_kwargs: dict[str, Any],
     ) -> dict[str, Any]:
+        """执行同步 chat completion，或生成 stub 响应。"""
         if self.backend.engine is None:
             return self.backend._build_chat_stub_response(
                 request,
@@ -627,6 +657,7 @@ class LocalBestEffortVLLMExecutor:
         sampling_params: dict[str, Any],
         chat_kwargs: dict[str, Any],
     ) -> Any:
+        """调用 engine.chat，并在重试时裁剪不支持的 chat kwargs。"""
         if self.backend.engine is None:
             raise RuntimeError("vLLM engine is not initialized")
         current_chat_kwargs = self._filter_chat_kwargs_for_vllm(chat_kwargs)
@@ -660,6 +691,7 @@ class LocalBestEffortVLLMExecutor:
         *,
         chat_kwargs: dict[str, Any],
     ) -> Any:
+        """使用最佳可用参数形式调用同步 vLLM chat API。"""
         if self.backend.engine is None:
             raise RuntimeError("vLLM engine is not initialized")
 
@@ -691,6 +723,7 @@ class LocalBestEffortVLLMExecutor:
         )
 
     def _chat_method_accepts_stream(self) -> bool:
+        """返回同步 chat 方法是否看起来支持流式输出。"""
         if self.backend.engine is None:
             return False
         chat_method = getattr(self.backend.engine, "chat", None)
@@ -713,6 +746,7 @@ class LocalBestEffortVLLMExecutor:
         *,
         chat_kwargs: dict[str, Any],
     ) -> Any:
+        """以流式模式调用同步 vLLM chat API。"""
         if self.backend.engine is None:
             raise RuntimeError("vLLM engine is not initialized")
         if not self._chat_method_accepts_stream():
@@ -770,6 +804,7 @@ class LocalBestEffortVLLMExecutor:
                 }
 
     async def _iter_chat_stream_outputs(self, result: Any) -> AsyncIterator[Any]:
+        """把同步和异步流结果规范化为异步迭代器。"""
         if inspect.isawaitable(result):
             result = await result
         if hasattr(result, "__aiter__"):
@@ -786,6 +821,7 @@ class LocalBestEffortVLLMExecutor:
         )
 
     def _extract_stream_output_text_and_finish(self, item: Any) -> tuple[str, str | None]:
+        """从 vLLM 流式条目中提取累计文本和结束原因。"""
         if isinstance(item, dict):
             if isinstance(item.get("delta_text"), str):
                 return item["delta_text"], item.get("finish_reason")
@@ -814,6 +850,7 @@ class LocalBestEffortVLLMExecutor:
         sampling_params: dict[str, Any],
         chat_kwargs: dict[str, Any],
     ) -> AsyncIterator[dict[str, Any]]:
+        """从原生流输出产出后端标准 chat delta 事件。"""
         response_id = f"chatcmpl-{uuid4().hex}"
         created = int(time())
         model = runtime_context.get("served_model_name") or runtime_spec.get("served_model_name") or request.model
@@ -896,7 +933,7 @@ class LocalBestEffortVLLMExecutor:
         *,
         force_sync: bool = False,
     ) -> AsyncIterator[dict[str, Any]]:
-        """Expose a full non-streaming chat completion as an SSE-compatible stream."""
+        """把完整非流式 chat completion 暴露为 delta 事件。"""
         if self.backend.engine is None:
             response = self.backend._build_chat_stub_response(
                 request,
@@ -953,6 +990,7 @@ class LocalBestEffortVLLMExecutor:
         request: ChatCompletionsRequest,
         runtime_context: dict[str, Any],
     ) -> dict[str, Any]:
+        """执行 best-effort 非流式 chat completion。"""
         sampling_params = self.backend._build_sampling_params(request, runtime_spec=runtime_spec)
         chat_kwargs = self.backend._build_chat_kwargs(request, runtime_spec=runtime_spec)
         if self.backend.engine is None:
@@ -986,6 +1024,7 @@ class LocalBestEffortVLLMExecutor:
         request: ChatCompletionsRequest,
         runtime_context: dict[str, Any],
     ) -> AsyncIterator[dict[str, Any] | bytes | str]:
+        """执行 best-effort 流式 chat completion。"""
         sampling_params = self.backend._build_sampling_params(request, runtime_spec=runtime_spec)
         chat_kwargs = self.backend._build_chat_kwargs(request, runtime_spec=runtime_spec)
         if self.backend.engine is None:

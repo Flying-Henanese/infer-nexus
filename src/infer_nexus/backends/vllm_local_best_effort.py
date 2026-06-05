@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import inspect
 import re
+import struct
 from io import BytesIO
 from pathlib import Path
 from collections.abc import AsyncIterator, Iterable
@@ -21,7 +22,7 @@ from urllib.request import urlopen
 from uuid import uuid4
 
 from infer_nexus.core.errors import BackendRequestValidationError
-from infer_nexus.core.schemas import ChatCompletionsRequest
+from infer_nexus.core.schemas import ChatCompletionsRequest, EmbeddingRequest, RerankRequest
 
 if TYPE_CHECKING:
     from infer_nexus.backends.vllm import VLLMBackend
@@ -1061,3 +1062,252 @@ class LocalBestEffortVLLMExecutor:
             force_sync=True,
         ):
             yield event
+
+    def _normalize_embedding_inputs(self, request: EmbeddingRequest) -> list[str]:
+        """把 embedding 输入规范化为非空字符串列表。"""
+        inputs = request.input if isinstance(request.input, list) else [request.input]
+        if not inputs:
+            raise BackendRequestValidationError(
+                "Embedding requests must include at least one input.",
+                code="invalid_input",
+            )
+        return inputs
+
+    def _encode_embedding_base64(self, embedding: list[float]) -> str:
+        """把浮点 embedding 向量编码为 OpenAI 兼容的 base64。"""
+        packed = struct.pack(f"<{len(embedding)}f", *embedding)
+        return base64.b64encode(packed).decode("ascii")
+
+    def _build_embedding_stub_response(
+        self,
+        request: EmbeddingRequest,
+        runtime_spec: dict[str, Any],
+        runtime_context: dict[str, Any],
+        inputs: list[str],
+    ) -> dict[str, Any]:
+        """构建确定性的 stub embedding 响应。"""
+        data = []
+        for index, item in enumerate(inputs):
+            embedding = [
+                float(len(item)),
+                float(index),
+                float(len(runtime_spec["backend"])),
+            ]
+            if request.encoding_format == "base64":
+                value: list[float] | str = self._encode_embedding_base64(embedding)
+            else:
+                value = embedding
+            data.append({"index": index, "embedding": value})
+
+        return {
+            "data": data,
+            "model": request.model,
+            "usage": {
+                "prompt_tokens": len(inputs),
+                "completion_tokens": 0,
+                "total_tokens": len(inputs),
+            },
+            "backend": runtime_spec["backend"],
+            "deployment": runtime_context["deployment_name"],
+            "raw": {
+                "input_count": len(inputs),
+                "engine_state": self.backend.engine_state,
+            },
+        }
+
+    def _convert_embedding_result(
+        self,
+        *,
+        request: EmbeddingRequest,
+        runtime_spec: dict[str, Any],
+        runtime_context: dict[str, Any],
+        result: Any,
+    ) -> dict[str, Any]:
+        """把 vLLM embedding 输出转换为后端响应结构。"""
+        if not result:
+            raise RuntimeError("vLLM embed returned no result")
+
+        data = []
+        prompt_tokens = 0
+        for index, item in enumerate(result):
+            outputs = getattr(item, "outputs", None)
+            if outputs is None:
+                raise RuntimeError("vLLM embedding result contained no outputs")
+
+            embedding = getattr(outputs, "embedding", None)
+            if embedding is None:
+                raise RuntimeError("vLLM embedding output contained no embedding vector")
+
+            prompt_tokens += len(getattr(item, "prompt_token_ids", None) or [])
+            vector = list(embedding)
+            if request.encoding_format == "base64":
+                value: list[float] | str = self._encode_embedding_base64(vector)
+            else:
+                value = vector
+            data.append({"index": index, "embedding": value})
+
+        return {
+            "data": data,
+            "model": request.model,
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": 0,
+                "total_tokens": prompt_tokens,
+            },
+            "backend": runtime_spec["backend"],
+            "deployment": runtime_context["deployment_name"],
+        }
+
+    async def embedding(
+        self,
+        runtime_spec: dict[str, Any],
+        request: EmbeddingRequest,
+        runtime_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        """通过 local best-effort vLLM API 执行 embedding 请求。"""
+        inputs = self._normalize_embedding_inputs(request)
+        if self.backend.engine is None:
+            return self._build_embedding_stub_response(
+                request,
+                runtime_spec,
+                runtime_context,
+                inputs,
+            )
+
+        result = self.backend.engine.embed(inputs)
+        return self._convert_embedding_result(
+            request=request,
+            runtime_spec=runtime_spec,
+            runtime_context=runtime_context,
+            result=result,
+        )
+
+    def _normalize_rerank_documents(self, request: RerankRequest) -> list[str]:
+        """把 rerank 文档规范化为非空字符串列表。"""
+        documents = request.documents if isinstance(request.documents, list) else [request.documents]
+        if not documents:
+            raise BackendRequestValidationError(
+                "Rerank requests must include at least one document.",
+                code="invalid_input",
+            )
+        return documents
+
+    def _score_stub_document(self, query: str, document: str) -> float:
+        """为 stub rerank 计算简单的词面相关性分数。"""
+        query_terms = {term for term in query.lower().split() if term}
+        document_terms = {term for term in document.lower().split() if term}
+        overlap = len(query_terms & document_terms)
+        length_penalty = max(len(document_terms), 1)
+        return overlap + (overlap / length_penalty)
+
+    def _build_rerank_stub_response(
+        self,
+        request: RerankRequest,
+        runtime_spec: dict[str, Any],
+        runtime_context: dict[str, Any],
+        documents: list[str],
+    ) -> dict[str, Any]:
+        """构建确定性的 stub rerank 响应。"""
+        scored = [
+            {
+                "index": index,
+                "document": {"text": document},
+                "relevance_score": float(self._score_stub_document(request.query, document)),
+            }
+            for index, document in enumerate(documents)
+        ]
+        scored.sort(key=lambda item: item["relevance_score"], reverse=True)
+        if request.top_n > 0:
+            scored = scored[: request.top_n]
+
+        return {
+            "id": f"rerank-{uuid4().hex}",
+            "model": request.model,
+            "usage": {"total_tokens": 1 + len(documents)},
+            "results": scored,
+            "backend": runtime_spec["backend"],
+            "deployment": runtime_context["deployment_name"],
+            "raw": {
+                "document_count": len(documents),
+                "engine_state": self.backend.engine_state,
+            },
+        }
+
+    def _convert_rerank_result(
+        self,
+        *,
+        request: RerankRequest,
+        runtime_spec: dict[str, Any],
+        runtime_context: dict[str, Any],
+        documents: list[str],
+        result: Any,
+    ) -> dict[str, Any]:
+        """把 vLLM score 输出转换为 rerank 响应结构。"""
+        if not result:
+            raise RuntimeError("vLLM score returned no result")
+
+        scored = []
+        total_tokens = 0
+        for index, item in enumerate(result):
+            outputs = getattr(item, "outputs", None)
+            if outputs is None or getattr(outputs, "score", None) is None:
+                raise RuntimeError("vLLM score output contained no score")
+
+            total_tokens += len(getattr(item, "prompt_token_ids", None) or [])
+            scored.append(
+                {
+                    "index": index,
+                    "document": {"text": documents[index]},
+                    "relevance_score": float(outputs.score),
+                }
+            )
+
+        scored.sort(key=lambda item: item["relevance_score"], reverse=True)
+        if request.top_n > 0:
+            scored = scored[: request.top_n]
+
+        return {
+            "id": f"rerank-{uuid4().hex}",
+            "model": request.model,
+            "usage": {"total_tokens": total_tokens},
+            "results": scored,
+            "backend": runtime_spec["backend"],
+            "deployment": runtime_context["deployment_name"],
+        }
+
+    async def rerank(
+        self,
+        runtime_spec: dict[str, Any],
+        request: RerankRequest,
+        runtime_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        """通过 local best-effort vLLM score API 执行 rerank 请求。"""
+        documents = self._normalize_rerank_documents(request)
+        if self.backend.engine is None:
+            return self._build_rerank_stub_response(
+                request,
+                runtime_spec,
+                runtime_context,
+                documents,
+            )
+
+        score_kwargs: dict[str, Any] = {}
+        score_signature = inspect.signature(self.backend.engine.score)
+        score_args = score_signature.parameters
+        score_accepts_var_kwargs = any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in score_args.values()
+        )
+
+        chat_template = (runtime_spec.get("engine_kwargs") or {}).get("chat_template")
+        if chat_template and ("chat_template" in score_args or score_accepts_var_kwargs):
+            score_kwargs["chat_template"] = chat_template
+
+        result = self.backend.engine.score(request.query, documents, **score_kwargs)
+        return self._convert_rerank_result(
+            request=request,
+            runtime_spec=runtime_spec,
+            runtime_context=runtime_context,
+            documents=documents,
+            result=result,
+        )

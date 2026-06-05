@@ -1,14 +1,13 @@
-"""Shared runtime transfer types used across dispatcher/executor layers."""
+"""定义运行时分发与执行的共享类型。"""
 
 from dataclasses import dataclass
 from typing import Any
 
 from infer_nexus.core.enums import BackendType
 
-
 @dataclass(slots=True)
 class RuntimeTarget:
-    """Resolved runtime dispatch target for a specific model request."""
+    """描述运行时组件的数据或行为。"""
 
     model_name: str
     model_alias: str | None

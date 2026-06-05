@@ -1,4 +1,4 @@
-"""API 请求/响应与内部传输的 Pydantic 数据模型。"""
+"""API 请求、响应和内部传输使用的 Pydantic 数据模型。"""
 
 from typing import Annotated, Any, Literal, TypeAlias
 
@@ -8,14 +8,14 @@ from infer_nexus.core.enums import BackendType, CompatibilityMode, ModelStatus, 
 
 
 class HealthResponse(BaseModel):
-    """Health-check payload for service liveness endpoints."""
+    """服务存活检查接口的响应体。"""
 
     status: Literal["ok"] = "ok"
     service: str = "infer-nexus"
 
 
 class ModelSummary(BaseModel):
-    """OpenAI-style model listing item."""
+    """OpenAI 风格模型列表中的单个模型条目。"""
 
     id: str
     object: Literal["model"] = "model"
@@ -28,14 +28,14 @@ class ModelSummary(BaseModel):
 
 
 class ModelListResponse(BaseModel):
-    """OpenAI-compatible model list response envelope."""
+    """OpenAI 兼容的模型列表响应外壳。"""
 
     object: Literal["list"] = "list"
     data: list[ModelSummary]
 
 
 class CatalogModelResponse(BaseModel):
-    """Native API model metadata response."""
+    """平台原生 API 返回的模型元数据。"""
 
     name: str
     alias: str | None = None
@@ -63,7 +63,7 @@ class CatalogModelResponse(BaseModel):
 
 
 class ClusterLoadResponse(BaseModel):
-    """Native API cluster load summary."""
+    """平台原生 API 返回的集群负载摘要。"""
 
     status: str
     message: str
@@ -71,7 +71,7 @@ class ClusterLoadResponse(BaseModel):
 
 
 class ModelStatusResponse(BaseModel):
-    """Per-model runtime status response."""
+    """单个模型运行状态响应。"""
 
     name: str
     status: ModelStatus
@@ -79,7 +79,7 @@ class ModelStatusResponse(BaseModel):
 
 
 class OpenAIErrorDetail(BaseModel):
-    """OpenAI-style error object body."""
+    """OpenAI 风格错误响应中的错误详情对象。"""
 
     message: str
     type: str
@@ -88,27 +88,27 @@ class OpenAIErrorDetail(BaseModel):
 
 
 class OpenAIErrorResponse(BaseModel):
-    """OpenAI-style error response envelope."""
+    """OpenAI 风格错误响应外壳。"""
 
     error: OpenAIErrorDetail
 
 
 class ChatTextContentPart(BaseModel):
-    """OpenAI-compatible text content block."""
+    """OpenAI 兼容的文本内容块。"""
 
     type: Literal["text"]
     text: str
 
 
 class ChatImageURL(BaseModel):
-    """OpenAI-compatible image URL block payload."""
+    """OpenAI 兼容图片 URL 内容块的负载。"""
 
     url: str
     detail: Literal["auto", "low", "high"] | None = None
 
 
 class ChatImageContentPart(BaseModel):
-    """OpenAI-compatible image content block."""
+    """OpenAI 兼容的图片内容块。"""
 
     type: Literal["image_url"]
     image_url: ChatImageURL
@@ -121,7 +121,7 @@ ChatContentPart: TypeAlias = Annotated[
 
 
 class ChatMessage(BaseModel):
-    """Chat message unit used in OpenAI-compatible chat APIs."""
+    """OpenAI 兼容 chat API 使用的单条消息。"""
 
     model_config = ConfigDict(extra="allow")
 
@@ -136,7 +136,7 @@ class ChatMessage(BaseModel):
 
 
 class ChatCompletionsRequest(BaseModel):
-    """OpenAI-compatible chat completions request."""
+    """OpenAI 兼容的 chat completions 请求。"""
 
     model_config = ConfigDict(extra="allow")
 
@@ -165,7 +165,7 @@ class ChatCompletionsRequest(BaseModel):
 
 
 class ChatCompletionChoice(BaseModel):
-    """Single assistant candidate returned by chat completion."""
+    """chat completion 返回的单个候选回复。"""
 
     index: int
     message: ChatMessage
@@ -173,7 +173,7 @@ class ChatCompletionChoice(BaseModel):
 
 
 class TokenUsage(BaseModel):
-    """Token accounting object used across response types."""
+    """各类响应共用的 token 用量对象。"""
 
     prompt_tokens: int
     completion_tokens: int
@@ -181,7 +181,7 @@ class TokenUsage(BaseModel):
 
 
 class ChatCompletionsResponse(BaseModel):
-    """OpenAI-compatible chat completions response."""
+    """OpenAI 兼容的 chat completions 响应。"""
 
     id: str
     object: Literal["chat.completion"] = "chat.completion"
@@ -192,13 +192,13 @@ class ChatCompletionsResponse(BaseModel):
 
 
 class EmbeddingInputItem(BaseModel):
-    """Embedding input item wrapper for structured variants."""
+    """结构化 embedding 输入项包装。"""
 
     text: str
 
 
 class EmbeddingRequest(BaseModel):
-    """OpenAI-compatible embeddings request."""
+    """OpenAI 兼容的 embeddings 请求。"""
 
     model_config = ConfigDict(extra="allow")
 
@@ -210,7 +210,7 @@ class EmbeddingRequest(BaseModel):
 
 
 class EmbeddingData(BaseModel):
-    """Single embedding vector entry in the embeddings response."""
+    """embeddings 响应中的单个向量条目。"""
 
     object: Literal["embedding"] = "embedding"
     index: int
@@ -218,7 +218,7 @@ class EmbeddingData(BaseModel):
 
 
 class EmbeddingResponse(BaseModel):
-    """OpenAI-compatible embeddings response."""
+    """OpenAI 兼容的 embeddings 响应。"""
 
     object: Literal["list"] = "list"
     data: list[EmbeddingData]
@@ -227,13 +227,13 @@ class EmbeddingResponse(BaseModel):
 
 
 class RerankDocument(BaseModel):
-    """Rerank input document wrapper."""
+    """rerank 输入文档包装。"""
 
     text: str
 
 
 class RerankRequest(BaseModel):
-    """Native rerank request model."""
+    """平台原生 rerank 请求模型。"""
 
     model: str
     query: str
@@ -243,13 +243,13 @@ class RerankRequest(BaseModel):
 
 
 class RerankUsage(BaseModel):
-    """Token accounting for rerank responses."""
+    """rerank 响应的 token 用量。"""
 
     total_tokens: int
 
 
 class RerankResult(BaseModel):
-    """Single rerank scoring output entry."""
+    """单个 rerank 打分结果。"""
 
     index: int
     document: RerankDocument
@@ -257,7 +257,7 @@ class RerankResult(BaseModel):
 
 
 class RerankResponse(BaseModel):
-    """Native rerank response model."""
+    """平台原生 rerank 响应模型。"""
 
     id: str
     model: str

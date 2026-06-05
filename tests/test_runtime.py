@@ -1136,6 +1136,26 @@ def test_vllm_backend_normalizes_embedding_inputs_and_rejects_empty() -> None:
         )
 
 
+def test_vllm_backend_routes_local_embedding_to_best_effort_executor() -> None:
+    """local_best_effort embedding should be handled by the local executor path."""
+    backend = VLLMBackend({})
+    runtime_spec = {'backend': 'vllm', 'task_mode': 'embed'}
+    runtime_context = {'deployment_name': 'model-bge-embedding'}
+
+    response = asyncio.run(
+        backend.embedding(
+            runtime_spec,
+            EmbeddingRequest(model='bge-embedding', input=['hi'], encoding_format='float'),
+            runtime_context,
+        )
+    )
+
+    assert response['backend'] == 'vllm'
+    assert response['deployment'] == 'model-bge-embedding'
+    assert response['raw']['engine_state'] == 'created'
+    assert response['data'][0]['embedding'] == [2.0, 0.0, 4.0]
+
+
 def test_model_runtime_replica_calls_backend_for_rerank(
     registry: ModelRegistry,
     model_store: LocalModelStore,
@@ -1183,6 +1203,37 @@ def test_vllm_backend_normalizes_rerank_documents_and_rejects_empty() -> None:
         backend._normalize_rerank_documents(
             RerankRequest(model='bge-rerank', query='q', documents=[])
         )
+
+
+def test_vllm_backend_routes_local_rerank_to_best_effort_executor() -> None:
+    """local_best_effort rerank should be handled by the local executor path."""
+    backend = VLLMBackend({})
+    runtime_spec = {'backend': 'vllm', 'task_mode': 'score'}
+    runtime_context = {'deployment_name': 'model-bge-rerank'}
+
+    response = asyncio.run(
+        backend.rerank(
+            runtime_spec,
+            RerankRequest(
+                model='bge-rerank',
+                query='capital france',
+                documents=['capital france paris', 'unrelated text'],
+                top_n=1,
+            ),
+            runtime_context,
+        )
+    )
+
+    assert response['backend'] == 'vllm'
+    assert response['deployment'] == 'model-bge-rerank'
+    assert response['raw']['engine_state'] == 'created'
+    assert response['results'] == [
+        {
+            'index': 0,
+            'document': {'text': 'capital france paris'},
+            'relevance_score': pytest.approx(2.6666666666666665),
+        }
+    ]
 
 
 def test_vllm_backend_rejects_runtime_spec_task_mode_mismatch() -> None:

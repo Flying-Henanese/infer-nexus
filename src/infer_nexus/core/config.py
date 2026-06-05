@@ -1,4 +1,4 @@
-"""应用配置模型与加载逻辑。"""
+"""应用配置模型和加载逻辑。"""
 
 from pathlib import Path
 from typing import Literal
@@ -10,7 +10,7 @@ from infer_nexus.core.errors import ConfigError
 
 
 class ServiceSettings(BaseModel):
-    """Gateway service networking and request-header defaults."""
+    """网关服务的网络监听和请求头默认配置。"""
 
     name: str = "infer-nexus"
     host: str = "0.0.0.0"
@@ -20,13 +20,13 @@ class ServiceSettings(BaseModel):
 
 
 class CatalogSettings(BaseModel):
-    """Catalog file location settings."""
+    """模型目录文件位置配置。"""
 
     models_path: str = "config/models.yaml"
 
 
 class ClusterSettings(BaseModel):
-    """Cluster-level runtime environment assumptions."""
+    """集群级运行环境假设。"""
 
     inference_device_type: Literal["cuda", "npu"] = "cuda"
     device_pool_boundary: str = "ray_runtime_visible_devices"
@@ -34,7 +34,7 @@ class ClusterSettings(BaseModel):
 
 
 class SchedulerSettings(BaseModel):
-    """Admission and scaling policy thresholds."""
+    """准入控制和扩缩容策略阈值。"""
 
     enable_admission_control: bool = True
     scale_up_cooldown_sec: int = 30
@@ -45,7 +45,7 @@ class SchedulerSettings(BaseModel):
 
 
 class RuntimeSettings(BaseModel):
-    """Runtime backend and execution wiring modes."""
+    """运行时后端和执行链路模式配置。"""
 
     device_env_strategy: str = "ray_managed"
     backend: str = "vllm"
@@ -54,14 +54,14 @@ class RuntimeSettings(BaseModel):
 
 
 class ModelStoreSettings(BaseModel):
-    """Local model artifact store settings."""
+    """本地模型产物存储配置。"""
 
     root_dir: str = "models"
     huggingface_endpoint: str = "https://hf-mirror.com"
 
 
 class Settings(BaseModel):
-    """Top-level platform settings loaded from config/settings.yaml."""
+    """从 ``config/settings.yaml`` 加载的平台顶层配置。"""
 
     service: ServiceSettings = Field(default_factory=ServiceSettings)
     catalog: CatalogSettings = Field(default_factory=CatalogSettings)
@@ -72,7 +72,18 @@ class Settings(BaseModel):
 
 
 def load_settings(path: str | Path = "config/settings.yaml") -> Settings:
-    """Load and validate YAML settings into typed config objects."""
+    """加载 YAML 配置文件，并校验为类型化 ``Settings`` 对象。
+
+    参数:
+        path: 配置文件路径，默认指向 ``config/settings.yaml``。
+
+    异常:
+        ConfigError: 当配置文件不存在时抛出。
+        pydantic.ValidationError: 当配置内容不符合 ``Settings`` 结构时抛出。
+
+    返回:
+        校验后的平台配置对象。
+    """
     config_path = Path(path)
     if not config_path.exists():
         raise ConfigError(f"settings file not found: {config_path}")

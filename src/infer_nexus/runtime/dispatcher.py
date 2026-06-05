@@ -1,4 +1,4 @@
-"""Runtime dispatch orchestration from API-facing model selection to execution target."""
+"""编排 API 请求到运行时目标的分发。"""
 
 from starlette.responses import Response
 
@@ -17,9 +17,8 @@ from infer_nexus.runtime.executor import RuntimeExecutor
 from infer_nexus.runtime.serve_app import ServeApplicationBuilder
 from infer_nexus.runtime.types import RuntimeTarget
 
-
 class RuntimeDispatcher:
-    """Resolve model runtime targets and delegate execution to RuntimeExecutor."""
+    """描述运行时组件的数据或行为。"""
 
     def __init__(
         self,
@@ -27,13 +26,13 @@ class RuntimeDispatcher:
         serve_builder: ServeApplicationBuilder,
         executor: RuntimeExecutor,
     ) -> None:
-        """初始化分发器，绑定注册表、Serve 构建器与执行器。"""
+        """初始化对象并保存运行时依赖。"""
         self.registry = registry
         self.serve_builder = serve_builder
         self.executor = executor
 
     def resolve_target(self, model: ModelConfig) -> RuntimeTarget:
-        """Build deployment target metadata from catalog + runtime builder."""
+        """根据模型配置解析运行时目标。"""
         # 核心职责：把“目录模型声明”转换成“可执行目标”，包含部署名和运行时上下文。
         deployment_name = self.serve_builder.deployment_factory.build_deployment_name(model)
         if model.backend == BackendType.VLLM_OPENAI_PROXY:
@@ -63,7 +62,7 @@ class RuntimeDispatcher:
         model: ModelConfig,
         request: ChatCompletionsRequest,
     ) -> ChatCompletionsResponse | Response:
-        """分发 chat 请求到目标执行器。"""
+        """将聊天请求分发到目标执行器。"""
         target = self.resolve_target(model)
         return await self.executor.execute_chat(target=target, request=request)
 
@@ -72,7 +71,7 @@ class RuntimeDispatcher:
         model: ModelConfig,
         request: EmbeddingRequest,
     ) -> EmbeddingResponse | Response:
-        """分发 embedding 请求到目标执行器。"""
+        """将向量化请求分发到目标执行器。"""
         target = self.resolve_target(model)
         return await self.executor.execute_embedding(target=target, request=request)
 
@@ -81,6 +80,6 @@ class RuntimeDispatcher:
         model: ModelConfig,
         request: RerankRequest,
     ) -> RerankResponse | Response:
-        """分发 rerank 请求到目标执行器。"""
+        """将 rerank 请求分发到目标执行器。"""
         target = self.resolve_target(model)
         return await self.executor.execute_rerank(target=target, request=request)

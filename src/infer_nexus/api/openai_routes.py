@@ -78,7 +78,7 @@ def runtime_execution_status(code: str) -> tuple[int, str]:
 
 @router.get("/models", response_model=ModelListResponse)
 async def list_models(registry: ModelRegistry = Depends(get_registry)) -> ModelListResponse:
-    """列出对外可见模型清单（以 alias 优先作为展示 ID）。"""
+    """列出对外可见模型清单（以 alias 优先作为展示 ID，因为在请求时要使用alias指定模型）。"""
     return ModelListResponse(
         data=[
             ModelSummary(
@@ -134,9 +134,15 @@ async def create_chat_completion(
         # 不涉及本地模型文件，所以不需要检查模型路径。
         if model.backend != BackendType.VLLM_OPENAI_PROXY:
             model_store.require_model_path(model)
+        
         admission.check_model_request(model)
+        # 这里dispatcher.dispatch_chat 返回的是一个协程，所以要await，并让出当前事件循环，等待结果返回后再继续执行后续代码。
         return await dispatcher.dispatch_chat(model, request)
     except ModelArtifactMissingError as exc:
+        # 模型本地产物不存在，通常表示权重文件还没准备好，或者挂载路径有问题。
+        # 对外返回 503，表达的是“当前服务暂不可用”，而不是请求格式有问题。
+        # 如果模型文件缺失，则返回 503 错误，表示服务暂时不可用
+        # 并且错误类型为 service_unavailable_error，错误代码为 model_artifact_missing。
         return openai_error_response(
             503,
             str(exc),
@@ -144,6 +150,10 @@ async def create_chat_completion(
             code="model_artifact_missing",
         )
     except AdmissionRejectedError as exc:
+        # 准入控制拒绝了这次请求，通常意味着容量、队列或策略条件不满足。
+        # 这里按 429 返回，更符合“请求过载/被限制”的客户端语义。
+        # 如果模型请求被拒绝，则返回 429 错误，表示请求频率过高
+        # 并且错误类型为 rate_limit_error，错误代码为 exc.code。
         return openai_error_response(
             429,
             str(exc),
@@ -151,6 +161,9 @@ async def create_chat_completion(
             code=exc.code,
         )
     except RuntimeNotConnectedError as exc:
+        # 运行时链路没有接通，例如 Serve handle 未就绪，或者当前执行模式没有绑定后端。
+        # 具体映射交给 helper，根据内部 code 统一翻译成对外状态码和错误类型。
+        # 如果运行时未连接，则返回 503 错误，表示服务暂时不可用
         status_code, error_type = runtime_not_connected_status(exc.code)
         return openai_error_response(
             status_code,
@@ -159,6 +172,8 @@ async def create_chat_completion(
             code=exc.code,
         )
     except RuntimeExecutionError as exc:
+        # 运行时已经接通，但后端执行过程中失败，比如推理、代理转发或流式响应处理出错。
+        # 这里保留异常日志，并把内部 code 翻译成 OpenAI 风格响应。
         logger.exception("Chat completion runtime execution failed for model '%s'.", request.model)
         status_code, error_type = runtime_execution_status(exc.code)
         return openai_error_response(
@@ -168,6 +183,8 @@ async def create_chat_completion(
             code=exc.code,
         )
     except BackendRequestValidationError as exc:
+        # 请求参数超出了后端当前支持范围，例如某些 tool / reasoning / content 形态不被接受。
+        # 这类问题属于客户端请求内容本身，需要返回 400 让调用方修正请求。
         return openai_error_response(
             400,
             str(exc),
@@ -219,6 +236,8 @@ async def create_embedding(
         admission.check_model_request(model)
         return await dispatcher.dispatch_embedding(model, request)
     except ModelArtifactMissingError as exc:
+        # 模型本地产物不存在，通常表示权重文件还没准备好，或者挂载路径有问题。
+        # 对外返回 503，表达的是“当前服务暂不可用”，而不是请求格式有问题。
         return openai_error_response(
             503,
             str(exc),
@@ -226,6 +245,8 @@ async def create_embedding(
             code="model_artifact_missing",
         )
     except AdmissionRejectedError as exc:
+        # 准入控制拒绝了这次请求，通常意味着容量、队列或策略条件不满足。
+        # 这里按 429 返回，更符合“请求过载/被限制”的客户端语义。
         return openai_error_response(
             429,
             str(exc),
@@ -233,6 +254,8 @@ async def create_embedding(
             code=exc.code,
         )
     except RuntimeNotConnectedError as exc:
+        # 运行时链路没有接通，例如 Serve handle 未就绪，或者当前执行模式没有绑定后端。
+        # 具体映射交给 helper，根据内部 code 统一翻译成对外状态码和错误类型。
         status_code, error_type = runtime_not_connected_status(exc.code)
         return openai_error_response(
             status_code,
@@ -241,6 +264,8 @@ async def create_embedding(
             code=exc.code,
         )
     except RuntimeExecutionError as exc:
+        # 运行时已经接通，但后端执行过程中失败，比如推理、代理转发或流式响应处理出错。
+        # 这里保留异常日志，并把内部 code 翻译成 OpenAI 风格响应。
         logger.exception("Embedding runtime execution failed for model '%s'.", request.model)
         status_code, error_type = runtime_execution_status(exc.code)
         return openai_error_response(
@@ -250,6 +275,8 @@ async def create_embedding(
             code=exc.code,
         )
     except BackendRequestValidationError as exc:
+        # 请求参数超出了后端当前支持范围，例如某些 tool / reasoning / content 形态不被接受。
+        # 这类问题属于客户端请求内容本身，需要返回 400 让调用方修正请求。
         return openai_error_response(
             400,
             str(exc),
@@ -300,6 +327,8 @@ async def _create_rerank_impl(
         admission.check_model_request(model)
         return await dispatcher.dispatch_rerank(model, request)
     except ModelArtifactMissingError as exc:
+        # 模型本地产物不存在，通常表示权重文件还没准备好，或者挂载路径有问题。
+        # 对外返回 503，表达的是“当前服务暂不可用”，而不是请求格式有问题。
         return openai_error_response(
             503,
             str(exc),
@@ -307,6 +336,8 @@ async def _create_rerank_impl(
             code="model_artifact_missing",
         )
     except AdmissionRejectedError as exc:
+        # 准入控制拒绝了这次请求，通常意味着容量、队列或策略条件不满足。
+        # 这里按 429 返回，更符合“请求过载/被限制”的客户端语义。
         return openai_error_response(
             429,
             str(exc),
@@ -314,6 +345,8 @@ async def _create_rerank_impl(
             code=exc.code,
         )
     except RuntimeNotConnectedError as exc:
+        # 运行时链路没有接通，例如 Serve handle 未就绪，或者当前执行模式没有绑定后端。
+        # 具体映射交给 helper，根据内部 code 统一翻译成对外状态码和错误类型。
         status_code, error_type = runtime_not_connected_status(exc.code)
         return openai_error_response(
             status_code,
@@ -322,6 +355,8 @@ async def _create_rerank_impl(
             code=exc.code,
         )
     except RuntimeExecutionError as exc:
+        # 运行时已经接通，但后端执行过程中失败，比如推理、代理转发或流式响应处理出错。
+        # 这里保留异常日志，并把内部 code 翻译成 OpenAI 风格响应。
         logger.exception("Rerank runtime execution failed for model '%s'.", request.model)
         status_code, error_type = runtime_execution_status(exc.code)
         return openai_error_response(
@@ -331,6 +366,8 @@ async def _create_rerank_impl(
             code=exc.code,
         )
     except BackendRequestValidationError as exc:
+        # 请求参数超出了后端当前支持范围，例如某些 tool / reasoning / content 形态不被接受。
+        # 这类问题属于客户端请求内容本身，需要返回 400 让调用方修正请求。
         return openai_error_response(
             400,
             str(exc),

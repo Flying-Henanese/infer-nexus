@@ -1,14 +1,13 @@
 
 services:
-  infer-test:
+  infer-nexus:
     image: infer:v1
-    container_name: infer-test
+    container_name: infer-nexus
     privileged: true
     ports:
       - "8000:8000"
     environment:
       - ASCEND_RT_VISIBLE_DEVICES=0
-      - ASCEND_VISIBLE_DEVICES=0
       - PYTHONPATH=/app/infer-nexus/src:$PYTHONPATH
     devices:
       - /dev/davinci_manager
@@ -20,7 +19,9 @@ services:
       - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi
       - /usr/local/sbin:/usr/local/sbin
       - /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool
+      # 挂载模型目录
       - /data1/models:/app/models
+      # 挂载代码目录
       - .:/app/infer-nexus
     command: /bin/bash -c "/app/infer-nexus/scripts/start_minimal_ascend.sh && tail -f /dev/null"
     stdin_open: true

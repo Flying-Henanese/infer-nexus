@@ -1,4 +1,4 @@
-"""Ray Serve application assembly utilities for infer-nexus runtime."""
+"""组装 infer-nexus 运行时的 Ray Serve 应用。"""
 
 from dataclasses import asdict
 from typing import Any
@@ -13,9 +13,8 @@ from infer_nexus.runtime.deployments import (
     ModelRuntimeReplica,
 )
 
-
 class ServeApplicationBuilder:
-    """Build Ray Serve deployment/application graph from declarative model registry."""
+    """描述运行时组件的数据或行为。"""
 
     def __init__(
         self,
@@ -24,7 +23,7 @@ class ServeApplicationBuilder:
         service_name: str = "infer-nexus",
         deployment_factory: DeploymentFactory | None = None,
     ) -> None:
-        """初始化 Serve 应用构建器。"""
+        """初始化对象并保存运行时依赖。"""
         self.model_store = model_store
         self.backend_init_mode = backend_init_mode
         self.service_name = service_name
@@ -32,7 +31,7 @@ class ServeApplicationBuilder:
         self.backend = VLLMBackend({})
 
     def build_specs(self, registry: ModelRegistry) -> list[DeploymentSpec]:
-        """Compile per-model deployment specs from the catalog registry."""
+        """执行运行时相关逻辑。"""
         return [
             self.deployment_factory.build_spec(model)
             for model in registry.list_models()
@@ -40,11 +39,11 @@ class ServeApplicationBuilder:
         ]
 
     def build_plan(self, registry: ModelRegistry) -> dict[str, dict[str, Any]]:
-        """Build serializable deployment plan for diagnostics and inspection."""
+        """执行运行时相关逻辑。"""
         return {spec.model_name: asdict(spec) for spec in self.build_specs(registry)}
 
     def build_local_dev_summary(self, registry: ModelRegistry) -> dict[str, Any]:
-        """Summarize declared model/deployment layout for local bring-up checks."""
+        """执行运行时相关逻辑。"""
         specs = self.build_specs(registry)
         return {
             "applications": [self.build_application_name(spec.model_name) for spec in specs],
@@ -57,11 +56,11 @@ class ServeApplicationBuilder:
         }
 
     def build_application_name(self, model_name: str) -> str:
-        """Build stable Serve application names for one-model-per-app deployments."""
+        """执行运行时相关逻辑。"""
         return f"{self.service_name}-model-{model_name}"
 
     def require_ray_serve(self) -> Any:
-        """Import Ray Serve runtime or fail with actionable dependency hint."""
+        """执行运行时相关逻辑。"""
         try:
             from ray import serve
         except ImportError as exc:
@@ -71,7 +70,7 @@ class ServeApplicationBuilder:
         return serve
 
     def build_runtime_context(self, registry: ModelRegistry, model_name: str) -> dict[str, Any]:
-        """Build validated runtime context passed into each model replica deployment."""
+        """构建模型副本所需的运行时上下文。"""
         model = registry.get(model_name)
         model_reference = self.model_store.resolve_model_reference(model)
         runtime_spec = self.backend.build_runtime_spec(model, model_reference)
@@ -92,7 +91,7 @@ class ServeApplicationBuilder:
         return runtime_context
 
     def validate_registry_runtime_configs(self, registry: ModelRegistry) -> None:
-        """Eagerly validate all model runtime contexts at startup."""
+        """执行运行时相关逻辑。"""
         for model in registry.list_models():
             if model.backend != BackendType.VLLM:
                 continue
@@ -104,7 +103,7 @@ class ServeApplicationBuilder:
         serve: Any | None = None,
         replica_cls: type[ModelRuntimeReplica] = ModelRuntimeReplica,
     ) -> dict[str, Any]:
-        """Create one Serve deployment binding per registered model."""
+        """为注册模型创建 Serve 部署绑定。"""
         serve_runtime = serve or self.require_ray_serve()
         bindings: dict[str, Any] = {}
 

@@ -1,4 +1,4 @@
-"""Execution adapter that bridges request schemas with runtime invocation paths."""
+"""连接 API 请求、模型部署目标和实际推理执行路径。"""
 
 from __future__ import annotations
 
@@ -39,10 +39,9 @@ from infer_nexus.runtime.types import RuntimeTarget
 
 logger = logging.getLogger(__name__)
 
-
 @dataclass(slots=True)
 class RuntimeExecutor:
-    """Execute inference requests via Serve handles or local stub replicas."""
+    """统一执行本地副本、Ray Serve 句柄和 OpenAI 代理模型请求。"""
 
     mode: str = "stub"
     handle_resolver: ServeDeploymentHandleResolver | None = None
@@ -53,7 +52,7 @@ class RuntimeExecutor:
         target: RuntimeTarget,
         request: ChatCompletionsRequest,
     ) -> ChatCompletionsResponse | Response:
-        """执行聊天请求并转换为统一响应结构。"""
+        """执行 chat completion，并按模型后端选择代理、Serve 或本地路径。"""
         if target.backend == BackendType.VLLM_OPENAI_PROXY:
             return await self._execute_proxy_chat(target=target, request=request)
         if request.stream:
@@ -82,6 +81,7 @@ class RuntimeExecutor:
         target: RuntimeTarget,
         request: ChatCompletionsRequest,
     ) -> StreamingResponse:
+        """执行流式 chat completion，并在返回响应前预取首块暴露早期错误。"""
         if self.mode == "serve":
             chunks = await self._invoke_handle_stream(
                 target=target,
@@ -105,7 +105,7 @@ class RuntimeExecutor:
         target: RuntimeTarget,
         request: EmbeddingRequest,
     ) -> EmbeddingResponse | Response:
-        """执行向量化请求并转换为统一响应结构。"""
+        """执行 embedding 请求，并把后端载荷整理为 OpenAI 兼容响应。"""
         if target.backend == BackendType.VLLM_OPENAI_PROXY:
             return await self._execute_proxy_embedding(target=target, request=request)
         if self.mode == "serve":
@@ -128,7 +128,7 @@ class RuntimeExecutor:
         target: RuntimeTarget,
         request: RerankRequest,
     ) -> RerankResponse | Response:
-        """执行 rerank 请求并转换为统一响应结构。"""
+        """执行 rerank 请求，并把后端载荷整理为统一 rerank 响应。"""
         if target.backend == BackendType.VLLM_OPENAI_PROXY:
             return await self._execute_proxy_rerank(target=target, request=request)
         if self.mode == "serve":
@@ -152,7 +152,7 @@ class RuntimeExecutor:
         method_name: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        """在本地进程内调用副本方法（stub/dev 路径）。"""
+        """在 stub/dev 模式下直接实例化副本并调用指定方法。"""
         # Local path is used for stub/dev mode without requiring Ray Serve connectivity.
         try:
             replica = ModelRuntimeReplica(target.runtime_context)
@@ -168,7 +168,7 @@ class RuntimeExecutor:
         method_name: str,
         payload: dict[str, Any],
     ) -> AsyncIterator[dict[str, Any] | bytes | str]:
-        """在本地进程内调用副本 streaming 方法（stub/dev 路径）。"""
+        """在 stub/dev 模式下调用本地副本的流式方法并归一化结果。"""
         try:
             replica = ModelRuntimeReplica(target.runtime_context)
             method = getattr(replica, method_name)
@@ -183,7 +183,7 @@ class RuntimeExecutor:
         method_name: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        """通过 Ray Serve deployment handle 调用远程副本方法。"""
+        """在 serve 模式下解析部署句柄并远程调用副本方法。"""
         # Serve mode relies on model-specific deployment handles resolved by app name + deployment name.
         if self.handle_resolver is None:
             raise RuntimeNotConnectedError(
@@ -244,7 +244,7 @@ class RuntimeExecutor:
         method_name: str,
         payload: dict[str, Any],
     ) -> AsyncIterator[dict[str, Any] | bytes | str]:
-        """通过 Ray Serve deployment handle 调用远程 streaming 副本方法。"""
+        """在 serve 模式下通过部署句柄调用远程流式副本方法。"""
         if self.handle_resolver is None:
             raise RuntimeNotConnectedError(
                 f"Runtime executor is configured for serve mode but no handle resolver is available "
@@ -310,7 +310,7 @@ class RuntimeExecutor:
             ) from exc
 
     async def _await_handle_response(self, response: Any) -> Any:
-        """Normalize different Ray/Serve return shapes into awaited payload."""
+        """兼容 awaitable、ObjectRef 风格和普通返回值。"""
         if inspect.isawaitable(response):
             return await response
         if hasattr(response, "result"):
@@ -318,7 +318,7 @@ class RuntimeExecutor:
         return response
 
     async def _normalize_stream_result(self, response: Any) -> AsyncIterator[dict[str, Any] | bytes | str]:
-        """Normalize local, fake, and Serve streaming return shapes into an async iterator."""
+        """把同步、异步和 Ray 风格的流式返回统一成异步迭代器。"""
         if hasattr(response, "__aiter__"):
             async for chunk in response:
                 yield chunk
@@ -352,16 +352,19 @@ class RuntimeExecutor:
         self,
         chunks: AsyncIterator[dict[str, Any] | bytes | str],
     ) -> AsyncIterator[dict[str, Any] | bytes | str]:
+        """先消费首个流式片段，让参数错误能以 JSON 错误返回。"""
         iterator = chunks.__aiter__()
         try:
             first = await iterator.__anext__()
         except StopAsyncIteration:
             async def empty() -> AsyncIterator[dict[str, Any] | bytes | str]:
+                """返回一个空的异步流。"""
                 if False:
                     yield {}
             return empty()
 
         async def replay() -> AsyncIterator[dict[str, Any] | bytes | str]:
+            """重放已预取的首块并继续转发剩余片段。"""
             yield first
             async for chunk in iterator:
                 yield chunk
@@ -369,6 +372,7 @@ class RuntimeExecutor:
         return replay()
 
     def _parse_proxy_config(self, target: RuntimeTarget) -> ProxyConfig:
+        """从运行时目标中读取并校验 OpenAI 兼容代理配置。"""
         raw = target.runtime_context.get("proxy_config") or {}
         try:
             return ProxyConfig.model_validate(raw)
@@ -379,6 +383,7 @@ class RuntimeExecutor:
             ) from exc
 
     def _build_proxy_headers(self, proxy_config: ProxyConfig, *, request_id: str) -> dict[str, str]:
+        """根据代理鉴权策略和请求追踪设置构造上游请求头。"""
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",
@@ -410,6 +415,7 @@ class RuntimeExecutor:
         payload: dict[str, Any],
         request_id: str,
     ) -> httpx.Response:
+        """向上游代理发起 JSON 请求，并按配置处理超时和重试。"""
         upstream = proxy_config.upstream_base_url.rstrip("/")
         timeout = httpx.Timeout(
             connect=proxy_config.timeout.connect_seconds,
@@ -445,11 +451,13 @@ class RuntimeExecutor:
         )
 
     def _proxy_payload(self, *, model_name: str, payload: dict[str, Any], proxy_config: ProxyConfig) -> dict[str, Any]:
+        """替换或保留请求中的模型名，生成发送给上游的载荷。"""
         request_payload = dict(payload)
         request_payload["model"] = proxy_config.upstream_model_name or model_name
         return request_payload
 
     def _to_proxy_response(self, response: httpx.Response, *, request_id: str) -> Response:
+        """将上游 HTTP 响应原样包装为网关响应并附加请求 ID。"""
         headers = {"X-Infer-Nexus-Request-ID": request_id}
         content_type = response.headers.get("content-type")
         if content_type:
@@ -466,6 +474,7 @@ class RuntimeExecutor:
         target: RuntimeTarget,
         request: ChatCompletionsRequest,
     ) -> ChatCompletionsResponse | Response:
+        """把 chat 请求转发到 OpenAI 兼容上游，必要时走 SSE 透传。"""
         proxy_config = self._parse_proxy_config(target)
         request_id = uuid4().hex
         payload = self._proxy_payload(
@@ -501,6 +510,7 @@ class RuntimeExecutor:
         payload: dict[str, Any],
         request_id: str,
     ) -> Response:
+        """建立上游流式 HTTP 连接并把 SSE 字节流透传给客户端。"""
         upstream = proxy_config.upstream_base_url.rstrip("/")
         timeout = httpx.Timeout(
             connect=proxy_config.timeout.connect_seconds,
@@ -520,6 +530,7 @@ class RuntimeExecutor:
             return self._to_proxy_response(response, request_id=request_id)
 
         async def iterator() -> Any:
+            """转发上游字节流并确保响应和客户端连接最终关闭。"""
             try:
                 async for chunk in response.aiter_bytes():
                     yield chunk
@@ -535,6 +546,7 @@ class RuntimeExecutor:
         )
 
     def _extract_execution_error_code(self, exc: Exception) -> str:
+        """从 Serve 包装异常和嵌套异常中提取稳定错误码。"""
         candidates = [
             exc,
             getattr(exc, "cause", None),
@@ -566,6 +578,7 @@ class RuntimeExecutor:
         return "runtime_execution_failed"
 
     def _extract_execution_error_message(self, exc: Exception) -> str:
+        """剥离框架异常前缀，提取适合返回给客户端的错误消息。"""
         candidates = [str(exc)]
         for attr in ("cause", "__cause__"):
             nested = getattr(exc, attr, None)
@@ -591,6 +604,7 @@ class RuntimeExecutor:
         target: RuntimeTarget,
         request: EmbeddingRequest,
     ) -> EmbeddingResponse | Response:
+        """把 embedding 请求转发到 OpenAI 兼容上游并透传响应。"""
         proxy_config = self._parse_proxy_config(target)
         request_id = uuid4().hex
         response = await self._request_proxy(
@@ -611,6 +625,7 @@ class RuntimeExecutor:
         target: RuntimeTarget,
         request: RerankRequest,
     ) -> RerankResponse | Response:
+        """把 rerank 请求转发到上游服务并透传响应。"""
         proxy_config = self._parse_proxy_config(target)
         request_id = uuid4().hex
         response = await self._request_proxy(
@@ -631,7 +646,7 @@ class RuntimeExecutor:
         target: RuntimeTarget,
         payload: dict[str, Any],
     ) -> ChatCompletionsResponse:
-        """Adapt backend payload to OpenAI-compatible chat response schema."""
+        """把最小后端 chat 载荷补齐为 OpenAI chat completion 响应。"""
         # payload 允许后端按最小约定返回字段；此处补齐默认值并强制映射到外部协议。
         return ChatCompletionsResponse(
             id=payload.get("id", f"chatcmpl-{uuid4().hex}"),
@@ -669,20 +684,25 @@ class RuntimeExecutor:
         )
 
     def _is_openai_chat_payload(self, payload: dict[str, Any]) -> bool:
+        """判断后端载荷是否已经是完整 OpenAI chat completion。"""
         return payload.get("object") == "chat.completion" and isinstance(payload.get("choices"), list)
 
     def _strip_internal_status(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """移除内部 `status=ok` 字段，避免污染透传 OpenAI 响应。"""
         if payload.get("status") != "ok":
             return dict(payload)
         return {key: value for key, value in payload.items() if key != "status"}
 
     def _encode_sse_chunk(self, chunk_payload: dict[str, Any]) -> bytes:
+        """把字典事件编码成 OpenAI SSE 的 `data:` 数据块。"""
         return f"data: {json.dumps(chunk_payload, ensure_ascii=False)}\n\n".encode("utf-8")
 
     def _is_chat_delta_event(self, chunk: dict[str, Any]) -> bool:
+        """识别内部约定的聊天增量事件。"""
         return chunk.get("type") == "chat_delta"
 
     def _is_done_sse_chunk(self, chunk: bytes | str) -> bool:
+        """检测原始 SSE 片段里是否已经包含 `[DONE]` 结束标记。"""
         if isinstance(chunk, bytes):
             text = chunk.decode("utf-8", errors="ignore")
         else:
@@ -695,6 +715,7 @@ class RuntimeExecutor:
         target: RuntimeTarget,
         chunks: dict[str, Any] | AsyncIterator[dict[str, Any] | bytes | str],
     ) -> StreamingResponse:
+        """根据兼容模式选择 SSE 透传或内部增量事件映射。"""
         if not isinstance(chunks, dict):
             runtime_spec = target.runtime_context.get("runtime_spec") or {}
             compat_mode = target.runtime_context.get("compat_mode") or runtime_spec.get("compat_mode")
@@ -721,6 +742,7 @@ class RuntimeExecutor:
         request_id = uuid4().hex
 
         async def iterator() -> Any:
+            """把单次载荷或预置片段输出为 OpenAI chat SSE 流。"""
             stream_chunks = payload.get("stream_chunks")
             if isinstance(stream_chunks, list):
                 saw_done = False
@@ -781,9 +803,11 @@ class RuntimeExecutor:
         self,
         chunks: AsyncIterator[dict[str, Any] | bytes | str],
     ) -> StreamingResponse:
+        """直接透传后端 SSE 片段，并在缺失时补充 `[DONE]`。"""
         request_id = uuid4().hex
 
         async def iterator() -> Any:
+            """逐块转发后端流式片段，兼容 bytes、str 和 dict 事件。"""
             saw_done = False
             try:
                 async for chunk in chunks:
@@ -817,9 +841,11 @@ class RuntimeExecutor:
         target: RuntimeTarget,
         chunks: AsyncIterator[dict[str, Any] | bytes | str],
     ) -> StreamingResponse:
+        """把内部 chat_delta 事件映射为 OpenAI chat completion chunk。"""
         request_id = uuid4().hex
 
         async def iterator() -> Any:
+            """维护 role、delta 和 finish 事件顺序并生成 SSE 输出。"""
             saw_done = False
             sent_role = False
             sent_finish = False
@@ -937,7 +963,7 @@ class RuntimeExecutor:
         target: RuntimeTarget,
         payload: dict[str, Any],
     ) -> EmbeddingResponse:
-        """Adapt backend payload to OpenAI-compatible embeddings response schema."""
+        """把后端 embedding 载荷校验并补齐为 OpenAI embedding 响应。"""
         # embedding data 逐项做结构校验，确保输出稳定且可被 OpenAI SDK 消费。
         return EmbeddingResponse(
             data=[
@@ -970,7 +996,7 @@ class RuntimeExecutor:
         target: RuntimeTarget,
         payload: dict[str, Any],
     ) -> RerankResponse:
-        """Adapt backend payload to native rerank response schema with safe fallback results."""
+        """把后端 rerank 载荷校验并补齐兜底结果。"""
         # 当后端无返回时提供可解释的降级结果，避免接口层直接失败。
         document_list = request.documents if isinstance(request.documents, list) else [request.documents]
         fallback_results = [

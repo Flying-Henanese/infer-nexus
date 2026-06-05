@@ -1,4 +1,4 @@
-"""Ray Serve deployment building blocks and per-model deployment specs."""
+"""定义 Ray Serve 部署规格、模型副本和部署参数生成逻辑。"""
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -10,10 +10,9 @@ from infer_nexus.core.schemas import ChatCompletionsRequest, EmbeddingRequest, R
 from infer_nexus.catalog.models import ModelConfig
 from infer_nexus.core.errors import BackendConfigurationError, BackendRequestValidationError, RuntimeExecutionError
 
-
 @dataclass(slots=True)
 class DeploymentSpec:
-    """Deployment declaration derived from one catalog model."""
+    """保存单个模型部署到 Ray Serve 时需要的资源和路由配置。"""
 
     model_name: str
     model_alias: str | None
@@ -27,16 +26,15 @@ class DeploymentSpec:
     ray_actor_options: dict[str, Any] = field(default_factory=dict)
     request_router_config: dict[str, Any] = field(default_factory=dict)
 
-
 class ModelRuntimeReplica:
-    """Serve replica that dispatches task requests into a backend adapter."""
+    """Ray Serve 模型副本，负责校验运行时规格并调用后端适配器。"""
 
     def __init__(
         self,
         runtime_context: dict[str, Any],
         backend: InferenceBackend | None = None,
     ) -> None:
-        """初始化模型副本并启动后端。"""
+        """创建模型副本、构造后端适配器，并在副本启动时完成后端初始化。"""
         self.runtime_context = runtime_context
         self.backend = backend or self._build_backend(runtime_context["runtime_spec"]["backend"])
         self.backend.validate_runtime_spec(
@@ -46,7 +44,7 @@ class ModelRuntimeReplica:
         self.backend.startup()
 
     def _build_backend(self, backend_name: str) -> InferenceBackend:
-        """Instantiate backend adapter from runtime spec."""
+        """根据 runtime_spec 中声明的后端名称选择对应的推理后端适配器。"""
         if backend_name == "vllm":
             return VLLMBackend(self.runtime_context["runtime_spec"])
         raise ValueError(f"unsupported backend '{backend_name}'")
@@ -57,6 +55,7 @@ class ModelRuntimeReplica:
         *,
         payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """兼容新旧调用参数名，并保证副本方法一定拿到请求载荷。"""
         resolved_payload = request_payload if request_payload is not None else payload
         if resolved_payload is None:
             raise TypeError("request_payload is required")
@@ -68,7 +67,7 @@ class ModelRuntimeReplica:
         *,
         payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """处理 chat completion 负载。"""
+        """校验 chat completion 请求并交给后端执行，统一包装运行时错误。"""
         request = ChatCompletionsRequest.model_validate(
             self._resolve_request_payload(request_payload, payload=payload)
         )
@@ -92,7 +91,7 @@ class ModelRuntimeReplica:
         *,
         payload: dict[str, Any] | None = None,
     ) -> AsyncIterator[dict[str, Any] | bytes | str]:
-        """处理 streaming chat completion 负载。"""
+        """校验流式 chat completion 请求，并逐块转发后端生成的响应片段。"""
         request = ChatCompletionsRequest.model_validate(
             self._resolve_request_payload(request_payload, payload=payload)
         )
@@ -109,7 +108,7 @@ class ModelRuntimeReplica:
             raise RuntimeExecutionError(str(exc), code="backend_misconfigured") from exc
 
     def _is_openai_chat_response(self, payload: dict[str, Any]) -> bool:
-        """Detect full OpenAI chat responses that should pass through unchanged."""
+        """判断后端返回值是否已经是完整 OpenAI chat 响应，可直接透传。"""
         return payload.get("object") == "chat.completion" and isinstance(payload.get("choices"), list)
 
     async def embedding(
@@ -118,7 +117,7 @@ class ModelRuntimeReplica:
         *,
         payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """处理 embedding 负载。"""
+        """校验 embedding 请求并交给后端执行，返回统一成功载荷。"""
         request = EmbeddingRequest.model_validate(
             self._resolve_request_payload(request_payload, payload=payload)
         )
@@ -140,7 +139,7 @@ class ModelRuntimeReplica:
         *,
         payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """处理 rerank 负载。"""
+        """校验 rerank 请求并交给后端执行，返回统一成功载荷。"""
         request = RerankRequest.model_validate(
             self._resolve_request_payload(request_payload, payload=payload)
         )
@@ -157,7 +156,7 @@ class ModelRuntimeReplica:
         return {"status": "ok", **response}
 
     async def __call__(self, request: Any) -> dict[str, Any]:
-        """Serve HTTP ingress 占位处理。"""
+        """提供占位 HTTP 入口，实际推理由具名任务方法处理。"""
         # Phase 1 keeps ingress minimal; typed task methods are used for inference dispatch.
         return {
             "status": "not_implemented",
@@ -167,7 +166,7 @@ class ModelRuntimeReplica:
         }
 
     def __del__(self) -> None:
-        """析构时尝试关闭后端资源。"""
+        """副本销毁时尽力关闭后端资源，避免清理异常影响进程退出。"""
         backend = getattr(self, "backend", None)
         if backend is not None:
             try:
@@ -175,16 +174,15 @@ class ModelRuntimeReplica:
             except Exception:
                 pass
 
-
 class RuntimeApplicationRoot:
-    """Synthetic ingress to keep all model deployments inside one Serve application."""
+    """Ray Serve 根入口，用于把多个模型部署挂在同一个应用下。"""
 
     def __init__(self, **model_deployments: Any) -> None:
-        """初始化根 ingress，持有所有模型部署绑定。"""
+        """保存模型名到部署绑定的映射，供根入口健康检查展示。"""
         self.model_deployments = model_deployments
 
     async def __call__(self, request: Any | None = None) -> dict[str, Any]:
-        """返回根应用健康状态与已挂载模型列表。"""
+        """返回运行时根应用状态、请求路径和当前挂载的模型列表。"""
         return {
             "status": "ok",
             "message": "infer-nexus runtime root is active",
@@ -192,20 +190,19 @@ class RuntimeApplicationRoot:
             "path": getattr(getattr(request, "url", None), "path", None),
         }
 
-
 class DeploymentFactory:
-    """Translate model catalog entries into Ray Serve deployment parameters."""
+    """把模型目录配置转换成 Ray Serve 可消费的部署声明。"""
 
     def __init__(self, inference_device_type: Literal["cuda", "npu"] = "cuda") -> None:
-        """Initialize deployment resource mapping for the configured inference device."""
+        """记录推理设备类型，用于后续生成 CUDA 或 NPU 的 Ray 资源配置。"""
         self.inference_device_type = inference_device_type
 
     def build_deployment_name(self, model: ModelConfig) -> str:
-        """Build stable per-model deployment names for one-model-per-deployment topology."""
+        """为模型生成稳定部署名，保证 Serve 句柄查找和计划输出一致。"""
         return f"model-{model.name}"
 
     def build_accelerator_actor_options(self, accelerator_per_replica: int | float) -> dict[str, Any]:
-        """Map logical per-replica accelerator demand to Ray actor options."""
+        """把每副本加速器数量映射为 Ray actor 的 GPU 或自定义 NPU 资源。"""
         if self.inference_device_type == "cuda":
             return {"num_gpus": accelerator_per_replica}
         if self.inference_device_type == "npu":
@@ -213,7 +210,7 @@ class DeploymentFactory:
         raise ValueError(f"unsupported inference_device_type '{self.inference_device_type}'")
 
     def build_spec(self, model: ModelConfig) -> DeploymentSpec:
-        """从模型配置生成部署规格。"""
+        """汇总模型资源、伸缩和路由配置，生成完整 DeploymentSpec。"""
         # Replica bounds are declarative inputs; Serve owns runtime autoscaling behavior.
         autoscaling_config = {
             "min_replicas": model.min_replicas,
@@ -240,7 +237,7 @@ class DeploymentFactory:
         )
 
     def build_request_router_config(self, request_router_config: dict[str, Any]) -> Any:
-        """Materialize request router config when Ray Serve is available."""
+        """在 Ray Serve 可用时创建 RequestRouterConfig，否则保留普通字典。"""
         if not request_router_config:
             return None
         try:
@@ -250,7 +247,7 @@ class DeploymentFactory:
         return RequestRouterConfig(**request_router_config)
 
     def build_serve_deployment_kwargs(self, spec: DeploymentSpec) -> dict[str, Any]:
-        """Produce kwargs passed to `serve.deployment(...)`."""
+        """把 DeploymentSpec 转换成 serve.deployment 所需的关键字参数。"""
         kwargs = {
             "name": spec.deployment_name,
             "ray_actor_options": dict(spec.ray_actor_options),

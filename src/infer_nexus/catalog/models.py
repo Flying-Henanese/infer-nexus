@@ -1,4 +1,9 @@
-"""Typed schemas for declarative model catalog entries."""
+"""声明式模型目录条目的类型化结构。
+
+目录结构描述 ``infer-nexus`` 可以本地服务或代理转发的所有模型。这些 Pydantic
+模型会把 YAML 配置标准化为类型化 Python 对象，执行跨字段约束校验，并为运行时、
+路由和后端层提供默认值。
+"""
 
 from typing import Any
 
@@ -8,14 +13,23 @@ from infer_nexus.core.enums import BackendType, CompatibilityMode, ModelStatus, 
 
 
 class ModelLoadingConfig(BaseModel):
-    """Ray/vLLM-style model loading options."""
+    """远程模型产物加载所需的可选模型标识和版本。
+
+    ``model_id`` 通常是 Hugging Face 风格的仓库标识。设置后，运行时启动前可以把
+    它解析为本地产物路径。``revision`` 用于在产物提供方支持版本化引用时固定分支、
+    标签或提交。
+    """
 
     model_id: str | None = None
     revision: str | None = None
 
 
 class DeploymentConfig(BaseModel):
-    """Ray Serve deployment overrides aligned with LLMConfig semantics."""
+    """与 LLMConfig 语义对齐的 Ray Serve 部署覆盖项。
+
+    这些字段刻意保留为自由结构的字典，因为 Ray Serve 和 vLLM 的部署选项会独立于
+    目录结构演进。运行时构建器会把它们传递给部署构造层。
+    """
 
     autoscaling_config: dict[str, Any] = Field(default_factory=dict)
     ray_actor_options: dict[str, Any] = Field(default_factory=dict)
@@ -23,7 +37,7 @@ class DeploymentConfig(BaseModel):
 
 
 class ProxyAuthConfig(BaseModel):
-    """Optional upstream auth config for proxy backends."""
+    """OpenAI 兼容上游代理目标的认证配置。"""
 
     mode: str = "none"
     env_var: str | None = None
@@ -31,7 +45,7 @@ class ProxyAuthConfig(BaseModel):
 
 
 class ProxyTimeoutConfig(BaseModel):
-    """Proxy timeout settings in seconds."""
+    """上游代理 HTTP 请求的超时配置，单位为秒。"""
 
     connect_seconds: int | float = Field(default=3, gt=0)
     read_seconds: int | float = Field(default=180, gt=0)
@@ -40,7 +54,7 @@ class ProxyTimeoutConfig(BaseModel):
 
 
 class ProxyRetryConfig(BaseModel):
-    """Proxy retry settings."""
+    """上游代理瞬时失败的重试策略。"""
 
     max_attempts: int = Field(default=1, ge=1)
     backoff_ms: int = Field(default=0, ge=0)
@@ -48,21 +62,25 @@ class ProxyRetryConfig(BaseModel):
 
 
 class ProxyStreamingConfig(BaseModel):
-    """Streaming passthrough toggles."""
+    """控制代理后端的流式透传行为。"""
 
     enabled: bool = True
     passthrough_sse: bool = True
 
 
 class ProxyHeadersPolicy(BaseModel):
-    """Header forwarding policy for proxy backend."""
+    """OpenAI 兼容代理请求的请求头转发策略。"""
 
     pass_request_id: bool = True
     forward_authorization: bool = False
 
 
 class ProxyConfig(BaseModel):
-    """Per-model upstream config for OpenAI-compatible proxy mode."""
+    """OpenAI 兼容代理模式下的单模型上游配置。
+
+    代理模型不会启动本地 vLLM engine。请求会按照本模型的认证、超时、重试、流式和
+    请求头策略转发到 ``upstream_base_url``。
+    """
 
     upstream_base_url: str
     upstream_model_name: str | None = None
@@ -74,7 +92,11 @@ class ProxyConfig(BaseModel):
 
 
 class VLLMRequestPolicy(BaseModel):
-    """Per-model request passthrough policy for local vLLM backends."""
+    """本地 vLLM 后端的单模型请求透传策略。
+
+    该策略控制哪些 OpenAI 风格请求特性可以进入本地 vLLM 执行路径。除非显式开启，
+    否则会阻止不受支持的工具调用、reasoning 字段或未知请求扩展进入模型。
+    """
 
     allow_tools: bool = False
     allow_reasoning: bool = False
@@ -82,7 +104,11 @@ class VLLMRequestPolicy(BaseModel):
 
 
 class VLLMOpenAIServingConfig(BaseModel):
-    """Configuration for vLLM OpenAI-compatible serving semantics inside Ray Serve."""
+    """Ray replica 内 vLLM OpenAI 兼容 serving 的配置。
+
+    启用后，strict/native 执行路径可以在 replica 内构造 vLLM 的 OpenAI serving
+    对象，并按其语义处理请求，而不是走本地 best-effort 的 engine 翻译路径。
+    """
 
     enabled: bool = False
     enable_reasoning: bool = False
@@ -90,7 +116,7 @@ class VLLMOpenAIServingConfig(BaseModel):
 
 
 class VLLMConfig(BaseModel):
-    """Backend-scoped local vLLM configuration."""
+    """本地 vLLM 模型部署的后端级配置。"""
 
     engine_kwargs: dict[str, Any] = Field(default_factory=dict)
     request_defaults: dict[str, Any] = Field(default_factory=dict)
@@ -99,7 +125,11 @@ class VLLMConfig(BaseModel):
 
 
 class ModelConfig(BaseModel):
-    """One declarative model entry loaded from ``config/models.yaml``."""
+    """从模型目录加载的一条声明式模型配置。
+
+    ``ModelConfig`` 汇总单个已注册模型的用户侧标识、任务类型、后端类型、本地或代理
+    运行时配置、资源需求、部署覆盖项和运维元数据。
+    """
 
     name: str
     alias: str | None = None
@@ -128,7 +158,25 @@ class ModelConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_replica_bounds(self) -> "ModelConfig":
-        """Ensure replica bounds are internally consistent."""
+        """校验跨字段约束，并标准化 engine kwargs。
+
+        该校验器负责处理单字段约束无法表达的关系：
+
+        - ``max_replicas`` 不能小于 ``min_replicas``。
+        - 顶层 ``engine_kwargs`` 会与 ``vllm.engine_kwargs`` 合并。
+        - 代理后端必须定义 ``proxy_config``。
+        - native/strict 本地 vLLM 模式只能用于受支持的任务，并在需要时要求启用
+          OpenAI serving。
+        - request router 配置只接受本地 vLLM chat 模型使用。
+        - 本地非代理模型必须提供 ``model_path`` 或可加载的
+          ``model_loading_config.model_id``。
+
+        Returns:
+            标准化并校验后的模型配置。
+
+        Raises:
+            ValueError: 当配置包含不支持的字段组合时抛出。
+        """
         if self.max_replicas < self.min_replicas:
             raise ValueError("max_replicas must be >= min_replicas")
 
@@ -170,6 +218,6 @@ class ModelConfig(BaseModel):
 
 
 class ModelCatalogFile(BaseModel):
-    """Top-level model catalog file."""
+    """模型目录文件的顶层结构。"""
 
     models: list[ModelConfig]

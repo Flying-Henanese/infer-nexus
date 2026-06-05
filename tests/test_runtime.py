@@ -1656,10 +1656,62 @@ def test_vllm_backend_startup_initializes_embedding_adapter_when_enabled(
     backend.startup()
 
     assert captured_kwargs['model'] == 'Qwen/Qwen3-Embedding-8B'
-    assert captured_kwargs['task'] == 'embed'
+    assert captured_kwargs['runner'] == 'pooling'
+    assert 'task' not in captured_kwargs
     assert backend.engine_kind == 'sync'
     assert backend.engine_state == 'ready'
     assert isinstance(backend.openai_serving_embedding_adapter, FakeOpenAIEmbeddingServingAdapter)
+
+
+def test_vllm_backend_startup_uses_pooling_runner_for_embedding_when_llm_accepts_kwargs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """vLLM 0.18.x uses runner=pooling for embedding engines."""
+    attempts = []
+
+    class FakeLLM:
+        def __init__(self, **kwargs) -> None:
+            attempts.append(dict(kwargs))
+            self.supported_tasks = ['embed']
+            self.llm_engine = types.SimpleNamespace(
+                model_config='model-config',
+                renderer='renderer',
+                vllm_config='vllm-config',
+            )
+
+    fake_vllm = types.SimpleNamespace(LLM=FakeLLM)
+    monkeypatch.setitem(sys.modules, 'vllm', fake_vllm)
+    monkeypatch.setattr(
+        VLLMBackend,
+        '_initialize_openai_serving_embedding_adapter',
+        lambda self: FakeOpenAIEmbeddingServingAdapter(response={'ok': True}),
+    )
+    monkeypatch.setattr(
+        VLLMBackend,
+        '_initialize_openai_serving_chat_adapter',
+        lambda self: None,
+    )
+
+    backend = VLLMBackend(
+        {
+            'backend': 'vllm',
+            'model_path': 'Qwen/Qwen3-Embedding-8B',
+            'tensor_parallel_size': 1,
+            'dtype': 'auto',
+            'task_mode': 'embed',
+            'engine_kwargs': {},
+            'openai_serving': {'enabled': True},
+            'compat_mode': CompatibilityMode.VLLM_NATIVE.value,
+            'backend_init_mode': 'real',
+        }
+    )
+
+    backend.startup()
+
+    assert len(attempts) == 1
+    assert attempts[0]['runner'] == 'pooling'
+    assert 'task' not in attempts[0]
+    assert backend.engine_state == 'ready'
 
 
 def test_vllm_backend_chat_completion_stream_uses_native_vllm_deltas() -> None:

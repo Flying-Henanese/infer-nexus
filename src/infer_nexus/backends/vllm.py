@@ -261,19 +261,33 @@ class VLLMBackend(InferenceBackend):
                 llm_kwargs["gpu_memory_utilization"] = gpu_memory_utilization
             if max_model_len is not None and ("max_model_len" in llm_init_args or accepts_var_kwargs):
                 llm_kwargs["max_model_len"] = max_model_len
-            if "task" in llm_init_args or accepts_var_kwargs:
-                llm_kwargs["task"] = requested_mode or "auto"
-            elif (
+            if (
                 requested_mode in {"embed", "score"}
                 and ("runner" in llm_init_args or accepts_var_kwargs)
             ):
-                # Older vLLM releases use runner="pooling" for embedding / scoring
-                # models instead of the newer task=... API.
+                # vLLM 0.18.x selects embedding / scoring engines via
+                # runner="pooling"; task is a per-pooling-request concept there.
                 llm_kwargs["runner"] = "pooling"
+            elif "task" in llm_init_args:
+                llm_kwargs["task"] = requested_mode or "auto"
         except (TypeError, ValueError):
             pass
 
-        self.engine = LLM(**llm_kwargs)
+        try:
+            self.engine = LLM(**llm_kwargs)
+        except TypeError as exc:
+            if (
+                requested_mode in {"embed", "score"}
+                and "unexpected keyword argument 'task'" in str(exc)
+                and llm_kwargs.get("task") is not None
+                and ("runner" in llm_init_args or accepts_var_kwargs)
+            ):
+                fallback_llm_kwargs = dict(llm_kwargs)
+                fallback_llm_kwargs.pop("task", None)
+                fallback_llm_kwargs["runner"] = "pooling"
+                self.engine = LLM(**fallback_llm_kwargs)
+            else:
+                raise
         self.engine_kind = "sync"
         supported_tasks = getattr(self.engine, "supported_tasks", None)
         if not supported_tasks:

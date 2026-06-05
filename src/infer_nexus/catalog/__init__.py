@@ -1,1 +1,6 @@
-"""Catalog layer for declarative model inventory loading and lookup."""
+"""模型目录的声明式加载、校验和查询支持。
+
+catalog 包是 ``infer-nexus`` 控制面中记录已知模型的来源。它定义类型化配置
+结构，从磁盘加载模型目录文件，并提供内存注册表，把客户端使用的模型名解析为
+规范的 ``ModelConfig`` 条目。
+"""

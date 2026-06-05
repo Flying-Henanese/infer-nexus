@@ -11,7 +11,6 @@ import importlib
 import inspect
 import logging
 import re
-import struct
 from collections.abc import AsyncIterator
 from time import time
 from typing import Any
@@ -30,7 +29,7 @@ from infer_nexus.backends.vllm_local_best_effort import LocalBestEffortVLLMExecu
 from infer_nexus.backends.vllm_strict import StrictNativeVLLMExecutor
 from infer_nexus.catalog.models import ModelConfig
 from infer_nexus.core.enums import CompatibilityMode
-from infer_nexus.core.errors import BackendConfigurationError, BackendRequestValidationError
+from infer_nexus.core.errors import BackendConfigurationError
 from infer_nexus.core.schemas import ChatCompletionsRequest, EmbeddingRequest, RerankRequest
 
 
@@ -262,7 +261,7 @@ class VLLMBackend(InferenceBackend):
                 llm_kwargs["gpu_memory_utilization"] = gpu_memory_utilization
             if max_model_len is not None and ("max_model_len" in llm_init_args or accepts_var_kwargs):
                 llm_kwargs["max_model_len"] = max_model_len
-            if "task" in llm_init_args:
+            if "task" in llm_init_args or accepts_var_kwargs:
                 llm_kwargs["task"] = requested_mode or "auto"
             elif (
                 requested_mode in {"embed", "score"}
@@ -409,19 +408,12 @@ class VLLMBackend(InferenceBackend):
         self.strict_executor._raise_openai_embedding_serving_unavailable(reason)
 
     def _normalize_embedding_inputs(self, request: EmbeddingRequest) -> list[str]:
-        """把 embedding 输入规范化为非空字符串列表。"""
-        inputs = request.input if isinstance(request.input, list) else [request.input]
-        if not inputs:
-            raise BackendRequestValidationError(
-                "Embedding requests must include at least one input.",
-                code="invalid_input",
-            )
-        return inputs
+        """Deprecated: delegate local embedding input normalization to the local executor."""
+        return self.local_best_effort_executor._normalize_embedding_inputs(request)
 
     def _encode_embedding_base64(self, embedding: list[float]) -> str:
-        """把浮点 embedding 向量编码为 OpenAI 兼容的 base64。"""
-        packed = struct.pack(f"<{len(embedding)}f", *embedding)
-        return base64.b64encode(packed).decode("ascii")
+        """Deprecated: delegate local embedding encoding to the local executor."""
+        return self.local_best_effort_executor._encode_embedding_base64(embedding)
 
     def _build_embedding_stub_response(
         self,
@@ -430,35 +422,13 @@ class VLLMBackend(InferenceBackend):
         runtime_context: dict[str, Any],
         inputs: list[str],
     ) -> dict[str, Any]:
-        """构建确定性的 stub embedding 响应。"""
-        data = []
-        for index, item in enumerate(inputs):
-            embedding = [
-                float(len(item)),
-                float(index),
-                float(len(runtime_spec["backend"])),
-            ]
-            if request.encoding_format == "base64":
-                value: list[float] | str = self._encode_embedding_base64(embedding)
-            else:
-                value = embedding
-            data.append({"index": index, "embedding": value})
-
-        return {
-            "data": data,
-            "model": request.model,
-            "usage": {
-                "prompt_tokens": len(inputs),
-                "completion_tokens": 0,
-                "total_tokens": len(inputs),
-            },
-            "backend": runtime_spec["backend"],
-            "deployment": runtime_context["deployment_name"],
-            "raw": {
-                "input_count": len(inputs),
-                "engine_state": self.engine_state,
-            },
-        }
+        """Deprecated: delegate local embedding stub shaping to the local executor."""
+        return self.local_best_effort_executor._build_embedding_stub_response(
+            request,
+            runtime_spec,
+            runtime_context,
+            inputs,
+        )
 
     def _convert_embedding_result(
         self,
@@ -468,58 +438,21 @@ class VLLMBackend(InferenceBackend):
         runtime_context: dict[str, Any],
         result: Any,
     ) -> dict[str, Any]:
-        """把 vLLM embedding 输出转换为后端响应结构。"""
-        if not result:
-            raise RuntimeError("vLLM embed returned no result")
-
-        data = []
-        prompt_tokens = 0
-        for index, item in enumerate(result):
-            outputs = getattr(item, "outputs", None)
-            if outputs is None:
-                raise RuntimeError("vLLM embedding result contained no outputs")
-
-            embedding = getattr(outputs, "embedding", None)
-            if embedding is None:
-                raise RuntimeError("vLLM embedding output contained no embedding vector")
-
-            prompt_tokens += len(getattr(item, "prompt_token_ids", None) or [])
-            vector = list(embedding)
-            if request.encoding_format == "base64":
-                value: list[float] | str = self._encode_embedding_base64(vector)
-            else:
-                value = vector
-            data.append({"index": index, "embedding": value})
-
-        return {
-            "data": data,
-            "model": request.model,
-            "usage": {
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": 0,
-                "total_tokens": prompt_tokens,
-            },
-            "backend": runtime_spec["backend"],
-            "deployment": runtime_context["deployment_name"],
-        }
+        """Deprecated: delegate local embedding result shaping to the local executor."""
+        return self.local_best_effort_executor._convert_embedding_result(
+            request=request,
+            runtime_spec=runtime_spec,
+            runtime_context=runtime_context,
+            result=result,
+        )
 
     def _normalize_rerank_documents(self, request: RerankRequest) -> list[str]:
-        """把 rerank 文档规范化为非空字符串列表。"""
-        documents = request.documents if isinstance(request.documents, list) else [request.documents]
-        if not documents:
-            raise BackendRequestValidationError(
-                "Rerank requests must include at least one document.",
-                code="invalid_input",
-            )
-        return documents
+        """Deprecated: delegate local rerank input normalization to the local executor."""
+        return self.local_best_effort_executor._normalize_rerank_documents(request)
 
     def _score_stub_document(self, query: str, document: str) -> float:
-        """为 stub rerank 计算简单的词面相关性分数。"""
-        query_terms = {term for term in query.lower().split() if term}
-        document_terms = {term for term in document.lower().split() if term}
-        overlap = len(query_terms & document_terms)
-        length_penalty = max(len(document_terms), 1)
-        return overlap + (overlap / length_penalty)
+        """Deprecated: delegate local rerank stub scoring to the local executor."""
+        return self.local_best_effort_executor._score_stub_document(query, document)
 
     def _build_rerank_stub_response(
         self,
@@ -528,31 +461,13 @@ class VLLMBackend(InferenceBackend):
         runtime_context: dict[str, Any],
         documents: list[str],
     ) -> dict[str, Any]:
-        """构建确定性的 stub rerank 响应。"""
-        scored = [
-            {
-                "index": index,
-                "document": {"text": document},
-                "relevance_score": float(self._score_stub_document(request.query, document)),
-            }
-            for index, document in enumerate(documents)
-        ]
-        scored.sort(key=lambda item: item["relevance_score"], reverse=True)
-        if request.top_n > 0:
-            scored = scored[: request.top_n]
-
-        return {
-            "id": f"rerank-{uuid4().hex}",
-            "model": request.model,
-            "usage": {"total_tokens": 1 + len(documents)},
-            "results": scored,
-            "backend": runtime_spec["backend"],
-            "deployment": runtime_context["deployment_name"],
-            "raw": {
-                "document_count": len(documents),
-                "engine_state": self.engine_state,
-            },
-        }
+        """Deprecated: delegate local rerank stub shaping to the local executor."""
+        return self.local_best_effort_executor._build_rerank_stub_response(
+            request,
+            runtime_spec,
+            runtime_context,
+            documents,
+        )
 
     def _convert_rerank_result(
         self,
@@ -563,38 +478,14 @@ class VLLMBackend(InferenceBackend):
         documents: list[str],
         result: Any,
     ) -> dict[str, Any]:
-        """把 vLLM score 输出转换为 rerank 响应结构。"""
-        if not result:
-            raise RuntimeError("vLLM score returned no result")
-
-        scored = []
-        total_tokens = 0
-        for index, item in enumerate(result):
-            outputs = getattr(item, "outputs", None)
-            if outputs is None or getattr(outputs, "score", None) is None:
-                raise RuntimeError("vLLM score output contained no score")
-
-            total_tokens += len(getattr(item, "prompt_token_ids", None) or [])
-            scored.append(
-                {
-                    "index": index,
-                    "document": {"text": documents[index]},
-                    "relevance_score": float(outputs.score),
-                }
-            )
-
-        scored.sort(key=lambda item: item["relevance_score"], reverse=True)
-        if request.top_n > 0:
-            scored = scored[: request.top_n]
-
-        return {
-            "id": f"rerank-{uuid4().hex}",
-            "model": request.model,
-            "usage": {"total_tokens": total_tokens},
-            "results": scored,
-            "backend": runtime_spec["backend"],
-            "deployment": runtime_context["deployment_name"],
-        }
+        """Deprecated: delegate local rerank result shaping to the local executor."""
+        return self.local_best_effort_executor._convert_rerank_result(
+            request=request,
+            runtime_spec=runtime_spec,
+            runtime_context=runtime_context,
+            documents=documents,
+            result=result,
+        )
 
     def _merge_request_extras(
         self,
@@ -1092,23 +983,7 @@ class VLLMBackend(InferenceBackend):
         """执行 embedding 请求。"""
         if self._is_vllm_native(runtime_spec):
             return await self.strict_executor.embedding(runtime_spec, request, runtime_context)
-
-        inputs = self._normalize_embedding_inputs(request)
-        if self.engine is None:
-            return self._build_embedding_stub_response(
-                request,
-                runtime_spec,
-                runtime_context,
-                inputs,
-            )
-
-        result = self.engine.embed(inputs)
-        return self._convert_embedding_result(
-            request=request,
-            runtime_spec=runtime_spec,
-            runtime_context=runtime_context,
-            result=result,
-        )
+        return await self.local_best_effort_executor.embedding(runtime_spec, request, runtime_context)
 
     async def rerank(
         self,
@@ -1116,36 +991,7 @@ class VLLMBackend(InferenceBackend):
         request: RerankRequest,
         runtime_context: dict[str, Any],
     ) -> dict[str, Any]:
-        """通过 vLLM scoring 执行 rerank 请求。"""
+        """执行 rerank 请求；rerank 当前仅支持 local_best_effort。"""
         if self._is_vllm_native(runtime_spec):
             raise BackendConfigurationError("vllm_native is not supported for VLLM rerank.")
-
-        documents = self._normalize_rerank_documents(request)
-        if self.engine is None:
-            return self._build_rerank_stub_response(
-                request,
-                runtime_spec,
-                runtime_context,
-                documents,
-            )
-
-        score_kwargs: dict[str, Any] = {}
-        score_signature = inspect.signature(self.engine.score)
-        score_args = score_signature.parameters
-        score_accepts_var_kwargs = any(
-            parameter.kind == inspect.Parameter.VAR_KEYWORD
-            for parameter in score_args.values()
-        )
-
-        chat_template = (runtime_spec.get("engine_kwargs") or {}).get("chat_template")
-        if chat_template and ("chat_template" in score_args or score_accepts_var_kwargs):
-            score_kwargs["chat_template"] = chat_template
-
-        result = self.engine.score(request.query, documents, **score_kwargs)
-        return self._convert_rerank_result(
-            request=request,
-            runtime_spec=runtime_spec,
-            runtime_context=runtime_context,
-            documents=documents,
-            result=result,
-        )
+        return await self.local_best_effort_executor.rerank(runtime_spec, request, runtime_context)

@@ -130,12 +130,12 @@ models:
     model_path: /nas_data/models/Qwen/Qwen3.5-9B
     dtype: auto
     tensor_parallel_size: 1
-    max_model_len: 8192
+    max_model_len: 12000
     cpu_per_replica: 4
-    gpu_per_replica: 0.7
-    gpu_memory_utilization: 0.7
+    gpu_per_replica: 0.6
+    gpu_memory_utilization: 0.6
     min_replicas: 1
-    max_replicas: 1
+    max_replicas: 2
     deployment_config:
       request_router_config:
         request_router_class: ray.serve.llm.request_router.PrefixCacheAffinityRouter

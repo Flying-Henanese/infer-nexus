@@ -8,10 +8,12 @@ Updated conclusion:
 
 - do not continue with a gateway-owned sticky-session design
 - do not treat `session_id` stickiness as the primary solution
-- prefer Ray Serve's replica-level prefix-cache-aware routing as the first-class direction
+- use Ray Serve's replica-level prefix-cache-aware routing as the first-class direction
 - keep the optimization scope limited to `task: chat`
+- the current implementation already supports passing `PrefixCacheAffinityRouter`
+  through `deployment_config.request_router_config` for local vLLM chat deployments
 
-This document records the updated design position after investigating Ray Serve and vLLM capabilities.
+This document records the updated design position after investigating Ray Serve and vLLM capabilities, and reflects the current implementation state.
 
 ---
 
@@ -113,7 +115,7 @@ Implications:
 
 ## 6. Core Design Decision
 
-The primary direction for future investigation is:
+The implemented direction is:
 
 - use Ray Serve's prefix-cache-aware routing rather than implementing session-based sticky routing in `infer-nexus`
 
@@ -122,6 +124,7 @@ Restated more concretely:
 1. `infer-nexus` should continue owning northbound OpenAI-compatible APIs and model selection.
 2. Ray Serve should be treated as the preferred layer for replica-level cache-affinity decisions.
 3. vLLM should remain responsible for the actual APC/prefix-cache behavior inside each replica.
+4. Model configuration may opt into Ray Serve's prefix-aware router through `deployment_config.request_router_config`.
 
 This is a cleaner responsibility split than trying to make the gateway itself simulate cache-affinity ownership.
 
@@ -160,46 +163,62 @@ This is good news because:
 - the current stack does not need to invent a fake "replica address" abstraction
 - the right routing layer is already present in the execution path
 
-### 8.2 What does not line up yet
+### 8.2 What is now implemented
 
-The current codebase does not yet configure any Serve request router for model deployments.
+The current codebase now supports configuring a Serve request router for local vLLM chat deployments.
 
-Today, the local `vllm` path:
+Today, the local `vllm` chat path:
 
 - creates one deployment per model
 - binds `ModelRuntimeReplica`
 - gets a deployment handle by app/deployment name
 - calls replica methods with a dict payload
+- carries `deployment_config.request_router_config` from the model catalog into `DeploymentSpec`
+- constructs Ray Serve `RequestRouterConfig` when Ray Serve is available
+- passes `request_router_config` into `serve.deployment(...)`
 
-What is missing:
+The checked-in model configuration includes this form:
 
-- deployment-level `RequestRouterConfig`
-- a verified integration of `PrefixCacheAffinityRouter`
-- proof that the built-in router correctly understands our current request shape
+```yaml
+deployment_config:
+  request_router_config:
+    request_router_class: ray.serve.llm.request_router.PrefixCacheAffinityRouter
+    request_router_kwargs:
+      imbalanced_threshold: 16
+```
 
-So the situation is:
+Implementation touch points:
 
-- the architecture is compatible in principle
-- the integration is not yet proven in this codebase
+- `config/models.yaml`
+- `src/infer_nexus/catalog/models.py`
+- `src/infer_nexus/runtime/deployments.py`
+- `tests/test_runtime.py`
+
+So the situation is now:
+
+- configuration plumbing is implemented
+- unit coverage verifies the config is forwarded into Serve deployment kwargs
+- environment-level validation still matters because router behavior is Ray-version-sensitive and workload-dependent
 
 ---
 
 ## 9. Known Integration Risks
 
-These are the main reasons this should still be treated as an investigation, not as a closed implementation plan.
+These are the main remaining risks now that configuration plumbing exists.
 
-### 9.1 Request-shape compatibility is not yet proven
+### 9.1 Request-shape compatibility and benefit need runtime validation
 
 Ray Serve's built-in prefix-aware routing is documented in the Ray Serve LLM stack.
 
 Our current path does not use Ray Serve's standard OpenAI ingress objects.
 Instead, `infer-nexus` serializes `ChatCompletionsRequest` into a plain payload dict and calls deployment methods directly.
 
-Open question:
+Validation question:
 
-- can `PrefixCacheAffinityRouter` derive useful prefix-affinity signals from our current handle-call payload shape without additional adaptation?
+- can `PrefixCacheAffinityRouter` derive useful prefix-affinity signals from our current handle-call payload shape in the deployed Ray version?
+- does it materially improve TTFT, prefill latency, or p95/p99 latency for repeated chat workloads?
 
-This is the most important unresolved risk.
+Local testing has shown the integration can be configured and exercised, but this remains a performance and compatibility validation concern rather than a missing-code concern.
 
 ### 9.2 API maturity risk
 
@@ -220,10 +239,12 @@ We use:
 We do not use:
 
 - Ray Serve LLM's stock ingress path end-to-end
+- `build_openai_app`
 
 Implication:
 
-- "Ray has this feature" does not automatically mean "we can enable it without adaptation"
+- using `PrefixCacheAffinityRouter` does not mean `infer-nexus` has adopted Ray Serve LLM's full OpenAI application stack
+- `infer-nexus` still owns the gateway, catalog resolution, alias rewriting, backend dispatch, auth, admission, and platform APIs
 
 ---
 
@@ -240,37 +261,40 @@ This design note does not propose:
 
 ---
 
-## 11. Interim Recommendation
+## 11. Current Recommendation
 
-Until the Ray-native path is validated, the correct position is:
+Now that the Ray-native configuration path exists, the correct position is:
 
 - do not implement the original session-sticky design
 - do not add speculative `session_id` plumbing just to prepare for sticky routing
-- keep the design centered on investigating Ray Serve prefix-aware routing first
+- keep using Ray Serve prefix-aware routing for local vLLM chat models where the target Ray version supports it
+- validate actual cache-affinity benefits per deployment environment
 
-This avoids building a second-best routing system before confirming whether the first-class one is viable.
+This avoids building a second-best routing system while preserving `infer-nexus`'s existing gateway boundary.
 
 ---
 
-## 12. Investigation Checklist
+## 12. Validation Checklist
 
-The next stage should answer these questions in order.
+The next stage should keep these checks current across Ray and vLLM runtime combinations.
 
 ### 12.1 Can our deployments attach a Serve request router?
 
-Need to verify:
+Current status: implemented in code and covered by unit tests.
+
+Keep verifying:
 
 - deployment-level configuration shape in the exact Ray version we run
 - whether `RequestRouterConfig` can be applied to our one-model-per-deployment topology
 
 ### 12.2 Can `PrefixCacheAffinityRouter` work with our current request path?
 
-Need to verify:
+Need to keep verifying:
 
 - whether it can inspect the payload produced by `handle.chat_completion.remote(payload)`
 - whether the current payload contains enough stable prompt structure for useful routing decisions
 
-### 12.3 If not, what is the smallest adaptation layer?
+### 12.3 If runtime validation regresses, what is the smallest adaptation layer?
 
 Possible outcomes:
 
@@ -298,9 +322,9 @@ Need to measure:
 
 ---
 
-## 13. If Ray-Native Routing Proves Unusable
+## 13. If Ray-Native Routing Proves Unusable Or Regresses
 
-Only if the Ray-native route fails for structural reasons should we reopen a custom design.
+Only if the Ray-native route fails for structural reasons, or a target Ray version regresses this integration, should we reopen a custom design.
 
 If that happens, the fallback order should be:
 
@@ -311,19 +335,21 @@ Even in fallback mode, session stickiness should still be viewed as an approxima
 
 ---
 
-## 14. Required Project Touch Points For Future Evaluation
+## 14. Project Touch Points
 
-If we continue this work later, the most likely files to examine or update are:
+The current implementation and future validation mainly involve:
 
+- `config/models.yaml`
+- `src/infer_nexus/catalog/models.py`
 - `src/infer_nexus/runtime/serve_app.py`
 - `src/infer_nexus/runtime/deployments.py`
 - `src/infer_nexus/runtime/handles.py`
 - `src/infer_nexus/runtime/executor.py`
 - `src/infer_nexus/api/openai_routes.py`
 - `tests/test_runtime.py`
-- future integration or contract tests for Serve routing behavior
+- integration or contract tests for Serve routing behavior
 
-This list is intentionally smaller and more focused than the previous draft because the preferred path has moved from gateway routing logic to Ray Serve deployment routing.
+This list is intentionally focused on deployment routing. The preferred path has moved away from gateway-owned routing logic.
 
 ---
 
@@ -333,8 +359,8 @@ The previous session-based sticky design should be considered superseded.
 
 The current recommended direction is:
 
-- for local `backend: vllm` chat models, investigate Ray Serve `PrefixCacheAffinityRouter` first
-- treat prefix-aware replica routing as the primary solution candidate
+- for local `backend: vllm` chat models, use Ray Serve `PrefixCacheAffinityRouter` where supported by the deployed Ray version
+- treat prefix-aware replica routing as the primary solution
 - keep `infer-nexus` focused on gateway, compatibility, and model dispatch responsibilities
 - avoid building a custom gateway sticky-affinity system unless Ray-native integration proves insufficient
 
@@ -342,4 +368,4 @@ In short:
 
 - session stickiness is not the right primary abstraction
 - prefix-aware replica routing is the more direct and more correct optimization target
-- the remaining work is integration validation, not a fresh routing design from scratch
+- the remaining work is runtime validation and performance measurement, not a fresh routing design from scratch

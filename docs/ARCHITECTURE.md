@@ -410,6 +410,11 @@ Implementation notes:
   OpenAI-compatible requests to a Ray Serve LLM application, preserving the
   current control-plane boundary while delegating vLLM protocol fidelity to Ray
   Serve LLM.
+- The current implementation does not use `build_openai_app`. It does, however,
+  support using Ray Serve LLM's `PrefixCacheAffinityRouter` through
+  `deployment_config.request_router_config` for local vLLM chat deployments.
+  This is a deployment-router integration inside the existing custom gateway and
+  Serve deployment path, not adoption of Ray Serve LLM's stock OpenAI ingress.
 - On Ascend, the backend assumes the Huawei-provided runtime image has already
   installed and validated CANN, `torch-npu`, `vllm`, `vllm-ascend`, and Ray.
   The application code should avoid replacing those packages during startup.

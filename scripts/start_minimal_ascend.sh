@@ -28,7 +28,7 @@ SETTINGS="config/settings.yaml"
 RAY_ADDRESS="auto"
 PROXY_LOCATION="Disabled"
 RELOAD=0
-ASCEND_VISIBLE_DEVICES_VALUE="0,1,2,3"
+# ASCEND_VISIBLE_DEVICES_VALUE="0,1,2,3"
 NUM_NPUS="4"
 CHECK_DEVICES=1
 
@@ -58,7 +58,7 @@ while [[ $# -gt 0 ]]; do
     --settings) SETTINGS="$2"; shift 2;;
     --ray-address) RAY_ADDRESS="$2"; shift 2;;
     --num-npus) NUM_NPUS="$2"; shift 2;;
-    --ascend-visible-devices) ASCEND_VISIBLE_DEVICES_VALUE="$2"; shift 2;;
+ #   --ascend-visible-devices) ASCEND_VISIBLE_DEVICES_VALUE="$2"; shift 2;;
     --no-device-check) CHECK_DEVICES=0; shift;;
     --proxy-location) PROXY_LOCATION="$2"; shift 2;;
     --reload) RELOAD=1; shift;;
@@ -72,19 +72,17 @@ rm -f "${RAY_STATE_FILE}"
 
 cd "${ROOT_DIR}"
 
-source "${ROOT_DIR}/.venv/bin/activate"
-
 # The repository uses a src/ layout. When running with the container's system
 # Python instead of an installed wheel/venv, make src importable explicitly.
 export PYTHONPATH="${ROOT_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
-if [[ -n "${ASCEND_VISIBLE_DEVICES_VALUE}" ]]; then
-  export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_VISIBLE_DEVICES_VALUE}"
-fi
+# if [[ -n "${ASCEND_VISIBLE_DEVICES_VALUE}" ]]; then
+#   export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_VISIBLE_DEVICES_VALUE}"
+# fi
 
 # Ray may otherwise rewrite ASCEND_RT_VISIBLE_DEVICES for workers. vLLM Ascend
 # deployments usually want the device mask to remain under explicit control.
-export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES="${RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES:-1}"
+# export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES="${RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES:-1}"
 
 if [[ "${CHECK_DEVICES}" -eq 1 ]]; then
   missing_devices=()

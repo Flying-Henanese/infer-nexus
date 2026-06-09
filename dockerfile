@@ -16,4 +16,31 @@ COPY pyproject.ascend.toml ./pyproject.toml
 COPY README.md ./README.md
 
 # 使用 uv 安装依赖
-RUN uv sync --no-cache
+RUN uv sync --extra ascend-monitoring --no-cache
+
+# Install monitoring/profiling helpers used by Ascend benchmark runs.
+# CANN, npu-smi, hccn_tool, msprof, and msopprof are provided by the Ascend
+# base image or by host-mounted driver/toolkit paths.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        gnupg \
+        jq \
+        sysstat \
+    && for package in \
+        prometheus \
+        prometheus-node-exporter \
+        prometheus-process-exporter \
+        grafana \
+        grafana-server; do \
+        if apt-cache show "${package}" >/dev/null 2>&1; then \
+            apt-get install -y --no-install-recommends "${package}"; \
+        else \
+            echo "Skipping unavailable apt package: ${package}"; \
+        fi; \
+    done \
+    && if [ -f /etc/default/sysstat ]; then \
+        sed -i 's/^ENABLED=.*/ENABLED="true"/' /etc/default/sysstat; \
+    fi \
+    && rm -rf /var/lib/apt/lists/*

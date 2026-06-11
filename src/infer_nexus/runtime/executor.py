@@ -763,13 +763,22 @@ class RuntimeExecutor:
     ) -> AsyncIterator[bytes]:
         """包装 SSE 字节流，统一记录 TTFT 和相邻输出块间隔。"""
         previous_emit_time: float | None = None
-        async for chunk in chunks:
-            previous_emit_time = self._observe_stream_emit(
-                model_label=model_label,
-                stream_start_time=stream_start_time,
-                previous_emit_time=previous_emit_time,
-            )
-            yield chunk
+        try:
+            async for chunk in chunks:
+                previous_emit_time = self._observe_stream_emit(
+                    model_label=model_label,
+                    stream_start_time=stream_start_time,
+                    previous_emit_time=previous_emit_time,
+                )
+                yield chunk
+        except asyncio.CancelledError:
+            GATEWAY_METRICS.observe_stream_completion(model=model_label, status="cancelled")
+            raise
+        except Exception:
+            GATEWAY_METRICS.observe_stream_completion(model=model_label, status="error")
+            raise
+        else:
+            GATEWAY_METRICS.observe_stream_completion(model=model_label, status="success")
 
     def _build_chat_stream_response(
         self,

@@ -1,11 +1,13 @@
 """API 路由集成测试。"""
 
+import asyncio
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from infer_nexus.core.errors import AdmissionRejectedError, RuntimeExecutionError, RuntimeNotConnectedError
 from infer_nexus.main import create_app
+from infer_nexus.observability.metrics import render_prometheus_metrics
 from infer_nexus.runtime.executor import RuntimeExecutor
 
 
@@ -58,6 +60,9 @@ def test_metrics_endpoint_exposes_prometheus_text(prepared_model_store: Path) ->
     assert response.status_code == 200
     assert response.headers['content-type'].startswith('text/plain')
     assert 'infer_nexus_requests_total' in response.text
+    assert 'infer_nexus_stream_tpot_seconds' in response.text
+    assert 'infer_nexus_stream_completions_total' in response.text
+    assert 'infer_nexus_request_queue_seconds' in response.text
 
 
 def test_catalog_model_lookup_by_alias(prepared_model_store: Path) -> None:
@@ -261,23 +266,56 @@ def test_chat_completions_returns_sse_stream_for_chat_model(prepared_model_store
 
 
 def test_streaming_chat_updates_stream_metrics(prepared_model_store: Path) -> None:
-    """流式 chat 请求应记录 TTFT 指标。"""
-    app = create_app()
+    """流式输出包装器应记录 TTFT、TPOT 和完成状态指标。"""
+    executor = RuntimeExecutor()
 
-    payload = {
-        'model': 'qwen3-8b',
-        'messages': [{'role': 'user', 'content': 'hello'}],
-        'stream': True,
-    }
+    async def chunks():
+        yield b"data: first\n\n"
+        yield b"data: second\n\n"
 
-    with TestClient(app) as client:
-        client.app.state.model_store.require_model_path = lambda _model: None
-        with client.stream('POST', '/v1/chat/completions', json=payload) as response:
-            _ = b''.join(response.iter_bytes())
-        metrics = client.get('/metrics')
+    async def collect() -> None:
+        async for _chunk in executor._observe_stream_chunks(
+            chunks(),
+            model_label="qwen3-32b",
+            stream_start_time=0.0,
+        ):
+            pass
 
-    assert response.status_code == 200
-    assert 'infer_nexus_stream_ttft_seconds_count{model="qwen3-8b"}' in metrics.text
+    asyncio.run(collect())
+    metrics = render_prometheus_metrics()[0].decode("utf-8")
+
+    assert 'infer_nexus_stream_ttft_seconds_count{model="qwen3-32b"}' in metrics
+    assert 'infer_nexus_stream_tpot_seconds_count{model="qwen3-32b"}' in metrics
+    assert 'infer_nexus_stream_completions_total{model="qwen3-32b",status="success"}' in metrics
+
+
+def test_streaming_chat_records_error_completion_status(prepared_model_store: Path) -> None:
+    """流式迭代异常应记录 error 终止状态。"""
+    executor = RuntimeExecutor()
+
+    async def chunks():
+        yield b"data: first\n\n"
+        raise RuntimeError("stream failed")
+
+    async def collect() -> None:
+        async for _chunk in executor._observe_stream_chunks(
+            chunks(),
+            model_label="qwen3-32b-error",
+            stream_start_time=0.0,
+        ):
+            pass
+
+    try:
+        asyncio.run(collect())
+    except RuntimeError as exc:
+        assert str(exc) == "stream failed"
+    else:
+        raise AssertionError("stream error was not propagated")
+
+    metrics = render_prometheus_metrics()[0].decode("utf-8")
+
+    assert 'infer_nexus_stream_ttft_seconds_count{model="qwen3-32b-error"}' in metrics
+    assert 'infer_nexus_stream_completions_total{model="qwen3-32b-error",status="error"}' in metrics
 
 
 def test_chat_completions_accepts_multimodal_message_content_for_vision_model(

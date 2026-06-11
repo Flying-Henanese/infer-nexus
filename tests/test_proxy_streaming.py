@@ -6,6 +6,7 @@ from typing import Any
 import httpx
 
 from infer_nexus.catalog.models import ProxyConfig
+from infer_nexus.observability.metrics import render_prometheus_metrics
 from infer_nexus.runtime.executor import RuntimeExecutor
 
 
@@ -58,6 +59,8 @@ def test_proxy_streaming_preserves_sse_bytes_and_content_type(
             path="/chat/completions",
             payload={"model": "mineru", "stream": True},
             request_id="req-test",
+            model_label="mineru",
+            stream_start_time=0.0,
         )
     )
 
@@ -73,3 +76,7 @@ def test_proxy_streaming_preserves_sse_bytes_and_content_type(
     assert response.headers["content-type"] == "text/event-stream; charset=utf-8"
     assert response.headers["X-Infer-Nexus-Request-ID"] == "req-test"
     assert body == b"data: first\n\ndata: second\n\n"
+    metrics = render_prometheus_metrics()[0].decode("utf-8")
+    assert 'infer_nexus_stream_ttft_seconds_count{model="mineru"}' in metrics
+    assert 'infer_nexus_stream_tpot_seconds_count{model="mineru"}' in metrics
+    assert 'infer_nexus_stream_completions_total{model="mineru",status="success"}' in metrics

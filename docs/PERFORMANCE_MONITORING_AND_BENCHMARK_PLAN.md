@@ -26,10 +26,18 @@ Status as of the current codebase:
   record TTFT, chunk-level TPOT approximation, and terminal stream status
   (`success`, `cancelled`, or `error`). This is intentionally chunk-based until
   benchmark-side tokenizer measurements or vLLM-native token metrics are added.
-- Phases 4 through 7 remain mostly planned work. The repository has CUDA and
-  Ascend environment check/install helpers, but the standalone benchmark
-  runner, Prometheus scrape examples, Grafana dashboards, Ray/vLLM metric
-  queries, and profiling runbooks are not complete.
+- Phase 4 now has a standalone client-side benchmark runner foundation. It can
+  run OpenAI-compatible chat completion workloads through an injectable client,
+  supports streaming and non-streaming request shapes, fixed-concurrency and
+  fixed-rate launch modes, warmup requests, timeout/retry controls, raw JSONL
+  samples, summary JSON/Markdown reports, and built-in short-chat, RAG-style,
+  and long-context workloads. The current validation is limited to compile and
+  pure unit tests; it has not been validated against a live gateway or vLLM
+  service in this environment.
+- Phases 5 through 7 remain mostly planned work. The repository has CUDA and
+  Ascend environment check/install helpers, but Prometheus scrape examples,
+  Grafana dashboards, Ray/vLLM metric queries, and profiling runbooks are not
+  complete.
 
 ## 1. Goals
 
@@ -380,12 +388,17 @@ Hardware utilization:
 
 ### Phase 4: Benchmark Runner
 
-- Add benchmark workload configuration.
-- Support fixed concurrency and fixed request rate.
-- Support streaming token timing.
-- Output raw JSONL and summary reports.
-- Add repeatable smoke workloads for short chat, RAG-style prompt, and long
+- [x] Add benchmark workload configuration.
+- [x] Support fixed concurrency and fixed request rate.
+- [x] Support streaming chunk/token timing at the client boundary.
+- [x] Output raw JSONL and summary JSON/Markdown reports.
+- [x] Add repeatable smoke workloads for short chat, RAG-style prompt, and long
   context prompt.
+- [x] Add unit tests using fake clients so validation does not require a live
+  service.
+- [ ] Validate benchmark runner against a real gateway and model runtime.
+- [ ] Replace dependency-free token estimation with optional model-tokenizer
+  counting when tokenizer packages are available.
 
 ### Phase 5: Hardware Exporters
 
@@ -420,7 +433,9 @@ Hardware utilization:
 - [x] A streaming iterator records chunk-level TPOT.
 - [x] A streaming iterator records terminal status.
 - [x] Proxy passthrough SSE preserves upstream bytes and emits stream metrics.
-- [ ] A benchmark run produces raw JSONL and summary output.
+- [x] A benchmark run produces raw JSONL and summary output in unit tests.
+- [ ] A benchmark run produces raw JSONL and summary output against a live
+  gateway/runtime.
 - [ ] Prometheus scrapes application metrics.
 - [ ] Prometheus scrapes hardware exporter metrics.
 - [ ] Grafana shows service, runtime, and hardware panels.
@@ -434,8 +449,9 @@ Hardware utilization:
   benchmark data is available.
 - Whether server-side TPOT should remain chunk-based after benchmark-side
   tokenizer measurements or vLLM-native token metrics are available.
-- Whether the benchmark runner should live under `scripts/` or a new
-  `benchmarks/` directory.
+- Whether the benchmark runner should remain under `src/infer_nexus/benchmark`
+  with `scripts/run_benchmark.py`, or whether larger benchmark suites should be
+  split into a top-level `benchmarks/` directory later.
 - Whether dashboard JSON should be checked into the repository.
 - Whether queue time should come from Ray Serve metrics, gateway admission
   control, or a dedicated runtime signal.

@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from infer_nexus.api import health_routes, openai_routes, platform_routes
+from infer_nexus.api import health_routes, metrics_routes, openai_routes, platform_routes
 from infer_nexus.catalog.loader import load_model_catalog
 from infer_nexus.catalog.registry import ModelRegistry
 from infer_nexus.control.admission import AdmissionController
@@ -65,6 +65,7 @@ def create_app() -> FastAPI:
     """创建并注册全部路由的 FastAPI 应用实例。"""
     app = FastAPI(title="infer-nexus", version="0.1.0", lifespan=lifespan)
     app.include_router(health_routes.router)
+    app.include_router(metrics_routes.router)
     app.include_router(openai_routes.router)
     app.include_router(openai_routes.compat_router)
     app.include_router(platform_routes.router)

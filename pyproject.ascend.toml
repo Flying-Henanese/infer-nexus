@@ -5,8 +5,10 @@ description = "Shared inference service factory built on Ray Serve and vLLM Asce
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
 dependencies = [
+  "boto3>=1.43.19",
   "fastapi>=0.115.0",
   "httpx>=0.27.0",
+  "pyarrow>=24.0.0",
   "pydantic>=2.8.0",
   "pydantic-settings>=2.4.0",
   "pyyaml>=6.0.2",
@@ -18,6 +20,12 @@ artifacts = [
   "huggingface_hub>=0.32.0",
 ]
 ascend-image = []
+ascend-monitoring = [
+  "matplotlib>=3.9.0",
+  "plotly>=5.24.0",
+  "py-spy>=0.4.0",
+  "tensorboard>=2.18.0",
+]
 # for development only
 # not required for real production use
 dev = [

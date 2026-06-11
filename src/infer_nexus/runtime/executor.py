@@ -9,7 +9,7 @@ import inspect
 import json
 import logging
 import os
-from time import time
+from time import perf_counter, time
 from typing import Any
 from uuid import uuid4
 
@@ -33,6 +33,7 @@ from infer_nexus.core.schemas import (
     RerankUsage,
     TokenUsage,
 )
+from infer_nexus.observability.metrics import GATEWAY_METRICS
 from infer_nexus.runtime.deployments import ModelRuntimeReplica
 from infer_nexus.runtime.handles import ServeDeploymentHandleResolver
 from infer_nexus.runtime.types import RuntimeTarget
@@ -82,6 +83,7 @@ class RuntimeExecutor:
         request: ChatCompletionsRequest,
     ) -> StreamingResponse:
         """执行流式 chat completion，并在返回响应前预取首块暴露早期错误。"""
+        stream_start_time = perf_counter()
         if self.mode == "serve":
             chunks = await self._invoke_handle_stream(
                 target=target,
@@ -97,7 +99,12 @@ class RuntimeExecutor:
         # Prime one chunk before sending response headers so unsupported streaming requests
         # fail as JSON errors instead of returning a broken 200 SSE connection.
         chunks = await self._prime_stream_chunks(chunks)
-        return self._build_chat_stream_response(request, target, chunks)
+        return self._build_chat_stream_response(
+            request,
+            target,
+            chunks,
+            stream_start_time=stream_start_time,
+        )
 
     async def execute_embedding(
         self,
@@ -493,6 +500,8 @@ class RuntimeExecutor:
                 path="/chat/completions",
                 payload=payload,
                 request_id=request_id,
+                model_label=self._stream_metric_model(target, request),
+                stream_start_time=perf_counter(),
             )
         response = await self._request_proxy(
             proxy_config=proxy_config,
@@ -509,6 +518,8 @@ class RuntimeExecutor:
         path: str,
         payload: dict[str, Any],
         request_id: str,
+        model_label: str,
+        stream_start_time: float,
     ) -> Response:
         """建立上游流式 HTTP 连接并把 SSE 字节流透传给客户端。"""
         upstream = proxy_config.upstream_base_url.rstrip("/")
@@ -539,7 +550,11 @@ class RuntimeExecutor:
                 await client.aclose()
 
         return StreamingResponse(
-            iterator(),
+            self._observe_stream_chunks(
+                iterator(),
+                model_label=model_label,
+                stream_start_time=stream_start_time,
+            ),
             status_code=response.status_code,
             media_type=response.headers.get("content-type", "text/event-stream"),
             headers={"X-Infer-Nexus-Request-ID": request_id},
@@ -709,13 +724,63 @@ class RuntimeExecutor:
             text = chunk
         return "data: [DONE]" in text
 
+    def _stream_metric_model(self, target: RuntimeTarget, request: ChatCompletionsRequest) -> str:
+        """返回流式指标使用的稳定模型标签。"""
+        return str(
+            target.model_alias
+            or target.runtime_context.get("served_model_name")
+            or target.model_name
+            or request.model
+        )
+
+    def _observe_stream_emit(
+        self,
+        *,
+        model_label: str,
+        stream_start_time: float,
+        previous_emit_time: float | None,
+    ) -> float:
+        """记录流式首块延迟或相邻块间隔，并返回当前输出时间。"""
+        now = perf_counter()
+        if previous_emit_time is None:
+            GATEWAY_METRICS.observe_stream_ttft(
+                model=model_label,
+                seconds=now - stream_start_time,
+            )
+        else:
+            GATEWAY_METRICS.observe_stream_chunk_interval(
+                model=model_label,
+                seconds=now - previous_emit_time,
+            )
+        return now
+
+    async def _observe_stream_chunks(
+        self,
+        chunks: AsyncIterator[bytes],
+        *,
+        model_label: str,
+        stream_start_time: float,
+    ) -> AsyncIterator[bytes]:
+        """包装 SSE 字节流，统一记录 TTFT 和相邻输出块间隔。"""
+        previous_emit_time: float | None = None
+        async for chunk in chunks:
+            previous_emit_time = self._observe_stream_emit(
+                model_label=model_label,
+                stream_start_time=stream_start_time,
+                previous_emit_time=previous_emit_time,
+            )
+            yield chunk
+
     def _build_chat_stream_response(
         self,
         request: ChatCompletionsRequest,
         target: RuntimeTarget,
         chunks: dict[str, Any] | AsyncIterator[dict[str, Any] | bytes | str],
+        *,
+        stream_start_time: float,
     ) -> StreamingResponse:
         """根据兼容模式选择 SSE 透传或内部增量事件映射。"""
+        model_label = self._stream_metric_model(target, request)
         if not isinstance(chunks, dict):
             runtime_spec = target.runtime_context.get("runtime_spec") or {}
             compat_mode = target.runtime_context.get("compat_mode") or runtime_spec.get("compat_mode")
@@ -723,8 +788,18 @@ class RuntimeExecutor:
                 CompatibilityMode.VLLM_NATIVE.value,
                 CompatibilityMode.STRICT_OPENAI.value,
             }:
-                return self._build_passthrough_stream_response(chunks)
-            return self._build_mapped_chat_stream_response(request, target, chunks)
+                return self._build_passthrough_stream_response(
+                    chunks,
+                    model_label=model_label,
+                    stream_start_time=stream_start_time,
+                )
+            return self._build_mapped_chat_stream_response(
+                request,
+                target,
+                chunks,
+                model_label=model_label,
+                stream_start_time=stream_start_time,
+            )
 
         payload = chunks
         created = payload.get("created", int(time()))
@@ -794,7 +869,11 @@ class RuntimeExecutor:
             yield b"data: [DONE]\n\n"
 
         return StreamingResponse(
-            iterator(),
+            self._observe_stream_chunks(
+                iterator(),
+                model_label=model_label,
+                stream_start_time=stream_start_time,
+            ),
             media_type="text/event-stream",
             headers={"X-Infer-Nexus-Request-ID": request_id},
         )
@@ -802,6 +881,9 @@ class RuntimeExecutor:
     def _build_passthrough_stream_response(
         self,
         chunks: AsyncIterator[dict[str, Any] | bytes | str],
+        *,
+        model_label: str,
+        stream_start_time: float,
     ) -> StreamingResponse:
         """直接透传后端 SSE 片段，并在缺失时补充 `[DONE]`。"""
         request_id = uuid4().hex
@@ -830,7 +912,11 @@ class RuntimeExecutor:
                 yield b"data: [DONE]\n\n"
 
         return StreamingResponse(
-            iterator(),
+            self._observe_stream_chunks(
+                iterator(),
+                model_label=model_label,
+                stream_start_time=stream_start_time,
+            ),
             media_type="text/event-stream",
             headers={"X-Infer-Nexus-Request-ID": request_id},
         )
@@ -840,6 +926,9 @@ class RuntimeExecutor:
         request: ChatCompletionsRequest,
         target: RuntimeTarget,
         chunks: AsyncIterator[dict[str, Any] | bytes | str],
+        *,
+        model_label: str,
+        stream_start_time: float,
     ) -> StreamingResponse:
         """把内部 chat_delta 事件映射为 OpenAI chat completion chunk。"""
         request_id = uuid4().hex
@@ -952,7 +1041,11 @@ class RuntimeExecutor:
                 yield b"data: [DONE]\n\n"
 
         return StreamingResponse(
-            iterator(),
+            self._observe_stream_chunks(
+                iterator(),
+                model_label=model_label,
+                stream_start_time=stream_start_time,
+            ),
             media_type="text/event-stream",
             headers={"X-Infer-Nexus-Request-ID": request_id},
         )

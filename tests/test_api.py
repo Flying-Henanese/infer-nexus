@@ -48,6 +48,18 @@ def test_catalog_and_openai_model_endpoints(prepared_model_store: Path) -> None:
     assert load.json()['active_models'] == 3
 
 
+def test_metrics_endpoint_exposes_prometheus_text(prepared_model_store: Path) -> None:
+    """metrics 接口应暴露 Prometheus 文本格式指标。"""
+    app = create_app()
+
+    with TestClient(app) as client:
+        response = client.get('/metrics')
+
+    assert response.status_code == 200
+    assert response.headers['content-type'].startswith('text/plain')
+    assert 'infer_nexus_requests_total' in response.text
+
+
 def test_catalog_model_lookup_by_alias(prepared_model_store: Path) -> None:
     """目录接口应支持通过 alias 查询模型。"""
     app = create_app()
@@ -129,6 +141,29 @@ def test_chat_completions_returns_stub_chat_completion_for_chat_model(prepared_m
     assert 'model-qwen3-32b-instruct' in body['choices'][0]['message']['content']
 
 
+def test_chat_completions_updates_gateway_metrics(prepared_model_store: Path) -> None:
+    """成功 chat 请求应更新网关 Prometheus 指标。"""
+    app = create_app()
+
+    payload = {
+        'model': 'qwen3-chat',
+        'messages': [{'role': 'user', 'content': 'hello'}],
+    }
+
+    with TestClient(app) as client:
+        response = client.post('/v1/chat/completions', json=payload)
+        metrics = client.get('/metrics')
+
+    assert response.status_code == 200
+    assert metrics.status_code == 200
+    assert 'infer_nexus_requests_total{' in metrics.text
+    assert 'endpoint="/v1/chat/completions"' in metrics.text
+    assert 'model="qwen3-chat"' in metrics.text
+    assert 'status="success"' in metrics.text
+    assert 'task="chat"' in metrics.text
+    assert 'infer_nexus_input_tokens_total{' in metrics.text
+
+
 def test_chat_completions_reports_unknown_model(prepared_model_store: Path) -> None:
     """chat 接口请求未知模型应返回 model_not_found。"""
     app = create_app()
@@ -143,6 +178,26 @@ def test_chat_completions_reports_unknown_model(prepared_model_store: Path) -> N
 
     assert response.status_code == 404
     assert response.json()['error']['code'] == 'model_not_found'
+
+
+def test_chat_completions_error_updates_gateway_metrics(prepared_model_store: Path) -> None:
+    """失败请求应记录稳定错误码且未知模型不使用动态标签。"""
+    app = create_app()
+
+    payload = {
+        'model': 'does-not-exist',
+        'messages': [{'role': 'user', 'content': 'hello'}],
+    }
+
+    with TestClient(app) as client:
+        response = client.post('/v1/chat/completions', json=payload)
+        metrics = client.get('/metrics')
+
+    assert response.status_code == 404
+    assert 'infer_nexus_errors_total{' in metrics.text
+    assert 'code="model_not_found"' in metrics.text
+    assert 'model="unknown"' in metrics.text
+    assert 'task="chat"' in metrics.text
 
 
 def test_chat_completions_reports_missing_local_artifact(prepared_model_store: Path) -> None:
@@ -203,6 +258,26 @@ def test_chat_completions_returns_sse_stream_for_chat_model(prepared_model_store
     assert b'chat.completion.chunk' in body
     assert b'backend stub response from vllm' in body
     assert b'data: [DONE]\n\n' in body
+
+
+def test_streaming_chat_updates_stream_metrics(prepared_model_store: Path) -> None:
+    """流式 chat 请求应记录 TTFT 指标。"""
+    app = create_app()
+
+    payload = {
+        'model': 'qwen3-8b',
+        'messages': [{'role': 'user', 'content': 'hello'}],
+        'stream': True,
+    }
+
+    with TestClient(app) as client:
+        client.app.state.model_store.require_model_path = lambda _model: None
+        with client.stream('POST', '/v1/chat/completions', json=payload) as response:
+            _ = b''.join(response.iter_bytes())
+        metrics = client.get('/metrics')
+
+    assert response.status_code == 200
+    assert 'infer_nexus_stream_ttft_seconds_count{model="qwen3-8b"}' in metrics.text
 
 
 def test_chat_completions_accepts_multimodal_message_content_for_vision_model(

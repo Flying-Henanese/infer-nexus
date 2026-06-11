@@ -10,6 +10,27 @@ profiling. Production monitoring should stay low overhead. Heavy profilers such
 as Nsight, `torch.profiler`, `msprof`, and `torch_npu.profiler` should be used
 only for focused investigations.
 
+## Current Implementation Status
+
+Status as of the current codebase:
+
+- Phase 1 is partially complete. Metric names, bounded labels, model alias
+  mapping, and stable gateway error-code labels are implemented for the gateway
+  application metrics. Queue-time collection is defined as a Prometheus metric,
+  but no reliable runtime queue-time source is connected yet.
+- Phase 2 is implemented for the gateway application layer. The project depends
+  on `prometheus-client`, exposes `/metrics`, and records request counters,
+  request latency histograms, inflight gauges, error counters, admission
+  rejection counters, and token counters when response usage is available.
+- Phase 3 is implemented for stream-wrapper level metrics. Streaming responses
+  record TTFT, chunk-level TPOT approximation, and terminal stream status
+  (`success`, `cancelled`, or `error`). This is intentionally chunk-based until
+  benchmark-side tokenizer measurements or vLLM-native token metrics are added.
+- Phases 4 through 7 remain mostly planned work. The repository has CUDA and
+  Ascend environment check/install helpers, but the standalone benchmark
+  runner, Prometheus scrape examples, Grafana dashboards, Ray/vLLM metric
+  queries, and profiling runbooks are not complete.
+
 ## 1. Goals
 
 - Expose online serving indicators: request count, latency, inflight requests,
@@ -113,10 +134,21 @@ infer_nexus_errors_total{model,task,code}
 infer_nexus_admission_rejections_total{model,reason}
 infer_nexus_stream_ttft_seconds_bucket{model}
 infer_nexus_stream_tpot_seconds_bucket{model}
+infer_nexus_stream_completions_total{model,status}
 infer_nexus_input_tokens_total{model,task}
 infer_nexus_output_tokens_total{model,task}
 infer_nexus_request_queue_seconds_bucket{model}
 ```
+
+Implemented compatibility metric:
+
+```text
+infer_nexus_stream_chunk_interval_seconds_bucket{model}
+```
+
+`infer_nexus_stream_chunk_interval_seconds` predates the TPOT metric name and is
+kept for existing queries. It observes the same chunk interval values as
+`infer_nexus_stream_tpot_seconds`.
 
 Label rules:
 
@@ -147,7 +179,7 @@ Streaming chat requires special handling:
 ```text
 request_start
 -> backend or Serve handle dispatch
--> first non-empty SSE chunk
+-> first emitted SSE chunk
 -> each subsequent chunk
 -> final [DONE] or stream termination
 ```
@@ -161,6 +193,16 @@ first_chunk_time - request_start_time
 TPOT should be measured from token or chunk timing. If exact output token counts
 are unavailable in the server stream, the server can emit chunk-level timing and
 the benchmark client should compute token-level TPOT using the model tokenizer.
+
+Current implementation notes:
+
+- Gateway TTFT is currently measured as time to first emitted SSE chunk. It is
+  not guaranteed to be the first non-empty text token because some backends emit
+  role, metadata, or passthrough SSE chunks before textual delta content.
+- Gateway TPOT is currently a chunk-level approximation based on the interval
+  between emitted SSE chunks.
+- Stream terminal status is recorded when the wrapped async iterator completes,
+  raises, or is cancelled.
 
 ## 5. Benchmark Runner Plan
 
@@ -309,26 +351,32 @@ Hardware utilization:
 
 ### Phase 1: Metric Contract
 
-- Finalize metric names and labels.
-- Document histogram buckets for latency, TTFT, TPOT, and queue time.
-- Define stable error codes used by metrics.
-- Decide how to map model aliases to metric labels.
+- [x] Finalize gateway metric names and labels for Phase 1 through Phase 3.
+- [x] Document histogram buckets for latency, TTFT, TPOT, and queue time in code.
+- [x] Define stable gateway error-code labels used by metrics.
+- [x] Decide how to map model aliases to metric labels.
+- [ ] Connect a reliable runtime queue-time source to
+  `infer_nexus_request_queue_seconds`.
 
 ### Phase 2: Gateway Metrics
 
-- Add `prometheus-client` integration.
-- Add `/metrics` endpoint.
-- Add request counters, latency histograms, inflight gauges, error counters, and
+- [x] Add `prometheus-client` integration.
+- [x] Add `/metrics` endpoint.
+- [x] Add request counters, latency histograms, inflight gauges, error counters, and
   admission rejection counters.
-- Validate metrics under stub mode and serve mode.
+- [x] Add input and output token counters when response usage is available.
+- [x] Validate metrics with compile and unit/API tests that do not require a
+  real Ray/vLLM service.
+- [ ] Validate metrics under a real serve-mode deployment.
 
 ### Phase 3: Streaming Metrics
 
-- Instrument streaming response iterators.
-- Measure first chunk time.
-- Measure chunk timing and stream completion.
-- Export TTFT and chunk-level TPOT approximations.
-- Validate that passthrough SSE and mapped SSE both emit metrics.
+- [x] Instrument streaming response iterators.
+- [x] Measure first emitted chunk time.
+- [x] Measure chunk timing and stream completion status.
+- [x] Export TTFT and chunk-level TPOT approximations.
+- [x] Validate proxy passthrough SSE metrics with unit tests.
+- [ ] Validate mapped SSE metrics against a real serve-mode runtime.
 
 ### Phase 4: Benchmark Runner
 
@@ -365,25 +413,29 @@ Hardware utilization:
 
 ## 10. Validation Checklist
 
-- `/metrics` endpoint returns Prometheus text format.
-- A chat request increments request counters.
-- A failed request increments error counters with a stable code.
-- A streaming request records TTFT.
-- A benchmark run produces raw JSONL and summary output.
-- Prometheus scrapes application metrics.
-- Prometheus scrapes hardware exporter metrics.
-- Grafana shows service, runtime, and hardware panels.
-- CUDA profiler can capture a short inference run.
-- Ascend profiler can capture a short inference run.
-- Metrics remain stable under repeated benchmark runs.
+- [x] `/metrics` endpoint returns Prometheus text format.
+- [x] A chat request increments request counters.
+- [x] A failed request increments error counters with a stable code.
+- [x] A streaming iterator records TTFT.
+- [x] A streaming iterator records chunk-level TPOT.
+- [x] A streaming iterator records terminal status.
+- [x] Proxy passthrough SSE preserves upstream bytes and emits stream metrics.
+- [ ] A benchmark run produces raw JSONL and summary output.
+- [ ] Prometheus scrapes application metrics.
+- [ ] Prometheus scrapes hardware exporter metrics.
+- [ ] Grafana shows service, runtime, and hardware panels.
+- [ ] CUDA profiler can capture a short inference run.
+- [ ] Ascend profiler can capture a short inference run.
+- [ ] Metrics remain stable under repeated benchmark runs.
 
 ## 11. Open Decisions
 
-- Exact histogram buckets for TTFT, TPOT, E2E latency, and queue time.
-- Whether server-side TPOT should remain chunk-based when exact token counts are
-  unavailable.
+- Whether histogram buckets should be tuned after real CUDA and Ascend
+  benchmark data is available.
+- Whether server-side TPOT should remain chunk-based after benchmark-side
+  tokenizer measurements or vLLM-native token metrics are available.
 - Whether the benchmark runner should live under `scripts/` or a new
   `benchmarks/` directory.
 - Whether dashboard JSON should be checked into the repository.
-- How to normalize model names when clients use aliases but runtime uses served
-  model names.
+- Whether queue time should come from Ray Serve metrics, gateway admission
+  control, or a dedicated runtime signal.

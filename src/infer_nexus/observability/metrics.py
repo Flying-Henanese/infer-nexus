@@ -118,6 +118,23 @@ class GatewayMetrics:
             ("model",),
             buckets=STREAM_BUCKETS,
         )
+        self.stream_tpot_seconds = Histogram(
+            "infer_nexus_stream_tpot_seconds",
+            "Chunk-level streaming TPOT approximation between emitted SSE chunks.",
+            ("model",),
+            buckets=STREAM_BUCKETS,
+        )
+        self.stream_completions_total = Counter(
+            "infer_nexus_stream_completions_total",
+            "Streaming chat responses grouped by terminal status.",
+            ("model", "status"),
+        )
+        self.request_queue_seconds = Histogram(
+            "infer_nexus_request_queue_seconds",
+            "Gateway-observed request queue time when available.",
+            ("model",),
+            buckets=LATENCY_BUCKETS,
+        )
         self.input_tokens_total = Counter(
             "infer_nexus_input_tokens_total",
             "Input tokens reported by model responses when available.",
@@ -173,7 +190,17 @@ class GatewayMetrics:
 
     def observe_stream_chunk_interval(self, *, model: str, seconds: float) -> None:
         """记录流式响应相邻输出块间隔。"""
-        self.stream_chunk_interval_seconds.labels(model=model).observe(max(seconds, 0.0))
+        value = max(seconds, 0.0)
+        self.stream_chunk_interval_seconds.labels(model=model).observe(value)
+        self.stream_tpot_seconds.labels(model=model).observe(value)
+
+    def observe_stream_completion(self, *, model: str, status: str) -> None:
+        """记录流式响应终止状态。"""
+        self.stream_completions_total.labels(model=model, status=status).inc()
+
+    def observe_request_queue(self, *, model: str, seconds: float) -> None:
+        """记录请求排队耗时；当前仅在调用方有可靠队列时间时使用。"""
+        self.request_queue_seconds.labels(model=model).observe(max(seconds, 0.0))
 
     def observe_token_usage(self, *, model: str, task: str, usage: Any) -> None:
         """在响应包含 usage 时记录输入和输出 token。"""

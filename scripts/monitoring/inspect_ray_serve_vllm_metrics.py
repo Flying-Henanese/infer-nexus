@@ -17,12 +17,29 @@ from dataclasses import dataclass
 from typing import Iterable
 
 
-RAY_SERVE_METRICS = (
+RAY_SERVE_ROUTING_METRICS = (
+    "ray_serve_handle_request_counter_total",
+    "ray_serve_num_router_requests_total",
     "ray_serve_deployment_queued_queries",
     "ray_serve_request_router_fulfillment_time_ms",
     "ray_serve_num_ongoing_requests_at_replicas",
+)
+
+RAY_SERVE_REPLICA_METRICS = (
     "ray_serve_replica_processing_queries",
+    "ray_serve_replica_utilization_percent",
     "ray_serve_deployment_processing_latency_ms",
+    "ray_serve_deployment_request_counter_total",
+    "ray_serve_deployment_error_counter_total",
+)
+
+RAY_SERVE_LIFECYCLE_METRICS = (
+    "ray_serve_deployment_replica_healthy",
+    "ray_serve_deployment_replica_starts_total",
+    "ray_serve_autoscaling_target_replicas",
+    "ray_serve_autoscaling_desired_replicas",
+    "ray_serve_controller_num_control_loops",
+    "ray_serve_routing_stats_delay_ms",
 )
 
 VLLM_METRICS = (
@@ -121,7 +138,12 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
-    all_metrics = (*RAY_SERVE_METRICS, *VLLM_METRICS)
+    all_metrics = (
+        *RAY_SERVE_ROUTING_METRICS,
+        *RAY_SERVE_REPLICA_METRICS,
+        *RAY_SERVE_LIFECYCLE_METRICS,
+        *VLLM_METRICS,
+    )
 
     try:
         if args.prometheus_url:
@@ -140,12 +162,20 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    ray_checks = checks[: len(RAY_SERVE_METRICS)]
-    vllm_checks = checks[len(RAY_SERVE_METRICS) :]
-    _print_group("Ray Serve metrics", ray_checks)
+    routing_end = len(RAY_SERVE_ROUTING_METRICS)
+    replica_end = routing_end + len(RAY_SERVE_REPLICA_METRICS)
+    lifecycle_end = replica_end + len(RAY_SERVE_LIFECYCLE_METRICS)
+
+    routing_checks = checks[:routing_end]
+    replica_checks = checks[routing_end:replica_end]
+    lifecycle_checks = checks[replica_end:lifecycle_end]
+    vllm_checks = checks[lifecycle_end:]
+    _print_group("Ray Serve routing metrics", routing_checks)
+    _print_group("Ray Serve replica metrics", replica_checks)
+    _print_group("Ray Serve lifecycle metrics", lifecycle_checks)
     _print_group("vLLM metrics", vllm_checks)
 
-    ray_available = any(check.available for check in ray_checks)
+    ray_available = any(check.available for check in (*routing_checks, *replica_checks, *lifecycle_checks))
     vllm_available = any(check.available for check in vllm_checks)
     print("Recommendation")
     if ray_available:

@@ -1,0 +1,76 @@
+# Prometheus scrape example for infer-nexus with Ray Serve hosted vLLM.
+#
+# This file intentionally covers only local `backend: vllm` deployments hosted
+# by Ray Serve. It does not include proxy-backed or standalone vLLM HTTP-server
+# scrape jobs.
+#
+# Ray usually writes a Prometheus file-SD target list under the active Ray
+# session directory. On a running node, check:
+#
+#   find /tmp/ray -name prometheus_sd.json -o -name prometheus_service_discovery.json
+#
+# Then update the file_sd_configs path below to the discovered file.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: infer-nexus-gateway
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - 127.0.0.1:8000
+        labels:
+          service: infer-nexus
+          component: gateway
+
+  - job_name: ray
+    file_sd_configs:
+      - files:
+          - /tmp/ray/session_latest/metrics/prometheus_sd.json
+          - /tmp/ray/session_latest/metrics/prometheus_service_discovery.json
+        refresh_interval: 30s
+    relabel_configs:
+      - target_label: service
+        replacement: ray
+      - target_label: component
+        replacement: serve-vllm-runtime
+
+  - job_name: node-exporter
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - 127.0.0.1:9100
+        labels:
+          service: node-exporter
+          component: host
+
+  - job_name: process-exporter
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - 127.0.0.1:9256
+        labels:
+          service: process-exporter
+          component: process
+
+  # CUDA example. Remove this job on Ascend-only hosts.
+  - job_name: dcgm-exporter
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - 127.0.0.1:9400
+        labels:
+          service: dcgm-exporter
+          component: gpu
+
+  # Ascend example. Enable when an Ascend NPU exporter is installed.
+  - job_name: ascend-npu-exporter
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - 127.0.0.1:9101
+        labels:
+          service: ascend-npu-exporter
+          component: npu

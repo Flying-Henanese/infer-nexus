@@ -4,10 +4,10 @@
 # by Ray Serve. It does not include proxy-backed or standalone vLLM HTTP-server
 # scrape jobs.
 #
-# Ray usually writes a Prometheus file-SD target list under the active Ray
-# session directory. On a running node, check:
+# Ray usually writes a Prometheus file-SD target list under `/tmp/ray` or the
+# active Ray session directory. On a running node, check:
 #
-#   find /tmp/ray -name prometheus_sd.json -o -name prometheus_service_discovery.json
+#   find /tmp/ray -name prometheus_sd.json -o -name prometheus_service_discovery.json -o -name prom_metrics_service_discovery.json
 #
 # Then update the file_sd_configs path below to the discovered file.
 
@@ -28,8 +28,10 @@ scrape_configs:
   - job_name: ray
     file_sd_configs:
       - files:
+          - /tmp/ray/prom_metrics_service_discovery.json
           - /tmp/ray/session_latest/metrics/prometheus_sd.json
           - /tmp/ray/session_latest/metrics/prometheus_service_discovery.json
+          - /tmp/ray/session_latest/metrics/prom_metrics_service_discovery.json
         refresh_interval: 30s
     relabel_configs:
       - target_label: service

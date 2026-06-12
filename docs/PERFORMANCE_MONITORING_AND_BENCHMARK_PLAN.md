@@ -34,10 +34,17 @@ Status as of the current codebase:
   and long-context workloads. The current validation is limited to compile and
   pure unit tests; it has not been validated against a live gateway or vLLM
   service in this environment.
-- Phases 5 through 7 remain mostly planned work. The repository has CUDA and
-  Ascend environment check/install helpers, but Prometheus scrape examples,
-  Grafana dashboards, Ray/vLLM metric queries, and profiling runbooks are not
-  complete.
+- Phase 5 remains planned work. The repository has CUDA and Ascend environment
+  check/install helpers, but hardware exporter scrape validation is not complete.
+- Phase 6 is partially implemented and validated for Ray Serve. The repository
+  includes a Ray Serve hosted vLLM Prometheus scrape example, a runtime metric
+  discovery script, and a runbook. On the current target runtime, Ray service
+  discovery is available from `127.0.0.1:8265/api/prometheus/sd`, and Ray Serve
+  routing, replica, and lifecycle metrics were observed from the dynamic Ray
+  metrics target. Embedded vLLM internal metrics such as running/waiting
+  requests, KV cache usage, and vLLM token counters were not observed through
+  Ray metrics.
+- Phase 7 remains planned work. Profiling runbooks are not complete.
 
 ## 1. Goals
 
@@ -409,10 +416,24 @@ Hardware utilization:
 
 ### Phase 6: Ray and vLLM Metrics
 
-- Confirm Ray Serve Prometheus endpoint and service discovery.
-- Confirm installed vLLM metrics names in CUDA and Ascend environments.
-- Add dashboard queries for queue, running/waiting requests, KV cache, and token
-  throughput.
+- [x] Add a Prometheus scrape example for Ray Serve hosted local vLLM models.
+- [x] Add a dependency-free metric discovery script for Ray Serve and embedded
+  vLLM metrics.
+- [x] Add a runbook for finding and interpreting gateway, Ray Serve, and vLLM
+  metrics for local Ray Serve hosted vLLM models.
+- [x] Confirm Ray Serve Prometheus endpoint and service discovery on the target
+  runtime.
+- [x] Confirm Ray Serve routing, replica, and lifecycle metrics from a real Ray
+  metrics target. The target port is dynamic and should be discovered from
+  `127.0.0.1:8265/api/prometheus/sd` or
+  `/tmp/ray/prom_metrics_service_discovery.json`.
+- [x] Confirm that embedded vLLM internal metrics are not visible through the
+  current Ray metrics source. Missing metrics include running/waiting requests,
+  KV cache usage, vLLM queue time, and vLLM token counters.
+- [ ] Add dashboard queries for gateway, Ray Serve queue/replica, and hardware
+  metrics.
+- [ ] Decide whether to add infer-nexus replica-level custom metrics to cover
+  visibility gaps left by missing embedded vLLM metrics.
 - Avoid private vLLM scheduler/cache introspection unless official metrics are
   unavailable.
 
@@ -436,7 +457,15 @@ Hardware utilization:
 - [x] A benchmark run produces raw JSONL and summary output in unit tests.
 - [ ] A benchmark run produces raw JSONL and summary output against a live
   gateway/runtime.
-- [ ] Prometheus scrapes application metrics.
+- [x] Application metrics are exposed from the gateway `/metrics` endpoint on a
+  live target runtime.
+- [x] Ray service discovery returns metrics targets on a live target runtime.
+- [x] Ray Serve hosted vLLM routing, replica, and lifecycle metrics are visible
+  from the current Ray Serve metrics target.
+- [ ] Prometheus server scrape was not fully validated end-to-end from this
+  environment; raw gateway and Ray metrics endpoints were validated directly.
+- [ ] Embedded vLLM internal metrics are not visible through the current Ray
+  metrics source.
 - [ ] Prometheus scrapes hardware exporter metrics.
 - [ ] Grafana shows service, runtime, and hardware panels.
 - [ ] CUDA profiler can capture a short inference run.

@@ -54,8 +54,8 @@ default-groups = []
 extra-build-dependencies = { xformers = ["torch"] }
 
 [[tool.uv.index]]
-name = "tsinghua"
-url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+name = "aliyun"          # 可以自定义一个便于识别的名字
+url = "https://mirrors.aliyun.com/pypi/simple/"
 default = true
 
 [tool.ruff]

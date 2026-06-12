@@ -29,11 +29,11 @@ models:
     compat_mode: vllm_native
     model_path: /nas_data/models/Qwen/Qwen3-32B
     dtype: auto
-    tensor_parallel_size: 2
+    tensor_parallel_size: 1
     max_model_len: 30000
     cpu_per_replica: 4
     gpu_per_replica: 2
-    gpu_memory_utilization: 0.6
+    gpu_memory_utilization: 0.9
     min_replicas: 1
     max_replicas: 1
     deployment_config:
@@ -123,7 +123,6 @@ models:
     max_replicas: 1
     engine_kwargs:
       trust_remote_code: true
-      enforce_eager: true
     labels:
       - internal
       - rerank
@@ -151,7 +150,6 @@ models:
       - vision
     engine_kwargs:
       trust_remote_code: true
-      enforce_eager: true
       tool_call_parser: qwen3_coder
       enable_auto_tool_choice: true
       limit_mm_per_prompt:

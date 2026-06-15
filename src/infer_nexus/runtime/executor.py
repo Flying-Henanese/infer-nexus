@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import inspect
 import json
 import logging
@@ -18,7 +18,12 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 
 from infer_nexus.catalog.models import ProxyConfig
 from infer_nexus.core.enums import BackendType, CompatibilityMode
-from infer_nexus.core.errors import BackendConfigurationError, RuntimeExecutionError, RuntimeNotConnectedError
+from infer_nexus.core.errors import (
+    AdmissionRejectedError,
+    BackendConfigurationError,
+    RuntimeExecutionError,
+    RuntimeNotConnectedError,
+)
 from infer_nexus.core.schemas import (
     ChatCompletionChoice,
     ChatCompletionsRequest,
@@ -40,12 +45,103 @@ from infer_nexus.runtime.types import RuntimeTarget
 
 logger = logging.getLogger(__name__)
 
+
+class _ServeDeploymentGuard:
+    """Gateway-side fail-fast guard for one Serve deployment."""
+
+    def __init__(
+        self,
+        *,
+        key: str,
+        max_inflight: int,
+        circuit_breaker_enabled: bool,
+        failure_threshold: int,
+        cooldown_seconds: int | float,
+    ) -> None:
+        self.key = key
+        self.max_inflight = max_inflight
+        self.circuit_breaker_enabled = circuit_breaker_enabled
+        self.failure_threshold = failure_threshold
+        self.cooldown_seconds = cooldown_seconds
+        self._inflight = 0
+        self._consecutive_failures = 0
+        self._opened_at: float | None = None
+
+    def check_circuit(self) -> None:
+        """Reject requests while the deployment circuit is open."""
+        if not self.circuit_breaker_enabled or self._opened_at is None:
+            return
+        elapsed = time() - self._opened_at
+        if elapsed < self.cooldown_seconds:
+            remaining = self.cooldown_seconds - elapsed
+            raise RuntimeNotConnectedError(
+                f"Serve deployment '{self.key}' circuit breaker is open; "
+                f"retry after {remaining:.1f}s.",
+                code="runtime_circuit_open",
+            )
+        self._opened_at = None
+
+    async def acquire(self) -> None:
+        """Acquire one gateway-side inflight slot or fail fast."""
+        self.check_circuit()
+        if self.max_inflight > 0 and self._inflight >= self.max_inflight:
+            raise AdmissionRejectedError(
+                f"Serve deployment '{self.key}' has reached the gateway inflight limit "
+                f"({self.max_inflight}).",
+                code="model_overloaded",
+            )
+        self._inflight += 1
+
+    def release(self) -> None:
+        """Release one gateway-side inflight slot."""
+        if self._inflight > 0:
+            self._inflight -= 1
+
+    def record_success(self) -> None:
+        """Close the breaker after a successful request."""
+        self._consecutive_failures = 0
+        self._opened_at = None
+
+    def record_failure(self) -> None:
+        """Open the breaker after enough consecutive runtime failures."""
+        if not self.circuit_breaker_enabled:
+            return
+        self._consecutive_failures += 1
+        if self._consecutive_failures >= self.failure_threshold:
+            self._opened_at = time()
+
+
 @dataclass(slots=True)
 class RuntimeExecutor:
     """统一执行本地副本、Ray Serve 句柄和 OpenAI 代理模型请求。"""
 
     mode: str = "stub"
     handle_resolver: ServeDeploymentHandleResolver | None = None
+    serve_request_timeout_seconds: int | float = 120
+    max_inflight_per_model: int = 0
+    circuit_breaker_enabled: bool = False
+    circuit_breaker_failure_threshold: int = 3
+    circuit_breaker_cooldown_seconds: int | float = 60
+    _guards: dict[str, _ServeDeploymentGuard] = field(default_factory=dict, init=False)
+
+    def _guard_key(self, target: RuntimeTarget) -> str:
+        """Return the stable key used for per-deployment gateway safeguards."""
+        return f"{target.app_name or 'unknown'}:{target.deployment_name}"
+
+    def _get_guard(self, target: RuntimeTarget) -> "_ServeDeploymentGuard":
+        """Return the per-deployment fail-fast guard."""
+        key = self._guard_key(target)
+        guard = self._guards.get(key)
+        if guard is None:
+            guard = _ServeDeploymentGuard(
+                key=key,
+                max_inflight=self.max_inflight_per_model,
+                circuit_breaker_enabled=self.circuit_breaker_enabled,
+                failure_threshold=self.circuit_breaker_failure_threshold,
+                cooldown_seconds=self.circuit_breaker_cooldown_seconds,
+            )
+            self._guards[key] = guard
+        return guard
 
     async def execute_chat(
         self,
@@ -223,8 +319,27 @@ class RuntimeExecutor:
             )
 
         try:
+            guard = self._get_guard(target)
+            await guard.acquire()
             response = remote_method.remote(request_payload=payload)
-            return await self._await_handle_response(response)
+            try:
+                result = await asyncio.wait_for(
+                    self._await_handle_response(response),
+                    timeout=self.serve_request_timeout_seconds,
+                )
+            except TimeoutError as exc:
+                guard.record_failure()
+                raise self._serve_timeout_error(target, method_name) from exc
+            except Exception:
+                guard.record_failure()
+                raise
+            else:
+                guard.record_success()
+                return result
+            finally:
+                guard.release()
+        except AdmissionRejectedError:
+            raise
         except RuntimeNotConnectedError:
             raise
         except Exception as exc:
@@ -283,6 +398,8 @@ class RuntimeExecutor:
             )
 
         try:
+            guard = self._get_guard(target)
+            await guard.acquire()
             stream_handle = handle
             options_method = getattr(handle, "options", None)
             if callable(options_method):
@@ -296,10 +413,20 @@ class RuntimeExecutor:
                 stream_remote_method = remote_method
 
             response = stream_remote_method.remote(request_payload=payload)
-            return self._normalize_stream_result(response)
+            return self._guard_stream_chunks(
+                self._normalize_stream_result(response),
+                guard=guard,
+                target=target,
+                method_name=method_name,
+            )
+        except AdmissionRejectedError:
+            raise
         except RuntimeNotConnectedError:
             raise
         except Exception as exc:
+            if "guard" in locals():
+                guard.record_failure()
+                guard.release()
             code = self._extract_execution_error_code(exc)
             message = self._extract_execution_error_message(exc)
             logger.exception(
@@ -315,6 +442,49 @@ class RuntimeExecutor:
                 f"in app '{target.app_name}' method '{method_name}': {message}",
                 code=code,
             ) from exc
+
+    def _serve_timeout_error(self, target: RuntimeTarget, method_name: str) -> RuntimeNotConnectedError:
+        """Build a stable upstream timeout error for a Serve handle call."""
+        return RuntimeNotConnectedError(
+            f"Serve request timed out after {self.serve_request_timeout_seconds}s for "
+            f"deployment '{target.deployment_name}' in app '{target.app_name}' "
+            f"method '{method_name}'.",
+            code="upstream_timeout",
+        )
+
+    async def _guard_stream_chunks(
+        self,
+        chunks: AsyncIterator[dict[str, Any] | bytes | str],
+        *,
+        guard: _ServeDeploymentGuard,
+        target: RuntimeTarget,
+        method_name: str,
+    ) -> AsyncIterator[dict[str, Any] | bytes | str]:
+        """Apply timeout, circuit accounting, and inflight release to a Serve stream."""
+        iterator = chunks.__aiter__()
+        try:
+            while True:
+                try:
+                    chunk = await asyncio.wait_for(
+                        iterator.__anext__(),
+                        timeout=self.serve_request_timeout_seconds,
+                    )
+                except StopAsyncIteration:
+                    guard.record_success()
+                    return
+                except TimeoutError as exc:
+                    guard.record_failure()
+                    raise self._serve_timeout_error(target, method_name) from exc
+                yield chunk
+        except asyncio.CancelledError:
+            raise
+        except RuntimeNotConnectedError:
+            raise
+        except Exception:
+            guard.record_failure()
+            raise
+        finally:
+            guard.release()
 
     async def _await_handle_response(self, response: Any) -> Any:
         """兼容 awaitable、ObjectRef 风格和普通返回值。"""

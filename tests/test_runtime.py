@@ -400,6 +400,10 @@ def test_deployment_factory_applies_llmconfig_style_overrides() -> None:
                     'target_ongoing_requests': 20,
                 },
                 'ray_actor_options': {'num_cpus': 6},
+                'serve_deployment_kwargs': {
+                    'max_queued_requests': 32,
+                    'max_ongoing_requests': 1,
+                },
             },
         )
     )
@@ -411,6 +415,17 @@ def test_deployment_factory_applies_llmconfig_style_overrides() -> None:
     }
     assert spec.ray_actor_options['num_cpus'] == 6
     assert spec.ray_actor_options['num_gpus'] == 1
+    assert spec.serve_deployment_kwargs == {
+        'max_queued_requests': 32,
+        'max_ongoing_requests': 1,
+    }
+
+    deployment_kwargs = ServeApplicationBuilder(
+        model_store=LocalModelStore('models')
+    ).deployment_factory.build_serve_deployment_kwargs(spec)
+
+    assert deployment_kwargs['max_queued_requests'] == 32
+    assert deployment_kwargs['max_ongoing_requests'] == 1
 
 
 def test_request_router_config_is_rejected_for_non_local_chat_models() -> None:

@@ -34,6 +34,7 @@ class DeploymentConfig(BaseModel):
     autoscaling_config: dict[str, Any] = Field(default_factory=dict)
     ray_actor_options: dict[str, Any] = Field(default_factory=dict)
     request_router_config: dict[str, Any] = Field(default_factory=dict)
+    serve_deployment_kwargs: dict[str, Any] = Field(default_factory=dict)
 
 
 class ProxyAuthConfig(BaseModel):

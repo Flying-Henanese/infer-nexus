@@ -42,6 +42,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     runtime_executor = RuntimeExecutor(
         mode=settings.runtime.execution_mode,
         handle_resolver=handle_resolver,
+        serve_request_timeout_seconds=settings.runtime.serve_request_timeout_seconds,
+        max_inflight_per_model=settings.runtime.max_inflight_per_model,
+        circuit_breaker_enabled=settings.runtime.circuit_breaker_enabled,
+        circuit_breaker_failure_threshold=settings.runtime.circuit_breaker_failure_threshold,
+        circuit_breaker_cooldown_seconds=settings.runtime.circuit_breaker_cooldown_seconds,
     )
 
     # 5) 将依赖对象挂载到 app.state，供 FastAPI 依赖注入层读取。

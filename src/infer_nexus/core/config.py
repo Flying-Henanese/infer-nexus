@@ -51,6 +51,11 @@ class RuntimeSettings(BaseModel):
     backend: str = "vllm"
     execution_mode: str = "stub"
     backend_init_mode: str = "stub"
+    serve_request_timeout_seconds: int | float = Field(default=120, gt=0)
+    max_inflight_per_model: int = Field(default=0, ge=0)
+    circuit_breaker_enabled: bool = False
+    circuit_breaker_failure_threshold: int = Field(default=3, ge=1)
+    circuit_breaker_cooldown_seconds: int | float = Field(default=60, gt=0)
 
 
 class ModelStoreSettings(BaseModel):

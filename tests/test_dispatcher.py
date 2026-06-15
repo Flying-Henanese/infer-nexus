@@ -12,7 +12,7 @@ from infer_nexus.catalog.models import ModelCatalogFile, ModelConfig
 from infer_nexus.catalog.loader import load_model_catalog
 from infer_nexus.catalog.registry import ModelRegistry
 from infer_nexus.core.enums import BackendType, TaskType
-from infer_nexus.core.errors import RuntimeNotConnectedError
+from infer_nexus.core.errors import AdmissionRejectedError, RuntimeNotConnectedError
 from infer_nexus.core.schemas import ChatCompletionsRequest, EmbeddingRequest, RerankRequest
 from infer_nexus.model_store import LocalModelStore
 from infer_nexus.runtime.dispatcher import RuntimeDispatcher
@@ -643,6 +643,170 @@ def test_dispatch_raises_when_serve_mode_has_no_resolver() -> None:
 
     with pytest.raises(RuntimeNotConnectedError, match='no handle resolver'):
         asyncio.run(dispatcher.dispatch_chat(registry.get('qwen3-chat'), request))
+
+
+def test_serve_handle_resolver_caches_handles_by_app_and_deployment() -> None:
+    """Serve handles should be reused instead of fetched for every request."""
+
+    class CountingServe:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def get_deployment_handle(self, deployment_name: str, app_name: str) -> object:
+            self.calls += 1
+            return {"deployment_name": deployment_name, "app_name": app_name}
+
+    serve = CountingServe()
+    resolver = ServeDeploymentHandleResolver(serve=serve)
+
+    first = resolver.get_handle("model-qwen3", app_name="infer-nexus-model-qwen3")
+    second = resolver.get_handle("model-qwen3", app_name="infer-nexus-model-qwen3")
+
+    assert first is second
+    assert serve.calls == 1
+
+
+def test_dispatch_chat_times_out_slow_serve_handle() -> None:
+    """Serve handle calls should fail fast when the router or replica stalls."""
+
+    class SlowDeploymentMethod:
+        async def remote(self, *, request_payload: dict) -> dict:
+            await asyncio.sleep(1)
+            return {"status": "ok", "payload": request_payload}
+
+    class SlowDeploymentHandle:
+        def __init__(self) -> None:
+            self.chat_completion = SlowDeploymentMethod()
+
+    class SlowServe:
+        def get_deployment_handle(self, deployment_name: str, app_name: str) -> SlowDeploymentHandle:
+            return SlowDeploymentHandle()
+
+    resolver = ServeDeploymentHandleResolver(serve=SlowServe())
+    executor = RuntimeExecutor(
+        mode='serve',
+        handle_resolver=resolver,
+        serve_request_timeout_seconds=0.01,
+    )
+    request = ChatCompletionsRequest(
+        model='qwen3-chat',
+        messages=[{'role': 'user', 'content': 'hello'}],
+    )
+    target = RuntimeTarget(
+        model_name='qwen3-32b-instruct',
+        model_alias='qwen3-chat',
+        backend=BackendType.VLLM,
+        app_name='infer-nexus-model-qwen3-32b-instruct',
+        deployment_name='model-qwen3-32b-instruct',
+        runtime_context={'served_model_name': 'qwen3-chat'},
+    )
+
+    with pytest.raises(RuntimeNotConnectedError) as exc_info:
+        asyncio.run(executor.execute_chat(target=target, request=request))
+
+    assert exc_info.value.code == 'upstream_timeout'
+
+
+def test_dispatch_chat_rejects_when_gateway_inflight_limit_is_reached() -> None:
+    """Gateway-side inflight limits should reject excess requests before Serve routing."""
+
+    async def run_case() -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        class BlockingDeploymentMethod:
+            async def remote(self, *, request_payload: dict) -> dict:
+                started.set()
+                await release.wait()
+                return {"status": "ok", "payload": request_payload}
+
+        class BlockingDeploymentHandle:
+            def __init__(self) -> None:
+                self.chat_completion = BlockingDeploymentMethod()
+
+        class BlockingServe:
+            def get_deployment_handle(self, deployment_name: str, app_name: str) -> BlockingDeploymentHandle:
+                return BlockingDeploymentHandle()
+
+        resolver = ServeDeploymentHandleResolver(serve=BlockingServe())
+        executor = RuntimeExecutor(
+            mode='serve',
+            handle_resolver=resolver,
+            max_inflight_per_model=1,
+        )
+        request = ChatCompletionsRequest(
+            model='qwen3-chat',
+            messages=[{'role': 'user', 'content': 'hello'}],
+        )
+        target = RuntimeTarget(
+            model_name='qwen3-32b-instruct',
+            model_alias='qwen3-chat',
+            backend=BackendType.VLLM,
+            app_name='infer-nexus-model-qwen3-32b-instruct',
+            deployment_name='model-qwen3-32b-instruct',
+            runtime_context={'served_model_name': 'qwen3-chat'},
+        )
+
+        first_task = asyncio.create_task(executor.execute_chat(target=target, request=request))
+        await started.wait()
+        with pytest.raises(AdmissionRejectedError) as exc_info:
+            await executor.execute_chat(target=target, request=request)
+        release.set()
+        await first_task
+
+        assert exc_info.value.code == 'model_overloaded'
+
+    asyncio.run(run_case())
+
+
+def test_dispatch_chat_opens_circuit_after_repeated_serve_timeouts() -> None:
+    """Repeated Serve timeouts should open the deployment circuit breaker."""
+
+    class SlowDeploymentMethod:
+        async def remote(self, *, request_payload: dict) -> dict:
+            await asyncio.sleep(1)
+            return {"status": "ok", "payload": request_payload}
+
+    class SlowDeploymentHandle:
+        def __init__(self) -> None:
+            self.chat_completion = SlowDeploymentMethod()
+
+    class SlowServe:
+        def get_deployment_handle(self, deployment_name: str, app_name: str) -> SlowDeploymentHandle:
+            return SlowDeploymentHandle()
+
+    async def run_case() -> None:
+        resolver = ServeDeploymentHandleResolver(serve=SlowServe())
+        executor = RuntimeExecutor(
+            mode='serve',
+            handle_resolver=resolver,
+            serve_request_timeout_seconds=0.01,
+            circuit_breaker_enabled=True,
+            circuit_breaker_failure_threshold=1,
+            circuit_breaker_cooldown_seconds=60,
+        )
+        request = ChatCompletionsRequest(
+            model='qwen3-chat',
+            messages=[{'role': 'user', 'content': 'hello'}],
+        )
+        target = RuntimeTarget(
+            model_name='qwen3-32b-instruct',
+            model_alias='qwen3-chat',
+            backend=BackendType.VLLM,
+            app_name='infer-nexus-model-qwen3-32b-instruct',
+            deployment_name='model-qwen3-32b-instruct',
+            runtime_context={'served_model_name': 'qwen3-chat'},
+        )
+
+        with pytest.raises(RuntimeNotConnectedError) as timeout_info:
+            await executor.execute_chat(target=target, request=request)
+        with pytest.raises(RuntimeNotConnectedError) as circuit_info:
+            await executor.execute_chat(target=target, request=request)
+
+        assert timeout_info.value.code == 'upstream_timeout'
+        assert circuit_info.value.code == 'runtime_circuit_open'
+
+    asyncio.run(run_case())
 
 
 def _build_proxy_dispatcher() -> tuple[ModelRegistry, RuntimeDispatcher]:

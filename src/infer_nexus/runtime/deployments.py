@@ -25,6 +25,7 @@ class DeploymentSpec:
     autoscaling_config: dict[str, int] = field(default_factory=dict)
     ray_actor_options: dict[str, Any] = field(default_factory=dict)
     request_router_config: dict[str, Any] = field(default_factory=dict)
+    serve_deployment_kwargs: dict[str, Any] = field(default_factory=dict)
 
 class ModelRuntimeReplica:
     """Ray Serve 模型副本，负责校验运行时规格并调用后端适配器。"""
@@ -234,6 +235,7 @@ class DeploymentFactory:
             autoscaling_config=autoscaling_config,
             ray_actor_options=ray_actor_options,
             request_router_config=dict(model.deployment_config.request_router_config),
+            serve_deployment_kwargs=dict(model.deployment_config.serve_deployment_kwargs),
         )
 
     def build_request_router_config(self, request_router_config: dict[str, Any]) -> Any:
@@ -253,6 +255,7 @@ class DeploymentFactory:
             "ray_actor_options": dict(spec.ray_actor_options),
             "autoscaling_config": dict(spec.autoscaling_config),
         }
+        kwargs.update(spec.serve_deployment_kwargs)
         request_router_config = self.build_request_router_config(spec.request_router_config)
         if request_router_config is not None:
             kwargs["request_router_config"] = request_router_config

@@ -41,8 +41,12 @@ runtime:
   # Gateway-side timeout for one Ray Serve handle call. This prevents requests
   # from waiting forever when the Serve router or replica stops making progress.
   serve_request_timeout_seconds: 120
-  # 0 disables the gateway-side per-model inflight limiter.
-  max_inflight_per_model: 0
+  # Gateway-local per-model admission limit. Requests rejected here never enter
+  # Ray Serve routing, which avoids amplifying router queue-length probing.
+  # 0 disables the gateway-side limiter.
+  max_inflight_per_model: 4
+  # 0 means fail immediately when the local admission limit is full.
+  admission_acquire_timeout_seconds: 0
   # Optional gateway-side circuit breaker for repeated Serve runtime failures.
   circuit_breaker_enabled: false
   circuit_breaker_failure_threshold: 3

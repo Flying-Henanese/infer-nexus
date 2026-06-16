@@ -54,16 +54,19 @@ class _ServeDeploymentGuard:
         *,
         key: str,
         max_inflight: int,
+        acquire_timeout_seconds: int | float,
         circuit_breaker_enabled: bool,
         failure_threshold: int,
         cooldown_seconds: int | float,
     ) -> None:
         self.key = key
         self.max_inflight = max_inflight
+        self.acquire_timeout_seconds = acquire_timeout_seconds
         self.circuit_breaker_enabled = circuit_breaker_enabled
         self.failure_threshold = failure_threshold
         self.cooldown_seconds = cooldown_seconds
         self._inflight = 0
+        self._semaphore = asyncio.Semaphore(max_inflight) if max_inflight > 0 else None
         self._consecutive_failures = 0
         self._opened_at: float | None = None
 
@@ -82,20 +85,41 @@ class _ServeDeploymentGuard:
         self._opened_at = None
 
     async def acquire(self) -> None:
-        """Acquire one gateway-side inflight slot or fail fast."""
+        """Acquire one gateway-side admission slot or fail fast."""
         self.check_circuit()
-        if self.max_inflight > 0 and self._inflight >= self.max_inflight:
+        if self._semaphore is None:
+            self._inflight += 1
+            return
+
+        acquired = False
+        if self.acquire_timeout_seconds <= 0:
+            if not self._semaphore.locked():
+                await self._semaphore.acquire()
+                acquired = True
+        else:
+            try:
+                await asyncio.wait_for(
+                    self._semaphore.acquire(),
+                    timeout=self.acquire_timeout_seconds,
+                )
+                acquired = True
+            except TimeoutError:
+                acquired = False
+
+        if not acquired:
             raise AdmissionRejectedError(
-                f"Serve deployment '{self.key}' has reached the gateway inflight limit "
+                f"Serve deployment '{self.key}' has reached the gateway admission limit "
                 f"({self.max_inflight}).",
-                code="model_overloaded",
+                code="gateway_overloaded",
             )
         self._inflight += 1
 
     def release(self) -> None:
-        """Release one gateway-side inflight slot."""
+        """Release one gateway-side admission slot."""
         if self._inflight > 0:
             self._inflight -= 1
+            if self._semaphore is not None:
+                self._semaphore.release()
 
     def record_success(self) -> None:
         """Close the breaker after a successful request."""
@@ -119,6 +143,7 @@ class RuntimeExecutor:
     handle_resolver: ServeDeploymentHandleResolver | None = None
     serve_request_timeout_seconds: int | float = 120
     max_inflight_per_model: int = 0
+    admission_acquire_timeout_seconds: int | float = 0
     circuit_breaker_enabled: bool = False
     circuit_breaker_failure_threshold: int = 3
     circuit_breaker_cooldown_seconds: int | float = 60
@@ -136,6 +161,7 @@ class RuntimeExecutor:
             guard = _ServeDeploymentGuard(
                 key=key,
                 max_inflight=self.max_inflight_per_model,
+                acquire_timeout_seconds=self.admission_acquire_timeout_seconds,
                 circuit_breaker_enabled=self.circuit_breaker_enabled,
                 failure_threshold=self.circuit_breaker_failure_threshold,
                 cooldown_seconds=self.circuit_breaker_cooldown_seconds,

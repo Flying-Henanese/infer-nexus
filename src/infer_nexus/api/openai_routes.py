@@ -278,6 +278,13 @@ def _runtime_error_response(exc: Exception, *, operation: str, request_model: st
             code="model_artifact_missing",
         )
     if isinstance(exc, AdmissionRejectedError):
+        if exc.code == "gateway_overloaded":
+            return openai_error_response(
+                503,
+                str(exc),
+                error_type="service_unavailable_error",
+                code=exc.code,
+            )
         return openai_error_response(
             429,
             str(exc),

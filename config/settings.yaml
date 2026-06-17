@@ -2,7 +2,7 @@ service:
   name: infer-nexus
   host: 0.0.0.0
   port: 8000
-  log_level: INFO
+  log_level: WARNING
   api_key_header: X-API-Key
 
 catalog:
@@ -48,8 +48,8 @@ runtime:
   # 0 means fail immediately when the local admission limit is full.
   admission_acquire_timeout_seconds: 0
   # Optional gateway-side circuit breaker for repeated Serve runtime failures.
-  circuit_breaker_enabled: false
-  circuit_breaker_failure_threshold: 3
+  circuit_breaker_enabled: true
+  circuit_breaker_failure_threshold: 1
   circuit_breaker_cooldown_seconds: 60
 
 model_store:

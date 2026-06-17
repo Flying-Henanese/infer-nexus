@@ -15,6 +15,7 @@ class ServiceSettings(BaseModel):
     name: str = "infer-nexus"
     host: str = "0.0.0.0"
     port: int = 8000
+    workers: int = Field(default=1, ge=1)
     log_level: str = "INFO"
     api_key_header: str = "X-API-Key"
 
@@ -51,12 +52,22 @@ class RuntimeSettings(BaseModel):
     backend: str = "vllm"
     execution_mode: str = "stub"
     backend_init_mode: str = "stub"
+    gateway_worker_max_inflight: int = Field(default=0, ge=0)
     serve_request_timeout_seconds: int | float = Field(default=120, gt=0)
+    serve_stream_idle_timeout_seconds: int | float = Field(default=30, gt=0)
+    serve_stream_max_lifetime_seconds: int | float = Field(default=900, gt=0)
     max_inflight_per_model: int = Field(default=0, ge=0)
+    max_streaming_inflight_per_model: int = Field(default=0, ge=0)
+    max_non_streaming_inflight_per_model: int = Field(default=0, ge=0)
+    max_queued_per_model: int = Field(default=0, ge=0)
     admission_acquire_timeout_seconds: int | float = Field(default=0, ge=0)
+    admission_queue_timeout_seconds: int | float = Field(default=0, ge=0)
     circuit_breaker_enabled: bool = False
     circuit_breaker_failure_threshold: int = Field(default=3, ge=1)
     circuit_breaker_cooldown_seconds: int | float = Field(default=60, gt=0)
+    runtime_worker_enabled: bool = False
+    runtime_worker_request_timeout_seconds: int | float = Field(default=60, gt=0)
+    runtime_worker_start_timeout_seconds: int | float = Field(default=15, gt=0)
 
 
 class ModelStoreSettings(BaseModel):

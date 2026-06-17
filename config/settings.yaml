@@ -3,6 +3,7 @@ service:
   host: 0.0.0.0
   port: 8000
   log_level: WARNING
+  workers: 1
   api_key_header: X-API-Key
 
 catalog:
@@ -38,19 +39,38 @@ runtime:
   # so the service can start quickly for simulation and workflow debugging.
   # For real environment, switch to `real` to initialize the actual backend engine.
   backend_init_mode: real
+  # Per-process active request cap for one Python gateway worker. 0 disables it.
+  gateway_worker_max_inflight: 0
   # Gateway-side timeout for one Ray Serve handle call. This prevents requests
   # from waiting forever when the Serve router or replica stops making progress.
   serve_request_timeout_seconds: 120
+  # Streaming requests use idle timeout semantics: long streams are allowed as
+  # long as backend chunks keep arriving.
+  serve_stream_idle_timeout_seconds: 30
+  serve_stream_max_lifetime_seconds: 900
   # Gateway-local per-model admission limit. Requests rejected here never enter
   # Ray Serve routing, which avoids amplifying router queue-length probing.
   # 0 disables the gateway-side limiter.
   max_inflight_per_model: 4
-  # 0 means fail immediately when the local admission limit is full.
+  # Optional split budgets for long streaming and shorter non-streaming calls.
+  # 0 means fall back to max_inflight_per_model.
+  max_streaming_inflight_per_model: 0
+  max_non_streaming_inflight_per_model: 0
+  # Bounded per-model burst queue inside one gateway worker. 0 disables waiting
+  # and keeps fail-fast overload behavior.
+  max_queued_per_model: 0
+  # Legacy acquisition timeout. Kept for compatibility; admission_queue_timeout
+  # takes precedence when set.
   admission_acquire_timeout_seconds: 0
+  admission_queue_timeout_seconds: 0
   # Optional gateway-side circuit breaker for repeated Serve runtime failures.
   circuit_breaker_enabled: true
   circuit_breaker_failure_threshold: 1
   circuit_breaker_cooldown_seconds: 60
+  # Future worker-isolation switch. Default false keeps direct Serve handle calls.
+  runtime_worker_enabled: false
+  runtime_worker_request_timeout_seconds: 60
+  runtime_worker_start_timeout_seconds: 15
 
 model_store:
   root_dir: models

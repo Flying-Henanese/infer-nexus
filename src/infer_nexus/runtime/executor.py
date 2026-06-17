@@ -47,28 +47,51 @@ logger = logging.getLogger(__name__)
 
 
 class _ServeDeploymentGuard:
-    """Gateway-side fail-fast guard for one Serve deployment."""
+    """Bounded gateway-local admission guard for one execution budget."""
 
     def __init__(
         self,
         *,
         key: str,
+        model_label: str,
         max_inflight: int,
+        max_queued: int,
         acquire_timeout_seconds: int | float,
         circuit_breaker_enabled: bool,
         failure_threshold: int,
         cooldown_seconds: int | float,
     ) -> None:
         self.key = key
+        self.model_label = model_label
         self.max_inflight = max_inflight
+        self.max_queued = max_queued
         self.acquire_timeout_seconds = acquire_timeout_seconds
         self.circuit_breaker_enabled = circuit_breaker_enabled
         self.failure_threshold = failure_threshold
         self.cooldown_seconds = cooldown_seconds
-        self._inflight = 0
-        self._semaphore = asyncio.Semaphore(max_inflight) if max_inflight > 0 else None
+        self._active = 0
+        self._queued = 0
+        self._condition = asyncio.Condition()
         self._consecutive_failures = 0
         self._opened_at: float | None = None
+
+    @property
+    def active(self) -> int:
+        """Return currently admitted requests."""
+        return self._active
+
+    @property
+    def queued(self) -> int:
+        """Return currently queued requests."""
+        return self._queued
+
+    def _sync_metrics(self) -> None:
+        GATEWAY_METRICS.set_model_inflight(model=self.model_label, value=self._active)
+        GATEWAY_METRICS.set_model_queue_depth(model=self.model_label, value=self._queued)
+        GATEWAY_METRICS.set_serve_circuit_state(
+            model=self.model_label,
+            open=self._opened_at is not None,
+        )
 
     def check_circuit(self) -> None:
         """Reject requests while the deployment circuit is open."""
@@ -83,48 +106,101 @@ class _ServeDeploymentGuard:
                 code="runtime_circuit_open",
             )
         self._opened_at = None
+        self._sync_metrics()
 
-    async def acquire(self) -> None:
-        """Acquire one gateway-side admission slot or fail fast."""
+    def _reject(self, message: str, *, code: str) -> None:
+        GATEWAY_METRICS.observe_runtime_guard_rejection(
+            model=self.model_label,
+            reason=code,
+        )
+        GATEWAY_METRICS.observe_admission_rejection(
+            model=self.model_label,
+            reason=code,
+        )
+        raise AdmissionRejectedError(message, code=code)
+
+    async def acquire(self) -> float:
+        """Acquire one gateway-side slot, allowing only a bounded waiter burst."""
+        start = perf_counter()
         self.check_circuit()
-        if self._semaphore is None:
-            self._inflight += 1
-            return
+        if self.max_inflight <= 0:
+            self._active += 1
+            self._sync_metrics()
+            return 0.0
 
-        acquired = False
-        if self.acquire_timeout_seconds <= 0:
-            if not self._semaphore.locked():
-                await self._semaphore.acquire()
-                acquired = True
-        else:
-            try:
-                await asyncio.wait_for(
-                    self._semaphore.acquire(),
-                    timeout=self.acquire_timeout_seconds,
+        timeout = self.acquire_timeout_seconds
+        async with self._condition:
+            self.check_circuit()
+            if self._active < self.max_inflight:
+                self._active += 1
+                self._sync_metrics()
+                return 0.0
+
+            if self.max_queued <= 0:
+                self._reject(
+                    f"Serve deployment '{self.key}' has reached the gateway admission limit "
+                    f"({self.max_inflight}).",
+                    code="gateway_overloaded",
                 )
-                acquired = True
-            except TimeoutError:
-                acquired = False
+            if self._queued >= self.max_queued:
+                self._reject(
+                    f"Serve deployment '{self.key}' gateway queue is full "
+                    f"({self.max_queued}).",
+                    code="gateway_queue_full",
+                )
+            if timeout <= 0:
+                self._reject(
+                    f"Serve deployment '{self.key}' has reached the gateway admission limit "
+                    f"({self.max_inflight}).",
+                    code="gateway_overloaded",
+                )
 
-        if not acquired:
-            raise AdmissionRejectedError(
-                f"Serve deployment '{self.key}' has reached the gateway admission limit "
-                f"({self.max_inflight}).",
-                code="gateway_overloaded",
-            )
-        self._inflight += 1
+            self._queued += 1
+            self._sync_metrics()
+            try:
+                deadline = perf_counter() + timeout
+                while self._active >= self.max_inflight:
+                    remaining = deadline - perf_counter()
+                    if remaining <= 0:
+                        self._reject(
+                            f"Serve deployment '{self.key}' gateway admission wait timed out "
+                            f"after {timeout}s.",
+                            code="gateway_queue_timeout",
+                        )
+                    try:
+                        await asyncio.wait_for(self._condition.wait(), timeout=remaining)
+                    except TimeoutError:
+                        self._reject(
+                            f"Serve deployment '{self.key}' gateway admission wait timed out "
+                            f"after {timeout}s.",
+                            code="gateway_queue_timeout",
+                        )
+                    self.check_circuit()
+                self._active += 1
+                waited = perf_counter() - start
+                GATEWAY_METRICS.observe_admission_wait(
+                    model=self.model_label,
+                    seconds=waited,
+                )
+                return waited
+            finally:
+                if self._queued > 0:
+                    self._queued -= 1
+                self._sync_metrics()
 
-    def release(self) -> None:
-        """Release one gateway-side admission slot."""
-        if self._inflight > 0:
-            self._inflight -= 1
-            if self._semaphore is not None:
-                self._semaphore.release()
+    async def release(self) -> None:
+        """Release one gateway-side admission slot and wake one bounded waiter."""
+        async with self._condition:
+            if self._active > 0:
+                self._active -= 1
+                self._condition.notify(1)
+            self._sync_metrics()
 
     def record_success(self) -> None:
         """Close the breaker after a successful request."""
         self._consecutive_failures = 0
         self._opened_at = None
+        self._sync_metrics()
 
     def record_failure(self) -> None:
         """Open the breaker after enough consecutive runtime failures."""
@@ -133,6 +209,51 @@ class _ServeDeploymentGuard:
         self._consecutive_failures += 1
         if self._consecutive_failures >= self.failure_threshold:
             self._opened_at = time()
+        self._sync_metrics()
+
+
+class _GatewayWorkerGuard:
+    """Bound active requests inside one Python gateway process."""
+
+    def __init__(self, *, max_inflight: int, worker_label: str) -> None:
+        self.max_inflight = max_inflight
+        self.worker_label = worker_label
+        self._active = 0
+        self._condition = asyncio.Condition()
+
+    def _sync_metrics(self) -> None:
+        GATEWAY_METRICS.set_gateway_worker_inflight(
+            worker=self.worker_label,
+            value=self._active,
+        )
+
+    async def acquire(self) -> None:
+        """Acquire one worker-global active request slot without local queuing."""
+        if self.max_inflight <= 0:
+            self._active += 1
+            self._sync_metrics()
+            return
+        async with self._condition:
+            if self._active >= self.max_inflight:
+                GATEWAY_METRICS.observe_runtime_guard_rejection(
+                    model="__gateway_worker__",
+                    reason="gateway_worker_overloaded",
+                )
+                raise AdmissionRejectedError(
+                    f"Gateway worker has reached the active request limit "
+                    f"({self.max_inflight}).",
+                    code="gateway_worker_overloaded",
+                )
+            self._active += 1
+            self._sync_metrics()
+
+    async def release(self) -> None:
+        """Release one worker-global active request slot."""
+        async with self._condition:
+            if self._active > 0:
+                self._active -= 1
+                self._condition.notify(1)
+            self._sync_metrics()
 
 
 @dataclass(slots=True)
@@ -141,33 +262,81 @@ class RuntimeExecutor:
 
     mode: str = "stub"
     handle_resolver: ServeDeploymentHandleResolver | None = None
+    gateway_worker_max_inflight: int = 0
     serve_request_timeout_seconds: int | float = 120
+    serve_stream_idle_timeout_seconds: int | float = 30
+    serve_stream_max_lifetime_seconds: int | float = 900
     max_inflight_per_model: int = 0
+    max_streaming_inflight_per_model: int = 0
+    max_non_streaming_inflight_per_model: int = 0
+    max_queued_per_model: int = 0
     admission_acquire_timeout_seconds: int | float = 0
+    admission_queue_timeout_seconds: int | float = 0
     circuit_breaker_enabled: bool = False
     circuit_breaker_failure_threshold: int = 3
     circuit_breaker_cooldown_seconds: int | float = 60
+    runtime_worker_client: Any | None = None
     _guards: dict[str, _ServeDeploymentGuard] = field(default_factory=dict, init=False)
+    _worker_guard: _GatewayWorkerGuard | None = field(default=None, init=False)
 
-    def _guard_key(self, target: RuntimeTarget) -> str:
+    def _guard_key(self, target: RuntimeTarget, *, stream: bool) -> str:
         """Return the stable key used for per-deployment gateway safeguards."""
-        return f"{target.app_name or 'unknown'}:{target.deployment_name}"
+        base = f"{target.app_name or 'unknown'}:{target.deployment_name}"
+        if self.max_streaming_inflight_per_model > 0 or self.max_non_streaming_inflight_per_model > 0:
+            return f"{base}:{'stream' if stream else 'nonstream'}"
+        return base
 
-    def _get_guard(self, target: RuntimeTarget) -> "_ServeDeploymentGuard":
+    def _metric_model(self, target: RuntimeTarget) -> str:
+        """Return the stable model label used by gateway runtime metrics."""
+        return str(
+            target.model_alias
+            or target.runtime_context.get("served_model_name")
+            or target.model_name
+            or target.deployment_name
+        )
+
+    def _max_inflight_for_request(self, *, stream: bool) -> int:
+        """Return the configured active-request budget for one request shape."""
+        if stream and self.max_streaming_inflight_per_model > 0:
+            return self.max_streaming_inflight_per_model
+        if not stream and self.max_non_streaming_inflight_per_model > 0:
+            return self.max_non_streaming_inflight_per_model
+        return self.max_inflight_per_model
+
+    def _guard_acquire_timeout(self) -> int | float:
+        """Return queue wait timeout while preserving the old config field."""
+        if self.admission_queue_timeout_seconds > 0:
+            return self.admission_queue_timeout_seconds
+        return self.admission_acquire_timeout_seconds
+
+    def _get_guard(self, target: RuntimeTarget, *, stream: bool = False) -> "_ServeDeploymentGuard":
         """Return the per-deployment fail-fast guard."""
-        key = self._guard_key(target)
+        key = self._guard_key(target, stream=stream)
         guard = self._guards.get(key)
         if guard is None:
             guard = _ServeDeploymentGuard(
                 key=key,
-                max_inflight=self.max_inflight_per_model,
-                acquire_timeout_seconds=self.admission_acquire_timeout_seconds,
+                model_label=self._metric_model(target),
+                max_inflight=self._max_inflight_for_request(stream=stream),
+                max_queued=self.max_queued_per_model,
+                acquire_timeout_seconds=self._guard_acquire_timeout(),
                 circuit_breaker_enabled=self.circuit_breaker_enabled,
                 failure_threshold=self.circuit_breaker_failure_threshold,
                 cooldown_seconds=self.circuit_breaker_cooldown_seconds,
             )
             self._guards[key] = guard
         return guard
+
+    def _get_worker_guard(self) -> _GatewayWorkerGuard | None:
+        """Return the process-local active request guard when configured."""
+        if self.gateway_worker_max_inflight <= 0:
+            return None
+        if self._worker_guard is None:
+            self._worker_guard = _GatewayWorkerGuard(
+                max_inflight=self.gateway_worker_max_inflight,
+                worker_label=str(os.getpid()),
+            )
+        return self._worker_guard
 
     async def execute_chat(
         self,
@@ -178,6 +347,24 @@ class RuntimeExecutor:
         """执行 chat completion，并按模型后端选择代理、Serve 或本地路径。"""
         if target.backend == BackendType.VLLM_OPENAI_PROXY:
             return await self._execute_proxy_chat(target=target, request=request)
+        if self.mode == "serve" and self.runtime_worker_client is not None:
+            if request.stream:
+                stream_start_time = perf_counter()
+                chunks = await self.runtime_worker_client.chat_completion_stream(
+                    target=target,
+                    request=request,
+                )
+                chunks = await self._prime_stream_chunks(chunks)
+                return self._build_chat_stream_response(
+                    request,
+                    target,
+                    chunks,
+                    stream_start_time=stream_start_time,
+                )
+            return await self.runtime_worker_client.chat_completion(
+                target=target,
+                request=request,
+            )
         if request.stream:
             return await self._execute_chat_stream(target=target, request=request)
 
@@ -237,6 +424,8 @@ class RuntimeExecutor:
         """执行 embedding 请求，并把后端载荷整理为 OpenAI 兼容响应。"""
         if target.backend == BackendType.VLLM_OPENAI_PROXY:
             return await self._execute_proxy_embedding(target=target, request=request)
+        if self.mode == "serve" and self.runtime_worker_client is not None:
+            return await self.runtime_worker_client.embedding(target=target, request=request)
         if self.mode == "serve":
             payload = await self._invoke_handle(
                 target=target,
@@ -260,6 +449,8 @@ class RuntimeExecutor:
         """执行 rerank 请求，并把后端载荷整理为统一 rerank 响应。"""
         if target.backend == BackendType.VLLM_OPENAI_PROXY:
             return await self._execute_proxy_rerank(target=target, request=request)
+        if self.mode == "serve" and self.runtime_worker_client is not None:
+            return await self.runtime_worker_client.rerank(target=target, request=request)
         if self.mode == "serve":
             payload = await self._invoke_handle(
                 target=target,
@@ -344,9 +535,20 @@ class RuntimeExecutor:
                 f"'{method_name}.remote(...)'."
             )
 
+        worker_guard = self._get_worker_guard()
+        model_label = self._metric_model(target)
+        call_start = perf_counter()
+        call_status = "error"
+        worker_acquired = False
+        guard_acquired = False
+        released = False
         try:
-            guard = self._get_guard(target)
+            guard = self._get_guard(target, stream=False)
+            if worker_guard is not None:
+                await worker_guard.acquire()
+                worker_acquired = True
             await guard.acquire()
+            guard_acquired = True
             response = remote_method.remote(request_payload=payload)
             try:
                 result = await asyncio.wait_for(
@@ -355,20 +557,60 @@ class RuntimeExecutor:
                 )
             except TimeoutError as exc:
                 guard.record_failure()
+                call_status = "timeout"
+                GATEWAY_METRICS.observe_serve_handle_timeout(
+                    model=model_label,
+                    method=method_name,
+                )
                 raise self._serve_timeout_error(target, method_name) from exc
             except Exception:
                 guard.record_failure()
                 raise
             else:
                 guard.record_success()
+                call_status = "success"
                 return result
             finally:
-                guard.release()
+                if guard_acquired:
+                    await guard.release()
+                if worker_guard is not None and worker_acquired:
+                    await worker_guard.release()
+                released = True
+                GATEWAY_METRICS.observe_serve_handle_call(
+                    model=model_label,
+                    method=method_name,
+                    status=call_status,
+                    latency_seconds=perf_counter() - call_start,
+                )
         except AdmissionRejectedError:
+            if worker_guard is not None and worker_acquired and not released:
+                await worker_guard.release()
             raise
         except RuntimeNotConnectedError:
+            if not released:
+                if guard_acquired:
+                    await guard.release()
+                if worker_guard is not None and worker_acquired:
+                    await worker_guard.release()
+                GATEWAY_METRICS.observe_serve_handle_call(
+                    model=model_label,
+                    method=method_name,
+                    status=call_status,
+                    latency_seconds=perf_counter() - call_start,
+                )
             raise
         except Exception as exc:
+            if not released:
+                if guard_acquired:
+                    await guard.release()
+                if worker_guard is not None and worker_acquired:
+                    await worker_guard.release()
+                GATEWAY_METRICS.observe_serve_handle_call(
+                    model=model_label,
+                    method=method_name,
+                    status=call_status,
+                    latency_seconds=perf_counter() - call_start,
+                )
             code = self._extract_execution_error_code(exc)
             message = self._extract_execution_error_message(exc)
             logger.exception(
@@ -423,9 +665,18 @@ class RuntimeExecutor:
                 f"'{method_name}.remote(...)'."
             )
 
+        worker_guard = self._get_worker_guard()
+        model_label = self._metric_model(target)
+        call_start = perf_counter()
+        worker_acquired = False
+        guard_acquired = False
         try:
-            guard = self._get_guard(target)
+            guard = self._get_guard(target, stream=True)
+            if worker_guard is not None:
+                await worker_guard.acquire()
+                worker_acquired = True
             await guard.acquire()
+            guard_acquired = True
             stream_handle = handle
             options_method = getattr(handle, "options", None)
             if callable(options_method):
@@ -439,20 +690,43 @@ class RuntimeExecutor:
                 stream_remote_method = remote_method
 
             response = stream_remote_method.remote(request_payload=payload)
+            GATEWAY_METRICS.observe_serve_handle_call(
+                model=model_label,
+                method=method_name,
+                status="started",
+                latency_seconds=perf_counter() - call_start,
+            )
             return self._guard_stream_chunks(
                 self._normalize_stream_result(response),
                 guard=guard,
+                worker_guard=worker_guard if worker_acquired else None,
                 target=target,
                 method_name=method_name,
+                model_label=model_label,
             )
         except AdmissionRejectedError:
+            if worker_guard is not None and worker_acquired:
+                await worker_guard.release()
             raise
         except RuntimeNotConnectedError:
+            if guard_acquired:
+                await guard.release()
+            if worker_guard is not None and worker_acquired:
+                await worker_guard.release()
             raise
         except Exception as exc:
             if "guard" in locals():
                 guard.record_failure()
-                guard.release()
+            if guard_acquired:
+                await guard.release()
+            if worker_guard is not None and worker_acquired:
+                await worker_guard.release()
+            GATEWAY_METRICS.observe_serve_handle_call(
+                model=model_label,
+                method=method_name,
+                status="error",
+                latency_seconds=perf_counter() - call_start,
+            )
             code = self._extract_execution_error_code(exc)
             message = self._extract_execution_error_message(exc)
             logger.exception(
@@ -478,29 +752,82 @@ class RuntimeExecutor:
             code="upstream_timeout",
         )
 
+    def _serve_stream_idle_timeout_error(self, target: RuntimeTarget, method_name: str) -> RuntimeNotConnectedError:
+        """Build a stable upstream timeout error for an idle Serve stream."""
+        return RuntimeNotConnectedError(
+            f"Serve stream produced no chunks for {self.serve_stream_idle_timeout_seconds}s "
+            f"for deployment '{target.deployment_name}' in app '{target.app_name}' "
+            f"method '{method_name}'.",
+            code="upstream_timeout",
+        )
+
     async def _guard_stream_chunks(
         self,
         chunks: AsyncIterator[dict[str, Any] | bytes | str],
         *,
         guard: _ServeDeploymentGuard,
+        worker_guard: _GatewayWorkerGuard | None,
         target: RuntimeTarget,
         method_name: str,
+        model_label: str,
     ) -> AsyncIterator[dict[str, Any] | bytes | str]:
         """Apply timeout, circuit accounting, and inflight release to a Serve stream."""
         iterator = chunks.__aiter__()
+        stream_started = perf_counter()
         try:
             while True:
+                timeout = self.serve_stream_idle_timeout_seconds
+                if self.serve_stream_max_lifetime_seconds > 0:
+                    remaining_lifetime = self.serve_stream_max_lifetime_seconds - (
+                        perf_counter() - stream_started
+                    )
+                    if remaining_lifetime <= 0:
+                        guard.record_failure()
+                        GATEWAY_METRICS.observe_serve_handle_timeout(
+                            model=model_label,
+                            method=method_name,
+                        )
+                        GATEWAY_METRICS.observe_serve_handle_call(
+                            model=model_label,
+                            method=method_name,
+                            status="timeout",
+                            latency_seconds=perf_counter() - stream_started,
+                        )
+                        raise RuntimeNotConnectedError(
+                            f"Serve stream exceeded max lifetime "
+                            f"{self.serve_stream_max_lifetime_seconds}s for deployment "
+                            f"'{target.deployment_name}' in app '{target.app_name}' "
+                            f"method '{method_name}'.",
+                            code="upstream_timeout",
+                        )
+                    timeout = min(timeout, remaining_lifetime)
                 try:
                     chunk = await asyncio.wait_for(
                         iterator.__anext__(),
-                        timeout=self.serve_request_timeout_seconds,
+                        timeout=timeout,
                     )
                 except StopAsyncIteration:
                     guard.record_success()
+                    GATEWAY_METRICS.observe_serve_handle_call(
+                        model=model_label,
+                        method=method_name,
+                        status="success",
+                        latency_seconds=perf_counter() - stream_started,
+                    )
                     return
                 except TimeoutError as exc:
                     guard.record_failure()
-                    raise self._serve_timeout_error(target, method_name) from exc
+                    GATEWAY_METRICS.observe_serve_handle_timeout(
+                        model=model_label,
+                        method=method_name,
+                    )
+                    GATEWAY_METRICS.observe_serve_handle_call(
+                        model=model_label,
+                        method=method_name,
+                        status="timeout",
+                        latency_seconds=perf_counter() - stream_started,
+                    )
+                    raise self._serve_stream_idle_timeout_error(target, method_name) from exc
                 yield chunk
         except asyncio.CancelledError:
             raise
@@ -508,16 +835,24 @@ class RuntimeExecutor:
             raise
         except Exception:
             guard.record_failure()
+            GATEWAY_METRICS.observe_serve_handle_call(
+                model=model_label,
+                method=method_name,
+                status="error",
+                latency_seconds=perf_counter() - stream_started,
+            )
             raise
         finally:
-            guard.release()
+            await guard.release()
+            if worker_guard is not None:
+                await worker_guard.release()
 
     async def _await_handle_response(self, response: Any) -> Any:
         """兼容 awaitable、ObjectRef 风格和普通返回值。"""
         if inspect.isawaitable(response):
             return await response
         if hasattr(response, "result"):
-            return response.result()
+            return await asyncio.to_thread(response.result)
         return response
 
     async def _normalize_stream_result(self, response: Any) -> AsyncIterator[dict[str, Any] | bytes | str]:
@@ -530,7 +865,7 @@ class RuntimeExecutor:
         if inspect.isawaitable(response):
             response = await response
         if hasattr(response, "result") and not hasattr(response, "__aiter__"):
-            response = response.result()
+            response = await asyncio.to_thread(response.result)
 
         if hasattr(response, "__aiter__"):
             async for chunk in response:

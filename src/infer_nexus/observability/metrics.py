@@ -27,6 +27,9 @@ except ModuleNotFoundError:
         def observe(self, _amount: float) -> None:
             """忽略直方图观测。"""
 
+        def set(self, _value: float) -> None:
+            """No-op Gauge setter."""
+
     Counter = Gauge = Histogram = _NoopMetric
 
     def generate_latest() -> bytes:
@@ -145,6 +148,53 @@ class GatewayMetrics:
             "Output tokens reported by model responses when available.",
             ("model", "task"),
         )
+        self.gateway_worker_inflight = Gauge(
+            "infer_nexus_gateway_worker_inflight",
+            "Requests currently admitted by this gateway worker process.",
+            ("worker",),
+        )
+        self.model_inflight = Gauge(
+            "infer_nexus_model_inflight",
+            "Requests currently admitted by this gateway worker for one model.",
+            ("model",),
+        )
+        self.model_queue_depth = Gauge(
+            "infer_nexus_model_queue_depth",
+            "Requests waiting in the bounded gateway-local model queue.",
+            ("model",),
+        )
+        self.runtime_guard_rejections_total = Counter(
+            "infer_nexus_runtime_guard_rejections_total",
+            "Requests rejected by gateway-local runtime guards.",
+            ("model", "reason"),
+        )
+        self.admission_wait_seconds = Histogram(
+            "infer_nexus_admission_wait_seconds",
+            "Time spent waiting for a gateway-local runtime admission slot.",
+            ("model",),
+            buckets=LATENCY_BUCKETS,
+        )
+        self.serve_handle_calls_total = Counter(
+            "infer_nexus_serve_handle_calls_total",
+            "Ray Serve handle calls grouped by method and terminal status.",
+            ("model", "method", "status"),
+        )
+        self.serve_handle_latency_seconds = Histogram(
+            "infer_nexus_serve_handle_latency_seconds",
+            "Ray Serve handle call latency observed by the gateway.",
+            ("model", "method"),
+            buckets=LATENCY_BUCKETS,
+        )
+        self.serve_handle_timeouts_total = Counter(
+            "infer_nexus_serve_handle_timeouts_total",
+            "Ray Serve handle calls or streams that timed out.",
+            ("model", "method"),
+        )
+        self.serve_circuit_state = Gauge(
+            "infer_nexus_serve_circuit_state",
+            "Serve circuit breaker state for a model, where 1 means open.",
+            ("model",),
+        )
 
     def inc_inflight(self, *, model: str, task: str, endpoint: str) -> None:
         """记录一个正在处理的请求。"""
@@ -201,6 +251,53 @@ class GatewayMetrics:
     def observe_request_queue(self, *, model: str, seconds: float) -> None:
         """记录请求排队耗时；当前仅在调用方有可靠队列时间时使用。"""
         self.request_queue_seconds.labels(model=model).observe(max(seconds, 0.0))
+
+    def set_gateway_worker_inflight(self, *, worker: str, value: int) -> None:
+        """Record requests admitted by this gateway worker process."""
+        self.gateway_worker_inflight.labels(worker=worker).set(max(value, 0))
+
+    def set_model_inflight(self, *, model: str, value: int) -> None:
+        """Record active requests for one model inside this gateway worker."""
+        self.model_inflight.labels(model=model).set(max(value, 0))
+
+    def set_model_queue_depth(self, *, model: str, value: int) -> None:
+        """Record bounded gateway-local queue depth for one model."""
+        self.model_queue_depth.labels(model=model).set(max(value, 0))
+
+    def observe_runtime_guard_rejection(self, *, model: str, reason: str) -> None:
+        """Record a request rejected before it enters Ray Serve routing."""
+        self.runtime_guard_rejections_total.labels(model=model, reason=reason).inc()
+
+    def observe_admission_wait(self, *, model: str, seconds: float) -> None:
+        """Record how long a request waited for a local admission slot."""
+        self.admission_wait_seconds.labels(model=model).observe(max(seconds, 0.0))
+
+    def observe_serve_handle_call(
+        self,
+        *,
+        model: str,
+        method: str,
+        status: str,
+        latency_seconds: float,
+    ) -> None:
+        """Record one Ray Serve handle call and its gateway-observed latency."""
+        self.serve_handle_calls_total.labels(
+            model=model,
+            method=method,
+            status=status,
+        ).inc()
+        self.serve_handle_latency_seconds.labels(
+            model=model,
+            method=method,
+        ).observe(max(latency_seconds, 0.0))
+
+    def observe_serve_handle_timeout(self, *, model: str, method: str) -> None:
+        """Record a Ray Serve handle timeout or stream idle timeout."""
+        self.serve_handle_timeouts_total.labels(model=model, method=method).inc()
+
+    def set_serve_circuit_state(self, *, model: str, open: bool) -> None:
+        """Record whether a model-level Serve circuit breaker is open."""
+        self.serve_circuit_state.labels(model=model).set(1 if open else 0)
 
     def observe_token_usage(self, *, model: str, task: str, usage: Any) -> None:
         """在响应包含 usage 时记录输入和输出 token。"""

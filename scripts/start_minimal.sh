@@ -37,6 +37,7 @@ RAY_ADDRESS="auto"
 PROXY_LOCATION="Disabled"
 INSTALL=1
 RELOAD=0
+GATEWAY_WORKERS=""
 CUDA_VISIBLE_DEVICES_VALUE="0,1,2,3"
 NUM_GPUS="4"
 PYTHON_BIN="${PYTHON_BIN:-python}"
@@ -55,6 +56,7 @@ Options:
   --num-gpus N               GPU count for a locally started Ray head
   --cuda-visible-devices CSV Export CUDA_VISIBLE_DEVICES before starting Ray/runtime
   --proxy-location VALUE     Ray Serve proxy location setting
+  --gateway-workers N        Gateway worker process count (default: settings.service.workers)
   --reload                   Enable uvicorn reload for the gateway
   -h, --help                 Show this help
 
@@ -91,6 +93,8 @@ while [[ $# -gt 0 ]]; do
     --cuda-visible-devices) CUDA_VISIBLE_DEVICES_VALUE="$2"; shift 2;;
     # Forward the proxy location to the Serve runtime launcher.
     --proxy-location) PROXY_LOCATION="$2"; shift 2;;
+    # Override the number of HTTP gateway worker processes.
+    --gateway-workers) GATEWAY_WORKERS="$2"; shift 2;;
     # Developer convenience: turn on hot-reload for the gateway process.
     --reload) RELOAD=1; shift;;
     # Standard help flag.
@@ -277,6 +281,9 @@ if pid_is_running "${GATEWAY_PID_FILE}"; then
 else
   # Build the gateway command first so we can add `--reload` only when asked.
   gateway_args=("${PYTHON_BIN}" scripts/run_gateway.py --settings "${SETTINGS}")
+  if [[ -n "${GATEWAY_WORKERS}" ]]; then
+    gateway_args+=(--workers "${GATEWAY_WORKERS}")
+  fi
   if [[ "${RELOAD}" -eq 1 ]]; then
     gateway_args+=(--reload)
   fi
@@ -293,6 +300,11 @@ write_status "started"
 echo "Started."
 echo "Logs: ${LOG_DIR}"
 echo "PIDs: ${PID_DIR}"
+if [[ -n "${GATEWAY_WORKERS}" ]]; then
+  echo "Gateway workers: ${GATEWAY_WORKERS}"
+else
+  echo "Gateway workers: settings.service.workers"
+fi
 echo "Try:"
 echo "  curl http://127.0.0.1:8000/healthz"
 echo "  curl http://127.0.0.1:8000/v1/models"

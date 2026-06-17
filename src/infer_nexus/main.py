@@ -2,6 +2,7 @@
 
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+import os
 
 from fastapi import FastAPI
 
@@ -23,7 +24,7 @@ from infer_nexus.runtime.serve_app import ServeApplicationBuilder
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """在应用启动阶段装配运行期依赖，并在关闭时释放生命周期上下文。"""
     # 1) 加载基础配置并初始化日志。
-    settings = load_settings()
+    settings = load_settings(os.getenv("INFER_NEXUS_SETTINGS", "config/settings.yaml"))
     configure_logging(settings.service.log_level)
     # 2) 通过读取./config/models.yaml配置文件构建模型注册表和本地模型仓库。
     registry = ModelRegistry(load_model_catalog(settings.catalog.models_path))
@@ -42,9 +43,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     runtime_executor = RuntimeExecutor(
         mode=settings.runtime.execution_mode,
         handle_resolver=handle_resolver,
+        gateway_worker_max_inflight=settings.runtime.gateway_worker_max_inflight,
         serve_request_timeout_seconds=settings.runtime.serve_request_timeout_seconds,
+        serve_stream_idle_timeout_seconds=settings.runtime.serve_stream_idle_timeout_seconds,
+        serve_stream_max_lifetime_seconds=settings.runtime.serve_stream_max_lifetime_seconds,
         max_inflight_per_model=settings.runtime.max_inflight_per_model,
+        max_streaming_inflight_per_model=settings.runtime.max_streaming_inflight_per_model,
+        max_non_streaming_inflight_per_model=settings.runtime.max_non_streaming_inflight_per_model,
+        max_queued_per_model=settings.runtime.max_queued_per_model,
         admission_acquire_timeout_seconds=settings.runtime.admission_acquire_timeout_seconds,
+        admission_queue_timeout_seconds=settings.runtime.admission_queue_timeout_seconds,
         circuit_breaker_enabled=settings.runtime.circuit_breaker_enabled,
         circuit_breaker_failure_threshold=settings.runtime.circuit_breaker_failure_threshold,
         circuit_breaker_cooldown_seconds=settings.runtime.circuit_breaker_cooldown_seconds,

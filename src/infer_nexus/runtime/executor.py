@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 import inspect
 import json
 import logging
-import os
 from time import perf_counter, time
 from typing import Any
 from uuid import uuid4
@@ -212,57 +211,12 @@ class _ServeDeploymentGuard:
         self._sync_metrics()
 
 
-class _GatewayWorkerGuard:
-    """Bound active requests inside one Python gateway process."""
-
-    def __init__(self, *, max_inflight: int, worker_label: str) -> None:
-        self.max_inflight = max_inflight
-        self.worker_label = worker_label
-        self._active = 0
-        self._condition = asyncio.Condition()
-
-    def _sync_metrics(self) -> None:
-        GATEWAY_METRICS.set_gateway_worker_inflight(
-            worker=self.worker_label,
-            value=self._active,
-        )
-
-    async def acquire(self) -> None:
-        """Acquire one worker-global active request slot without local queuing."""
-        if self.max_inflight <= 0:
-            self._active += 1
-            self._sync_metrics()
-            return
-        async with self._condition:
-            if self._active >= self.max_inflight:
-                GATEWAY_METRICS.observe_runtime_guard_rejection(
-                    model="__gateway_worker__",
-                    reason="gateway_worker_overloaded",
-                )
-                raise AdmissionRejectedError(
-                    f"Gateway worker has reached the active request limit "
-                    f"({self.max_inflight}).",
-                    code="gateway_worker_overloaded",
-                )
-            self._active += 1
-            self._sync_metrics()
-
-    async def release(self) -> None:
-        """Release one worker-global active request slot."""
-        async with self._condition:
-            if self._active > 0:
-                self._active -= 1
-                self._condition.notify(1)
-            self._sync_metrics()
-
-
 @dataclass(slots=True)
 class RuntimeExecutor:
     """统一执行本地副本、Ray Serve 句柄和 OpenAI 代理模型请求。"""
 
     mode: str = "stub"
     handle_resolver: ServeDeploymentHandleResolver | None = None
-    gateway_worker_max_inflight: int = 0
     serve_request_timeout_seconds: int | float = 120
     serve_stream_idle_timeout_seconds: int | float = 30
     serve_stream_max_lifetime_seconds: int | float = 900
@@ -277,7 +231,6 @@ class RuntimeExecutor:
     circuit_breaker_cooldown_seconds: int | float = 60
     runtime_worker_client: Any | None = None
     _guards: dict[str, _ServeDeploymentGuard] = field(default_factory=dict, init=False)
-    _worker_guard: _GatewayWorkerGuard | None = field(default=None, init=False)
 
     def _guard_key(self, target: RuntimeTarget, *, stream: bool) -> str:
         """Return the stable key used for per-deployment gateway safeguards."""
@@ -326,17 +279,6 @@ class RuntimeExecutor:
             )
             self._guards[key] = guard
         return guard
-
-    def _get_worker_guard(self) -> _GatewayWorkerGuard | None:
-        """Return the process-local active request guard when configured."""
-        if self.gateway_worker_max_inflight <= 0:
-            return None
-        if self._worker_guard is None:
-            self._worker_guard = _GatewayWorkerGuard(
-                max_inflight=self.gateway_worker_max_inflight,
-                worker_label=str(os.getpid()),
-            )
-        return self._worker_guard
 
     async def execute_chat(
         self,
@@ -535,18 +477,13 @@ class RuntimeExecutor:
                 f"'{method_name}.remote(...)'."
             )
 
-        worker_guard = self._get_worker_guard()
         model_label = self._metric_model(target)
         call_start = perf_counter()
         call_status = "error"
-        worker_acquired = False
         guard_acquired = False
         released = False
         try:
             guard = self._get_guard(target, stream=False)
-            if worker_guard is not None:
-                await worker_guard.acquire()
-                worker_acquired = True
             await guard.acquire()
             guard_acquired = True
             response = remote_method.remote(request_payload=payload)
@@ -573,8 +510,6 @@ class RuntimeExecutor:
             finally:
                 if guard_acquired:
                     await guard.release()
-                if worker_guard is not None and worker_acquired:
-                    await worker_guard.release()
                 released = True
                 GATEWAY_METRICS.observe_serve_handle_call(
                     model=model_label,
@@ -583,15 +518,11 @@ class RuntimeExecutor:
                     latency_seconds=perf_counter() - call_start,
                 )
         except AdmissionRejectedError:
-            if worker_guard is not None and worker_acquired and not released:
-                await worker_guard.release()
             raise
         except RuntimeNotConnectedError:
             if not released:
                 if guard_acquired:
                     await guard.release()
-                if worker_guard is not None and worker_acquired:
-                    await worker_guard.release()
                 GATEWAY_METRICS.observe_serve_handle_call(
                     model=model_label,
                     method=method_name,
@@ -603,8 +534,6 @@ class RuntimeExecutor:
             if not released:
                 if guard_acquired:
                     await guard.release()
-                if worker_guard is not None and worker_acquired:
-                    await worker_guard.release()
                 GATEWAY_METRICS.observe_serve_handle_call(
                     model=model_label,
                     method=method_name,
@@ -665,16 +594,11 @@ class RuntimeExecutor:
                 f"'{method_name}.remote(...)'."
             )
 
-        worker_guard = self._get_worker_guard()
         model_label = self._metric_model(target)
         call_start = perf_counter()
-        worker_acquired = False
         guard_acquired = False
         try:
             guard = self._get_guard(target, stream=True)
-            if worker_guard is not None:
-                await worker_guard.acquire()
-                worker_acquired = True
             await guard.acquire()
             guard_acquired = True
             stream_handle = handle
@@ -699,28 +623,21 @@ class RuntimeExecutor:
             return self._guard_stream_chunks(
                 self._normalize_stream_result(response),
                 guard=guard,
-                worker_guard=worker_guard if worker_acquired else None,
                 target=target,
                 method_name=method_name,
                 model_label=model_label,
             )
         except AdmissionRejectedError:
-            if worker_guard is not None and worker_acquired:
-                await worker_guard.release()
             raise
         except RuntimeNotConnectedError:
             if guard_acquired:
                 await guard.release()
-            if worker_guard is not None and worker_acquired:
-                await worker_guard.release()
             raise
         except Exception as exc:
             if "guard" in locals():
                 guard.record_failure()
             if guard_acquired:
                 await guard.release()
-            if worker_guard is not None and worker_acquired:
-                await worker_guard.release()
             GATEWAY_METRICS.observe_serve_handle_call(
                 model=model_label,
                 method=method_name,
@@ -766,7 +683,6 @@ class RuntimeExecutor:
         chunks: AsyncIterator[dict[str, Any] | bytes | str],
         *,
         guard: _ServeDeploymentGuard,
-        worker_guard: _GatewayWorkerGuard | None,
         target: RuntimeTarget,
         method_name: str,
         model_label: str,
@@ -844,8 +760,6 @@ class RuntimeExecutor:
             raise
         finally:
             await guard.release()
-            if worker_guard is not None:
-                await worker_guard.release()
 
     async def _await_handle_response(self, response: Any) -> Any:
         """兼容 awaitable、ObjectRef 风格和普通返回值。"""

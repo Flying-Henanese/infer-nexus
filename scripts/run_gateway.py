@@ -13,6 +13,21 @@ import uvicorn
 from infer_nexus.core.config import load_settings
 
 
+def describe_gateway_capacity(*, workers: int, per_worker_limit: int) -> str:
+    """Describe process-local and theoretical aggregate admission capacity."""
+    if per_worker_limit <= 0:
+        per_worker = "unlimited"
+        aggregate = "unlimited"
+    else:
+        per_worker = str(per_worker_limit)
+        aggregate = str(workers * per_worker_limit)
+    return (
+        f"Gateway shared listener: workers={workers}, "
+        f"per_worker_max_inflight={per_worker}, "
+        f"theoretical_aggregate_max_inflight={aggregate}"
+    )
+
+
 def parse_args() -> argparse.Namespace:
     """Parse gateway startup arguments."""
     parser = argparse.ArgumentParser(description="Run infer-nexus gateway with Uvicorn.")
@@ -54,6 +69,12 @@ def main() -> None:
     if args.reload and workers != 1:
         raise SystemExit("--reload cannot be used with multiple gateway workers.")
     os.environ["INFER_NEXUS_SETTINGS"] = args.settings
+    print(
+        describe_gateway_capacity(
+            workers=workers,
+            per_worker_limit=settings.runtime.gateway_worker_max_inflight,
+        )
+    )
     uvicorn.run(
         "infer_nexus.main:app",
         host=args.host or settings.service.host,

@@ -53,6 +53,7 @@ class RuntimeSettings(BaseModel):
     execution_mode: str = "stub"
     backend_init_mode: str = "stub"
     gateway_worker_max_inflight: int = Field(default=0, ge=0)
+    gateway_worker_retry_after_seconds: int = Field(default=1, ge=1)
     serve_request_timeout_seconds: int | float = Field(default=120, gt=0)
     serve_stream_idle_timeout_seconds: int | float = Field(default=30, gt=0)
     serve_stream_max_lifetime_seconds: int | float = Field(default=900, gt=0)

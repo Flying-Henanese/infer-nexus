@@ -5,6 +5,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from infer_nexus.control.worker_admission import WorkerOverloadedError
 from infer_nexus.core.errors import AdmissionRejectedError, RuntimeExecutionError, RuntimeNotConnectedError
 from infer_nexus.main import create_app
 from infer_nexus.observability.metrics import render_prometheus_metrics
@@ -395,6 +396,35 @@ def test_chat_completions_returns_429_when_admission_rejects(prepared_model_stor
 
     assert response.status_code == 429
     assert response.json()['error']['code'] == 'queue_full'
+
+
+def test_chat_completions_returns_retryable_503_when_worker_is_overloaded(
+    prepared_model_store: Path,
+) -> None:
+    """Worker capacity exhaustion should be distinguishable from tenant/model rate limits."""
+
+    class AlwaysOverloadedController:
+        retry_after_seconds = 4
+
+        async def acquire(self) -> None:
+            raise WorkerOverloadedError("Gateway worker is overloaded.")
+
+        async def release(self) -> None:
+            raise AssertionError("A rejected request must not release an unacquired slot")
+
+    app = create_app()
+    payload = {
+        'model': 'qwen3-chat',
+        'messages': [{'role': 'user', 'content': 'hello'}],
+    }
+
+    with TestClient(app) as client:
+        client.app.state.worker_admission = AlwaysOverloadedController()
+        response = client.post('/v1/chat/completions', json=payload)
+
+    assert response.status_code == 503
+    assert response.headers['retry-after'] == '4'
+    assert response.json()['error']['code'] == 'gateway_worker_overloaded'
 
 
 def test_chat_completions_returns_501_when_serve_handle_is_unavailable(

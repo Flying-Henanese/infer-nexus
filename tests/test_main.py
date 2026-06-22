@@ -15,6 +15,8 @@ def test_app_lifespan_uses_stub_executor_by_default(
     """默认配置下应使用 stub 执行器且不创建 serve 句柄解析器。"""
     settings = Settings()
     settings.model_store.root_dir = str(prepared_model_store)
+    settings.runtime.gateway_worker_max_inflight = 7
+    settings.runtime.gateway_worker_retry_after_seconds = 3
 
     monkeypatch.setattr('infer_nexus.main.load_settings', lambda _path: settings)
     monkeypatch.setattr('infer_nexus.main.configure_logging', lambda _level: None)
@@ -24,6 +26,8 @@ def test_app_lifespan_uses_stub_executor_by_default(
         assert client.app.state.runtime_executor.mode == 'stub'
         assert client.app.state.runtime_executor.handle_resolver is None
         assert client.app.state.runtime_dispatcher.executor is client.app.state.runtime_executor
+        assert client.app.state.worker_admission.snapshot.max_inflight == 7
+        assert client.app.state.worker_admission.retry_after_seconds == 3
 
 
 def test_app_lifespan_builds_serve_handle_resolver_in_serve_mode(

@@ -7,10 +7,12 @@ import os
 from fastapi import FastAPI
 
 from infer_nexus.api import health_routes, metrics_routes, openai_routes, platform_routes
+from infer_nexus.api.worker_admission_middleware import WorkerAdmissionMiddleware
 from infer_nexus.catalog.loader import load_model_catalog
 from infer_nexus.catalog.registry import ModelRegistry
 from infer_nexus.control.admission import AdmissionController
 from infer_nexus.control.load_inspector import LoadInspector
+from infer_nexus.control.worker_admission import WorkerAdmissionController
 from infer_nexus.core.config import load_settings
 from infer_nexus.model_store import LocalModelStore
 from infer_nexus.observability.logging import configure_logging
@@ -43,7 +45,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     runtime_executor = RuntimeExecutor(
         mode=settings.runtime.execution_mode,
         handle_resolver=handle_resolver,
-        gateway_worker_max_inflight=settings.runtime.gateway_worker_max_inflight,
         serve_request_timeout_seconds=settings.runtime.serve_request_timeout_seconds,
         serve_stream_idle_timeout_seconds=settings.runtime.serve_stream_idle_timeout_seconds,
         serve_stream_max_lifetime_seconds=settings.runtime.serve_stream_max_lifetime_seconds,
@@ -67,6 +68,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.serve_builder = serve_builder
     app.state.serve_plan = serve_builder.build_plan(registry)
     app.state.runtime_executor = runtime_executor
+    app.state.worker_admission = WorkerAdmissionController(
+        max_inflight=settings.runtime.gateway_worker_max_inflight,
+        retry_after_seconds=settings.runtime.gateway_worker_retry_after_seconds,
+    )
     app.state.runtime_dispatcher = RuntimeDispatcher(
         registry=registry,
         serve_builder=serve_builder,
@@ -78,6 +83,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 def create_app() -> FastAPI:
     """创建并注册全部路由的 FastAPI 应用实例。"""
     app = FastAPI(title="infer-nexus", version="0.1.0", lifespan=lifespan)
+    app.add_middleware(WorkerAdmissionMiddleware)
     app.include_router(health_routes.router)
     app.include_router(metrics_routes.router)
     app.include_router(openai_routes.router)

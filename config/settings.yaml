@@ -41,6 +41,8 @@ runtime:
   backend_init_mode: real
   # Per-process active request cap for one Python gateway worker. 0 disables it.
   gateway_worker_max_inflight: 0
+  # Retry hint returned with a process-local overload response.
+  gateway_worker_retry_after_seconds: 1
   # Gateway-side timeout for one Ray Serve handle call. This prevents requests
   # from waiting forever when the Serve router or replica stops making progress.
   serve_request_timeout_seconds: 120

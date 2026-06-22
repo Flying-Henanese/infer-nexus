@@ -5,6 +5,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from infer_nexus.control.worker_admission import WorkerOverloadedError
 from infer_nexus.core.errors import AdmissionRejectedError, RuntimeExecutionError, RuntimeNotConnectedError
 from infer_nexus.main import create_app
 from infer_nexus.observability.metrics import render_prometheus_metrics

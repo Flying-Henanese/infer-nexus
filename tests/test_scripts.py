@@ -68,6 +68,17 @@ def test_run_gateway_main_uses_settings_and_cli_overrides(monkeypatch) -> None:
     assert os.environ['INFER_NEXUS_SETTINGS'] == 'config/settings.yaml'
 
 
+def test_describe_gateway_capacity_distinguishes_per_worker_limit() -> None:
+    assert run_gateway.describe_gateway_capacity(workers=4, per_worker_limit=8) == (
+        "Gateway shared listener: workers=4, per_worker_max_inflight=8, "
+        "theoretical_aggregate_max_inflight=32"
+    )
+    assert run_gateway.describe_gateway_capacity(workers=4, per_worker_limit=0) == (
+        "Gateway shared listener: workers=4, per_worker_max_inflight=unlimited, "
+        "theoretical_aggregate_max_inflight=unlimited"
+    )
+
+
 def test_run_serve_runtime_main_deploys_per_model_apps(monkeypatch, prepared_model_store) -> None:
     """run_serve_runtime.main 应按服务名部署 Serve 应用。"""
     settings = Settings()

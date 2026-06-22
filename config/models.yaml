@@ -37,10 +37,9 @@ models:
     min_replicas: 1
     max_replicas: 1
     deployment_config:
-      request_router_config:
-        request_router_class: ray.serve.llm.request_router.PrefixCacheAffinityRouter
-        request_router_kwargs:
-          imbalanced_threshold: 16
+      serve_deployment_kwargs:
+        max_queued_requests: 16
+        max_ongoing_requests: 2
     vllm:
       engine_kwargs:
         enable_auto_tool_choice: true
@@ -142,10 +141,9 @@ models:
     min_replicas: 1
     max_replicas: 3
     deployment_config:
-      request_router_config:
-        request_router_class: ray.serve.llm.request_router.PrefixCacheAffinityRouter
-        request_router_kwargs:
-          imbalanced_threshold: 16
+      serve_deployment_kwargs:
+        max_queued_requests: 32
+        max_ongoing_requests: 2
     capabilities:
       - vision
     engine_kwargs:

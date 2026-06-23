@@ -16,7 +16,8 @@ COPY pyproject.ascend.toml ./pyproject.toml
 COPY README.md ./README.md
 
 # 使用 uv 安装依赖
-RUN uv sync --extra ascend-monitoring --no-cache
+
+RUN uv pip install --system --no-cache .
 
 # Install monitoring/profiling helpers used by Ascend benchmark runs.
 # CANN, npu-smi, hccn_tool, msprof, and msopprof are provided by the Ascend

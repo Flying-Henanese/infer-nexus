@@ -258,7 +258,7 @@ else
   echo $! >"${GATEWAY_PID_FILE}"
 fi
 
-if ! wait_for_gateway_ready "${GATEWAY_PID_FILE}" 60; then
+if ! wait_for_gateway_ready "${GATEWAY_PID_FILE}" 120; then
   exit 1
 fi
 

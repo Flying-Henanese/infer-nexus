@@ -9,7 +9,7 @@ catalog:
   models_path: config/models.yaml
 
 cluster:
-  inference_device_type: cuda
+  inference_device_type: npu
   device_pool_boundary: ray_runtime_visible_devices
   default_platform: cuda
 

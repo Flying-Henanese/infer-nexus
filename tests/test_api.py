@@ -5,6 +5,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from infer_nexus.control.worker_admission import WorkerOverloadedError
 from infer_nexus.core.errors import AdmissionRejectedError, RuntimeExecutionError, RuntimeNotConnectedError
 from infer_nexus.main import create_app
 from infer_nexus.observability.metrics import render_prometheus_metrics
@@ -63,6 +64,8 @@ def test_metrics_endpoint_exposes_prometheus_text(prepared_model_store: Path) ->
     assert 'infer_nexus_stream_tpot_seconds' in response.text
     assert 'infer_nexus_stream_completions_total' in response.text
     assert 'infer_nexus_request_queue_seconds' in response.text
+    assert 'infer_nexus_serve_handle_calls_total' in response.text
+    assert 'infer_nexus_runtime_guard_rejections_total' in response.text
 
 
 def test_catalog_model_lookup_by_alias(prepared_model_store: Path) -> None:
@@ -395,6 +398,28 @@ def test_chat_completions_returns_429_when_admission_rejects(prepared_model_stor
 
     assert response.status_code == 429
     assert response.json()['error']['code'] == 'queue_full'
+
+
+def test_chat_completions_returns_429_when_gateway_admission_rejects(
+    prepared_model_store: Path,
+) -> None:
+    """Gateway-local runtime admission rejects should map to rate limiting."""
+    app = create_app()
+    payload = {
+        'model': 'qwen3-chat',
+        'messages': [{'role': 'user', 'content': 'hello'}],
+    }
+
+    with TestClient(app) as client:
+        async def reject_gateway_overload(*, target, request):
+            raise AdmissionRejectedError('gateway overloaded', code='gateway_overloaded')
+
+        client.app.state.runtime_dispatcher.executor.execute_chat = reject_gateway_overload
+        response = client.post('/v1/chat/completions', json=payload)
+
+    assert response.status_code == 429
+    assert response.json()['error']['type'] == 'rate_limit_error'
+    assert response.json()['error']['code'] == 'gateway_overloaded'
 
 
 def test_chat_completions_returns_501_when_serve_handle_is_unavailable(

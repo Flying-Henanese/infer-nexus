@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
 import types
 
@@ -29,6 +30,7 @@ def test_run_gateway_main_uses_settings_and_cli_overrides(monkeypatch) -> None:
     settings = Settings()
     settings.service.host = '0.0.0.0'
     settings.service.port = 8000
+    settings.service.workers = 2
     captured: dict[str, object] = {}
 
     monkeypatch.setattr(run_gateway, 'parse_args', lambda: types.SimpleNamespace(
@@ -36,20 +38,23 @@ def test_run_gateway_main_uses_settings_and_cli_overrides(monkeypatch) -> None:
         host='127.0.0.1',
         port=9000,
         reload=True,
+        workers=1,
     ))
     monkeypatch.setattr(run_gateway, 'load_settings', lambda _path: settings)
     monkeypatch.setattr(
         run_gateway.uvicorn,
         'run',
-        lambda app, host, port, reload: captured.update(
+        lambda app, host, port, reload, workers: captured.update(
             {
                 'app': app,
                 'host': host,
                 'port': port,
                 'reload': reload,
+                'workers': workers,
             }
         ),
     )
+    monkeypatch.delenv('INFER_NEXUS_SETTINGS', raising=False)
 
     run_gateway.main()
 
@@ -58,7 +63,20 @@ def test_run_gateway_main_uses_settings_and_cli_overrides(monkeypatch) -> None:
         'host': '127.0.0.1',
         'port': 9000,
         'reload': True,
+        'workers': 1,
     }
+    assert os.environ['INFER_NEXUS_SETTINGS'] == 'config/settings.yaml'
+
+
+def test_describe_gateway_capacity_distinguishes_per_worker_limit() -> None:
+    assert run_gateway.describe_gateway_capacity(workers=4, per_worker_limit=8) == (
+        "Gateway shared listener: workers=4, per_worker_max_inflight=8, "
+        "theoretical_aggregate_max_inflight=32"
+    )
+    assert run_gateway.describe_gateway_capacity(workers=4, per_worker_limit=0) == (
+        "Gateway shared listener: workers=4, per_worker_max_inflight=unlimited, "
+        "theoretical_aggregate_max_inflight=unlimited"
+    )
 
 
 def test_run_serve_runtime_main_deploys_per_model_apps(monkeypatch, prepared_model_store) -> None:

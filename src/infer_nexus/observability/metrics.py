@@ -153,6 +153,16 @@ class GatewayMetrics:
             "Requests currently admitted by this gateway worker process.",
             ("worker",),
         )
+        self.gateway_worker_capacity = Gauge(
+            "infer_nexus_gateway_worker_capacity",
+            "Configured active-request capacity of this gateway worker process; zero is unlimited.",
+            ("worker",),
+        )
+        self.gateway_worker_rejections_total = Counter(
+            "infer_nexus_gateway_worker_rejections_total",
+            "Requests rejected by process-local gateway worker admission.",
+            ("worker", "reason"),
+        )
         self.model_inflight = Gauge(
             "infer_nexus_model_inflight",
             "Requests currently admitted by this gateway worker for one model.",
@@ -255,6 +265,14 @@ class GatewayMetrics:
     def set_gateway_worker_inflight(self, *, worker: str, value: int) -> None:
         """Record requests admitted by this gateway worker process."""
         self.gateway_worker_inflight.labels(worker=worker).set(max(value, 0))
+
+    def set_gateway_worker_capacity(self, *, worker: str, value: int) -> None:
+        """Record the configured process-local active-request capacity."""
+        self.gateway_worker_capacity.labels(worker=worker).set(max(value, 0))
+
+    def observe_gateway_worker_rejection(self, *, worker: str, reason: str) -> None:
+        """Record a process-local fail-fast rejection."""
+        self.gateway_worker_rejections_total.labels(worker=worker, reason=reason).inc()
 
     def set_model_inflight(self, *, model: str, value: int) -> None:
         """Record active requests for one model inside this gateway worker."""

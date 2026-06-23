@@ -53,14 +53,14 @@ runtime:
   # Gateway-local per-model admission limit. Requests rejected here never enter
   # Ray Serve routing, which avoids amplifying router queue-length probing.
   # 0 disables the gateway-side limiter.
-  max_inflight_per_model: 4
+  max_inflight_per_model: 10
   # Optional split budgets for long streaming and shorter non-streaming calls.
   # 0 means fall back to max_inflight_per_model.
   max_streaming_inflight_per_model: 0
   max_non_streaming_inflight_per_model: 0
   # Bounded per-model burst queue inside one gateway worker. 0 disables waiting
   # and keeps fail-fast overload behavior.
-  max_queued_per_model: 0
+  max_queued_per_model: 10
   # Legacy acquisition timeout. Kept for compatibility; admission_queue_timeout
   # takes precedence when set.
   admission_acquire_timeout_seconds: 0

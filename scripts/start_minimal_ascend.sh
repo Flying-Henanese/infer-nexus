@@ -28,8 +28,9 @@ SETTINGS="config/settings.yaml"
 RAY_ADDRESS="auto"
 PROXY_LOCATION="Disabled"
 RELOAD=0
-# ASCEND_VISIBLE_DEVICES_VALUE="0,1,2,3"
-NUM_NPUS="4"
+GATEWAY_WORKERS=""
+ASCEND_VISIBLE_DEVICES_VALUE="3,4,5,6,7"
+NUM_NPUS="5"
 CHECK_DEVICES=1
 
 usage() {
@@ -39,6 +40,7 @@ Usage: scripts/start_minimal_ascend.sh [options]
 Options:
   --settings PATH             Path to settings.yaml (default: config/settings.yaml)
   --ray-address ADDR          Ray address passed to the Serve runtime launcher
+  --gateway-workers N         Gateway worker process count (default: settings.service.workers)
   --num-npus N                NPU count for a locally started Ray head
   --ascend-visible-devices CSV
                              Export ASCEND_RT_VISIBLE_DEVICES before startup
@@ -58,7 +60,8 @@ while [[ $# -gt 0 ]]; do
     --settings) SETTINGS="$2"; shift 2;;
     --ray-address) RAY_ADDRESS="$2"; shift 2;;
     --num-npus) NUM_NPUS="$2"; shift 2;;
- #   --ascend-visible-devices) ASCEND_VISIBLE_DEVICES_VALUE="$2"; shift 2;;
+    --ascend-visible-devices) ASCEND_VISIBLE_DEVICES_VALUE="$2"; shift 2;;
+    --gateway-workers) GATEWAY_WORKERS="$2"; shift 2;;
     --no-device-check) CHECK_DEVICES=0; shift;;
     --proxy-location) PROXY_LOCATION="$2"; shift 2;;
     --reload) RELOAD=1; shift;;
@@ -76,10 +79,12 @@ cd "${ROOT_DIR}"
 # Python instead of an installed wheel/venv, make src importable explicitly.
 export PYTHONPATH="${ROOT_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
-# if [[ -n "${ASCEND_VISIBLE_DEVICES_VALUE}" ]]; then
-#   export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_VISIBLE_DEVICES_VALUE}"
-# fi
+if [[ -n "${ASCEND_VISIBLE_DEVICES_VALUE}" ]]; then
+  export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_VISIBLE_DEVICES_VALUE}"
 
+  # 显式指定设备列表时，避免 Ray 为 Worker 重写该变量。
+  export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES="${RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES:-1}"
+fi
 # Ray may otherwise rewrite ASCEND_RT_VISIBLE_DEVICES for workers. vLLM Ascend
 # deployments usually want the device mask to remain under explicit control.
 # export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES="${RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES:-1}"
@@ -250,6 +255,11 @@ if pid_is_running "${GATEWAY_PID_FILE}"; then
   echo "Gateway already running (pid $(cat "${GATEWAY_PID_FILE}"))."
 else
   gateway_args=(python scripts/run_gateway.py --settings "${SETTINGS}")
+
+  if [[ -n "${GATEWAY_WORKERS}" ]]; then
+    gateway_args+=(--workers "${GATEWAY_WORKERS}")
+  fi
+
   if [[ "${RELOAD}" -eq 1 ]]; then
     gateway_args+=(--reload)
   fi

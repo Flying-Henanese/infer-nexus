@@ -22,128 +22,182 @@ models:
   #     openai_serving:
   #       enabled: true
 
-  - name: Qwen3-32B
-    alias: qwen3-32b
+  # - name: Qwen3-32B
+  #   alias: qwen3-32b
+  #   task: chat
+  #   backend: vllm
+  #   compat_mode: vllm_native
+  #   model_path: /nas_data/models/Qwen/Qwen3-32B
+  #   dtype: auto
+  #   tensor_parallel_size: 1
+  #   max_model_len: 30000
+  #   cpu_per_replica: 4
+  #   gpu_per_replica: 1
+  #   gpu_memory_utilization: 0.9
+  #   min_replicas: 1
+  #   max_replicas: 2
+  #   deployment_config:
+  #     serve_deployment_kwargs:
+  #       max_queued_requests: 8
+  #       max_ongoing_requests: 2
+  #     request_router_config:
+  #       request_router_class: ray.serve.llm.request_router.PrefixCacheAffinityRouter
+  #       request_router_kwargs:
+  #         imbalanced_threshold: 8
+  #   vllm:
+  #     engine_kwargs:
+  #       enable_auto_tool_choice: true
+  #       tool_call_parser: hermes
+  #     request_defaults:
+  #       tool_choice: auto
+  #       parallel_tool_calls: true
+  #       chat_template_kwargs:
+  #         enable_thinking: false
+  #     request_policy:
+  #       allow_tools: true
+  #       allow_reasoning: true
+  #     openai_serving:
+  #       enabled: true
+  #       enable_reasoning: true
+  #       reasoning_parser: deepseek_r1
+  #   labels:
+  #     - internal
+  #     - llm
+      
+  # - name: MinerU2.5-2509-1.2B
+  #   alias: mineru
+  #   task: chat
+  #   backend: vllm
+  #   compat_mode: vllm_native
+  #   model_path: /nas_data/zhousj/mineru
+  #   dtype: auto
+  #   tensor_parallel_size: 1
+  #   max_model_len: 8192
+  #   cpu_per_replica: 2
+  #   gpu_per_replica: 0.35
+  #   gpu_memory_utilization: 0.35
+  #   min_replicas: 1
+  #   max_replicas: 2
+  #   capabilities:
+  #     - vision
+  #   engine_kwargs:
+  #     trust_remote_code: true
+  #     limit_mm_per_prompt:
+  #       image: 10
+  #   labels:
+  #     - multimodal
+  #     - ocr
+  #     - llm
+  #   vllm:
+  #     openai_serving:
+  #       enabled: true
+
+  # - name: qwen3-embedding-8b
+  #   alias: qwen3-embedding-8b
+  #   task: embedding
+  #   backend: vllm
+  #   compat_mode: vllm_native
+  #   model_path: /nas_data/models/Qwen/Qwen3-Embedding-8B
+  #   dtype: bfloat16
+  #   tensor_parallel_size: 1
+  #   max_model_len: 8192
+  #   cpu_per_replica: 2
+  #   gpu_per_replica: 0.3
+  #   gpu_memory_utilization: 0.3
+  #   min_replicas: 1
+  #   max_replicas: 1
+  #   vllm:
+  #     openai_serving:
+  #       enabled: true
+  #   labels:
+  #     - internal
+  #     - embedding
+
+  # - name: bge-reranker-large
+  #   alias: bge-reranker
+  #   task: rerank
+  #   backend: vllm
+  #   model_path: /nas_data/models/bge-reranker-large
+  #   dtype: float16
+  #   tensor_parallel_size: 1
+  #   max_model_len: 512
+  #   cpu_per_replica: 2
+  #   gpu_per_replica: 0.2
+  #   gpu_memory_utilization: 0.2
+  #   min_replicas: 1
+  #   max_replicas: 1
+  #   engine_kwargs:
+  #     trust_remote_code: true
+  #   labels:
+  #     - internal
+  #     - rerank
+
+  # - name: Qwen3.5-9B
+  #   alias: qwen3.5-9b
+  #   task: chat
+  #   backend: vllm
+  #   compat_mode: vllm_native
+  #   model_path: /nas_data/models/Qwen/Qwen3.5-9B
+  #   dtype: auto
+  #   tensor_parallel_size: 1
+  #   max_model_len: 12000
+  #   cpu_per_replica: 4
+  #   gpu_per_replica: 0.6
+  #   gpu_memory_utilization: 0.6
+  #   min_replicas: 1
+  #   max_replicas: 2
+  #   deployment_config:
+  #     serve_deployment_kwargs:
+  #       max_queued_requests: 6
+  #       max_ongoing_requests: 2
+  #     request_router_config:
+  #       request_router_class: ray.serve.llm.request_router.PrefixCacheAffinityRouter
+  #       request_router_kwargs:
+  #         imbalanced_threshold: 8
+  #   capabilities:
+  #     - vision
+  #   engine_kwargs:
+  #     trust_remote_code: true
+  #     tool_call_parser: qwen3_coder
+  #     enable_auto_tool_choice: true
+  #     limit_mm_per_prompt:
+  #       image: 10
+  #   vllm:
+  #     request_policy:
+  #       allow_tools: true
+  #       allow_reasoning: true
+  #     openai_serving:
+  #       enabled: true
+  #       enable_reasoning: true
+  #       reasoning_parser: qwen3
+  #   labels:
+  #     - internal
+  #     - llm
+  #     - multimodal
+
+
+  - name: Qwen3.5-27B
+    alias: qwen3.5-27b
     task: chat
     backend: vllm
     compat_mode: vllm_native
-    model_path: /nas_data/models/Qwen/Qwen3-32B
+    model_path: /nas_data/models/Qwen/Qwen3.5-27B
     dtype: auto
     tensor_parallel_size: 1
     max_model_len: 30000
     cpu_per_replica: 4
-    gpu_per_replica: 2
+    gpu_per_replica: 1
     gpu_memory_utilization: 0.9
     min_replicas: 1
-    max_replicas: 1
-    deployment_config:
-      serve_deployment_kwargs:
-        max_queued_requests: 16
-        max_ongoing_requests: 2
-    vllm:
-      engine_kwargs:
-        enable_auto_tool_choice: true
-        tool_call_parser: hermes
-      request_defaults:
-        tool_choice: auto
-        parallel_tool_calls: true
-        chat_template_kwargs:
-          enable_thinking: false
-      request_policy:
-        allow_tools: true
-        allow_reasoning: true
-      openai_serving:
-        enabled: true
-    labels:
-      - internal
-      - llm
-      
-  - name: MinerU2.5-2509-1.2B
-    alias: mineru
-    task: chat
-    backend: vllm
-    compat_mode: vllm_native
-    model_path: /nas_data/zhousj/mineru
-    dtype: auto
-    tensor_parallel_size: 1
-    max_model_len: 8192
-    cpu_per_replica: 4
-    gpu_per_replica: 0.35
-    gpu_memory_utilization: 0.35
-    min_replicas: 1
     max_replicas: 2
-    capabilities:
-      - vision
-    engine_kwargs:
-      trust_remote_code: true
-      limit_mm_per_prompt:
-        image: 10
-    labels:
-      - multimodal
-      - ocr
-      - llm
-    vllm:
-      openai_serving:
-        enabled: true
-
-  - name: qwen3-embedding-8b
-    alias: qwen3-embedding-8b
-    task: embedding
-    backend: vllm
-    compat_mode: vllm_native
-    model_path: /nas_data/models/Qwen/Qwen3-Embedding-8B
-    dtype: bfloat16
-    tensor_parallel_size: 1
-    max_model_len: 8192
-    cpu_per_replica: 2
-    gpu_per_replica: 0.3
-    gpu_memory_utilization: 0.3
-    min_replicas: 1
-    max_replicas: 1
-    vllm:
-      openai_serving:
-        enabled: true
-    labels:
-      - internal
-      - embedding
-
-  - name: bge-reranker-large
-    alias: bge-reranker
-    task: rerank
-    backend: vllm
-    model_path: /nas_data/models/bge-reranker-large
-    dtype: float16
-    tensor_parallel_size: 1
-    max_model_len: 512
-    cpu_per_replica: 4
-    gpu_per_replica: 0.2
-    gpu_memory_utilization: 0.2
-    min_replicas: 1
-    max_replicas: 1
-    engine_kwargs:
-      trust_remote_code: true
-    labels:
-      - internal
-      - rerank
-
-  - name: Qwen3.5-9B
-    alias: qwen3.5-9b
-    task: chat
-    backend: vllm
-    compat_mode: vllm_native
-    model_path: /nas_data/models/Qwen/Qwen3.5-9B
-    dtype: auto
-    tensor_parallel_size: 1
-    max_model_len: 12000
-    cpu_per_replica: 4
-    gpu_per_replica: 0.6
-    gpu_memory_utilization: 0.6
-    min_replicas: 1
-    max_replicas: 3
     deployment_config:
       serve_deployment_kwargs:
-        max_queued_requests: 32
-        max_ongoing_requests: 2
+        max_queued_requests: 50
+        max_ongoing_requests: 10
+      request_router_config:
+        request_router_class: ray.serve.llm.request_router.PrefixCacheAffinityRouter
+        request_router_kwargs:
+          imbalanced_threshold: 8
     capabilities:
       - vision
     engine_kwargs:

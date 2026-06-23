@@ -2,8 +2,8 @@ service:
   name: infer-nexus
   host: 0.0.0.0
   port: 8000
-  log_level: WARNING
   workers: 1
+  log_level: INFO
   api_key_header: X-API-Key
 
 catalog:
@@ -53,21 +53,21 @@ runtime:
   # Gateway-local per-model admission limit. Requests rejected here never enter
   # Ray Serve routing, which avoids amplifying router queue-length probing.
   # 0 disables the gateway-side limiter.
-  max_inflight_per_model: 10
+  max_inflight_per_model: 4
   # Optional split budgets for long streaming and shorter non-streaming calls.
   # 0 means fall back to max_inflight_per_model.
   max_streaming_inflight_per_model: 0
   max_non_streaming_inflight_per_model: 0
   # Bounded per-model burst queue inside one gateway worker. 0 disables waiting
   # and keeps fail-fast overload behavior.
-  max_queued_per_model: 20
+  max_queued_per_model: 0
   # Legacy acquisition timeout. Kept for compatibility; admission_queue_timeout
   # takes precedence when set.
   admission_acquire_timeout_seconds: 0
   admission_queue_timeout_seconds: 0
   # Optional gateway-side circuit breaker for repeated Serve runtime failures.
-  circuit_breaker_enabled: true
-  circuit_breaker_failure_threshold: 1
+  circuit_breaker_enabled: false
+  circuit_breaker_failure_threshold: 3
   circuit_breaker_cooldown_seconds: 60
   # Future worker-isolation switch. Default false keeps direct Serve handle calls.
   runtime_worker_enabled: false

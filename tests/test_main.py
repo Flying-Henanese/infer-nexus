@@ -41,6 +41,7 @@ def test_app_lifespan_builds_serve_handle_resolver_in_serve_mode(
     settings.runtime.gateway_worker_max_inflight = 64
     settings.runtime.max_queued_per_model = 8
     settings.runtime.serve_stream_idle_timeout_seconds = 15
+    settings.runtime.ray_address = "ray-head:6379"
 
     monkeypatch.setattr('infer_nexus.main.load_settings', lambda _path: settings)
     monkeypatch.setattr('infer_nexus.main.configure_logging', lambda _level: None)
@@ -52,3 +53,4 @@ def test_app_lifespan_builds_serve_handle_resolver_in_serve_mode(
         assert client.app.state.runtime_executor.gateway_worker_max_inflight == 64
         assert client.app.state.runtime_executor.max_queued_per_model == 8
         assert client.app.state.runtime_executor.serve_stream_idle_timeout_seconds == 15
+        assert client.app.state.runtime_executor.handle_resolver._ray_address == "ray-head:6379"

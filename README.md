@@ -18,6 +18,11 @@ For the current smallest runnable deployment shape:
 
 - [MINIMAL_STARTUP.md](./MINIMAL_STARTUP.md)
 
+For the compose-based Ascend split with separate Ray head, Ray worker, Serve
+deployment job, and gateway container:
+
+- [COMPOSE_ASCEND.md](./docs/COMPOSE_ASCEND.md)
+
 For first-time Ubuntu + CUDA bring-up:
 
 - [DEPLOYMENT_CHECKLIST.md](./DEPLOYMENT_CHECKLIST.md)

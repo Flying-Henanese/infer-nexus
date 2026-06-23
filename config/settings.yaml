@@ -29,6 +29,9 @@ scheduler:
   p95_latency_threshold_ms: 10000
 
 runtime:
+  # Ray address used by gateway processes in containerized serve mode.
+  # The all-in-one local scripts can leave this empty and rely on local Ray.
+  ray_address:
   device_env_strategy: ray_managed
   backend: vllm
   # Stub-only: skips real model execution and uses mocked runtime responses.

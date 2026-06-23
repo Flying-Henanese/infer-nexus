@@ -1,28 +1,110 @@
+x-infer-nexus-common: &infer-nexus-common
+  image: infer:v3
+  privileged: true
+  working_dir: /app/infer-nexus
+  environment: &infer-nexus-env
+    PYTHONPATH: /app/infer-nexus/src
+    INFER_NEXUS_SETTINGS: config/settings.yaml
+    RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES: "1"
+  devices:
+    - /dev/davinci_manager
+    - /dev/devmm_svm
+    - /dev/hisi_hdc
+  volumes:
+    - /usr/local/Ascend/driver:/usr/local/Ascend/driver
+    - /usr/local/dcmi:/usr/local/dcmi
+    - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi
+    - /usr/local/sbin:/usr/local/sbin
+    - /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool
+    - /data1/models:/app/models
+    - .:/app/infer-nexus
 
 services:
-  infer-nexus:
-    image: infer:v3
-    container_name: infer-nexus
-    privileged: true
+  ray-head:
+    <<: *infer-nexus-common
+    container_name: infer-nexus-ray-head
+    hostname: ray-head
+    environment:
+      <<: *infer-nexus-env
+      RAY_PORT: "6379"
+      RAY_DASHBOARD_HOST: 0.0.0.0
+      RAY_DASHBOARD_PORT: "8265"
+      # Keep the head control-plane focused by default. Set this to a positive
+      # value only when you intentionally want replicas on the head container.
+      RAY_NUM_NPUS: "0"
+    command: ["/bin/bash", "scripts/container/start_ray_head_ascend.sh"]
+    ports:
+      - "8265:8265"
+    healthcheck:
+      test: ["CMD-SHELL", "ray status >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+
+  ray-worker:
+    <<: *infer-nexus-common
+    container_name: infer-nexus-ray-worker
+    hostname: ray-worker
+    environment:
+      <<: *infer-nexus-env
+      RAY_ADDRESS: ray-head:6379
+      ASCEND_RT_VISIBLE_DEVICES: "3,4,5,6,7"
+      # Leave empty to derive from ASCEND_RT_VISIBLE_DEVICES.
+      RAY_NUM_NPUS: ""
+    command: ["/bin/bash", "scripts/container/start_ray_worker_ascend.sh"]
+    depends_on:
+      ray-head:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "ray status --address=ray-head:6379 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+
+  serve-deployer:
+    <<: *infer-nexus-common
+    container_name: infer-nexus-serve-deployer
+    environment:
+      <<: *infer-nexus-env
+      RAY_ADDRESS: ray-head:6379
+      SERVE_PROXY_LOCATION: Disabled
+      SERVE_READY_TIMEOUT_SECONDS: "900"
+      SERVE_READY_POLL_INTERVAL_SECONDS: "2"
+      SERVE_DEPLOY_BLOCKING: "0"
+    command: ["/bin/bash", "scripts/container/deploy_serve_runtime.sh"]
+    depends_on:
+      ray-head:
+        condition: service_healthy
+      ray-worker:
+        condition: service_started
+    restart: "no"
+
+  gateway:
+    <<: *infer-nexus-common
+    container_name: infer-nexus-gateway
+    environment:
+      <<: *infer-nexus-env
+      INFER_NEXUS_RAY_ADDRESS: ray-head:6379
+      GATEWAY_HOST: 0.0.0.0
+      GATEWAY_PORT: "8000"
+      # Uvicorn still owns the public listener and manages gateway workers.
+      GATEWAY_WORKERS: "4"
+    command: ["/bin/bash", "scripts/container/start_gateway.sh"]
     ports:
       - "8000:8000"
-    environment:
-      - ASCEND_RT_VISIBLE_DEVICES=3,4,5,6,7
-      - PYTHONPATH=/app/infer-nexus/src:$PYTHONPATH
-    devices:
-      - /dev/davinci_manager
-      - /dev/devmm_svm
-      - /dev/hisi_hdc
-    volumes:
-      - /usr/local/Ascend/driver:/usr/local/Ascend/driver
-      - /usr/local/dcmi:/usr/local/dcmi
-      - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi
-      - /usr/local/sbin:/usr/local/sbin
-      - /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool
-      # 挂载模型目录
-      - /data1/models:/app/models
-      # 挂载代码目录
-      - .:/app/infer-nexus
-    command: /bin/bash -c "/app/infer-nexus/scripts/start_minimal_ascend.sh && tail -f /dev/null"
-    stdin_open: true
-    tty: true
+    depends_on:
+      ray-head:
+        condition: service_healthy
+      serve-deployer:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS --max-time 2 http://127.0.0.1:8000/healthz >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped

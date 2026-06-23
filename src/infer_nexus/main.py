@@ -41,7 +41,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     handle_resolver = None
     # 4) 仅在 serve 模式下准备句柄解析器；stub 模式不依赖 Ray Serve。
     if settings.runtime.execution_mode == "serve":
-        handle_resolver = ServeDeploymentHandleResolver()
+        ray_address = os.getenv("INFER_NEXUS_RAY_ADDRESS", settings.runtime.ray_address)
+        handle_resolver = ServeDeploymentHandleResolver(ray_address=ray_address)
     runtime_executor = RuntimeExecutor(
         mode=settings.runtime.execution_mode,
         handle_resolver=handle_resolver,

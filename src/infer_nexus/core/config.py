@@ -48,6 +48,7 @@ class SchedulerSettings(BaseModel):
 class RuntimeSettings(BaseModel):
     """运行时后端和执行链路模式配置。"""
 
+    ray_address: str | None = None
     device_env_strategy: str = "ray_managed"
     backend: str = "vllm"
     execution_mode: str = "stub"

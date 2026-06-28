@@ -27,6 +27,10 @@ When there is ambiguity, use these priorities:
 
 Do not invent architecture that conflicts with `ARCHITECTURE.md`.
 
+## Harness Guidance
+
+This repository uses `.harness/` as an optional Codex collaboration workspace. For complex design, refactor, debugging, or review tasks, read the relevant files under `.harness/` when additional project context, planning templates, checklists, or execution notes would reduce ambiguity.
+
 ## Non-Goals
 
 Unless the user explicitly changes scope, do not add:

@@ -3,6 +3,12 @@
 from infer_nexus.benchmark.config import WorkloadItem
 
 
+PREFILL_CONTEXT_BLOCK = (
+    "queue latency ttft tpot kv cache token throughput scheduler pressure "
+    "prefix reuse admission control batch planning memory bandwidth. "
+)
+
+
 BUILTIN_WORKLOADS: dict[str, list[WorkloadItem]] = {
     "short_chat": [
         WorkloadItem(
@@ -43,6 +49,38 @@ BUILTIN_WORKLOADS: dict[str, list[WorkloadItem]] = {
                 }
             ],
             max_tokens=512,
+        )
+    ],
+    "prefill_intensive": [
+        WorkloadItem(
+            messages=[
+                {
+                    "role": "user",
+                    "content": (
+                        "You are benchmarking a model with max_model_length 30000. "
+                        "Read the following synthetic operations log and return only "
+                        "a compact summary of the dominant bottleneck signals:\n\n"
+                        + PREFILL_CONTEXT_BLOCK * 1500
+                    ),
+                }
+            ],
+            max_tokens=256,
+        )
+    ],
+    "decode_intensive": [
+        WorkloadItem(
+            messages=[
+                {
+                    "role": "user",
+                    "content": (
+                        "You are benchmarking decode throughput on a model with "
+                        "max_model_length 30000. Write a long, detailed operational "
+                        "analysis with numbered sections, concrete examples, and "
+                        "continued elaboration until the response budget is exhausted."
+                    ),
+                }
+            ],
+            max_tokens=12_000,
         )
     ],
 }

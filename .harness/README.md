@@ -1,0 +1,21 @@
+# Harness Workspace
+
+`.harness/` is a Codex collaboration workspace for this repository. It does not replace `docs/`, `tests/`, or `scripts/`.
+
+Use it as a short, current guide to:
+
+- orient Codex before complex architecture, refactor, debugging, or review tasks
+- find the relevant long-form document under `docs/`
+- choose the right verification checklist before claiming work is complete
+
+Do not store secrets, large logs, model artifacts, or generated benchmark outputs here.
+
+## Current Entry Points
+
+- `context/current-architecture.md`: current implemented architecture baseline.
+- `context/docs-map.md`: status map for architecture-related documents.
+- `context/project-map.md`: source tree and test navigation map.
+- `context/request-flows.md`: common startup, inference, platform, metrics, and health request flows.
+- `context/model-config.md`: current model catalog and config rules.
+- `context/monitoring-benchmark.md`: current monitoring and benchmark baseline.
+- `checklists/verification.md`: practical verification checklist for Codex work.

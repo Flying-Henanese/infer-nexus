@@ -1,4 +1,4 @@
-# AGENT.md
+# AGENTS.md
 
 ## Purpose
 
@@ -22,7 +22,7 @@ It exists to replace ad hoc per-user model deployments on shared servers with a 
 
 When there is ambiguity, use these priorities:
 1. `ARCHITECTURE.md`
-2. this `AGENT.md`
+2. this `AGENTS.md`
 3. local code and configuration conventions introduced in this repository
 
 Do not invent architecture that conflicts with `ARCHITECTURE.md`.

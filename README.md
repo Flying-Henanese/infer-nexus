@@ -26,7 +26,7 @@ For first-time Ubuntu + CUDA bring-up:
 
 - [ARCHITECTURE.md](./ARCHITECTURE.md): system design, boundaries, and phase goals
 - [OPENAI_PROXY_REFACTOR_PLAN.md](./OPENAI_PROXY_REFACTOR_PLAN.md): proxy-first refactor plan and rollout contract
-- [AGENT.md](./AGENT.md): implementation rules and constraints
+- [AGENTS.md](./AGENTS.md): implementation rules and constraints
 
 ## Current Status
 

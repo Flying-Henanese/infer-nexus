@@ -1,6 +1,12 @@
 # Architecture Document Map
 
-This map tells Codex which architecture-related documents to trust for current work.
+`docs/` contains long-form reference material. Some files describe current
+behavior, while others are future designs, historical debug notes, or superseded
+plans.
+
+Use this map to decide which long-form documents are relevant for a task and
+whether they describe current implementation. Verify implementation details
+against source before changing code.
 
 ## Current References
 
@@ -37,6 +43,11 @@ This map tells Codex which architecture-related documents to trust for current w
   - Use as proxy architecture background.
   - Current code supports proxy dispatch for chat, embeddings, and rerank, but production config currently still uses local `backend: vllm` for enabled models such as MinerU.
 
+- `docs/PREFIX_CACHE_STICKY_DESIGN.md`
+  - Current narrow reference for the prefix-cache affinity design position.
+  - Use when discussing why cache locality should be handled through Ray Serve replica-level routing instead of gateway-owned session stickiness.
+  - Treat runtime benefit and payload-shape compatibility as environment-dependent; verify against the active Ray Serve version and request path.
+
 ## Future Design Only
 
 Do not treat these as current implementation:
@@ -46,12 +57,6 @@ Do not treat these as current implementation:
 - `docs/VLLM_NATIVE_METRICS_DESIGN.md`
 
 They are useful for future planning, but current source code does not implement their main target capabilities.
-
-## Superseded For Current Work
-
-- `docs/PREFIX_CACHE_STICKY_DESIGN.md`
-
-Do not use it as the current routing recommendation. `docs/RAY_SERVE_GATEWAY_PERFORMANCE_PLAN.md` supersedes its optimistic recommendation around `PrefixCacheAffinityRouter` for the current custom DeploymentHandle path.
 
 ## Debug Records
 

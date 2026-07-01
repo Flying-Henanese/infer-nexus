@@ -103,6 +103,10 @@ Ray Serve handles:
 ### 10. Preserve backend substitution path
 Even though Phase 1 uses `vLLM`, do not spread vLLM-specific assumptions across unrelated modules.
 
+When changing src/infer_nexus/backends/, VLLMBackend, vllm_native/,
+StrictNativeVLLMExecutor, LocalBestEffortVLLMExecutor, or compat_mode
+execution semantics, read docs/inference_backend_design.md first.
+
 Implementation rule:
 - keep a thin backend abstraction layer
 - isolate engine-specific startup and request adaptation logic

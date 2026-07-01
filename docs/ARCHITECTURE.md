@@ -28,6 +28,40 @@ Out of scope for Phase 1:
 - Multi-backend coexistence
 - Cross-cluster scheduling
 
+## Current Implementation Status
+
+This document describes both the intended architecture and the current Phase 1
+implementation. Use this status summary to avoid treating planned control-plane
+features as already active behavior.
+
+Implemented:
+- OpenAI-compatible chat, embeddings, and rerank routes.
+- Local `backend: vllm` dispatch through model-specific Ray Serve handles.
+- `vllm_openai_proxy` dispatch for chat, embeddings, and rerank.
+- `vllm_native` chat and embedding adapter paths, with local rerank remaining
+  `local_best_effort`.
+- Gateway-local runtime guards, bounded queues, stream timeouts, circuit breaker
+  accounting, and related metrics.
+- Prometheus gateway metrics endpoint and core request, stream, runtime-guard,
+  worker-admission, and Serve-handle metrics.
+
+Skeleton or partial:
+- `AdmissionController` exists as a gateway integration point, but capacity- and
+  queue-aware admission decisions are not implemented there.
+- `Scaler` and `Reconciler` exist as scaffolding.
+- Platform load and capacity APIs are lightweight or stubbed and do not yet
+  expose full Ray Serve or accelerator state.
+- API key helper code exists, but authentication enforcement is not wired into
+  the public routes.
+
+Not implemented:
+- Dependency-aware readiness checks.
+- Dynamic model registration.
+- Full runtime-state enrichment in platform model APIs.
+- Proxy hardening such as upstream allowlist enforcement, request body size
+  limits, and full client `Authorization` forwarding policy.
+- Automatic replica scaling or deployment reconciliation loops.
+
 ## 2. Design Principles
 
 1. Pre-registered models only
@@ -180,9 +214,12 @@ graph TD
 
 #### API Gateway
 - Exposes one HTTP entrypoint
-- Handles request authentication (`待实现`)
 - Separates OpenAI-compatible APIs from platform-native APIs
-- Applies request admission checks before dispatch
+- Has API key helper code, but route-level authentication enforcement remains
+  `待实现`
+- Applies model readiness checks and the skeleton admission hook before dispatch
+- Applies gateway-local runtime guards inside `RuntimeExecutor` for configured
+  model concurrency, queue, stream timeout, and circuit breaker limits
 
 #### Model Catalog
 - Stores pre-registered model metadata
@@ -197,9 +234,12 @@ graph TD
   - `vllm`: dispatches to matching local Ray Serve deployment
 
 #### Load Inspector and Admission Control
-- Aggregates runtime health and load indicators
-- Decides whether requests should be admitted or rejected early (`待实现`)
-- Supports cluster and model load inspection APIs (`待实现`)
+- `AdmissionController` is wired into OpenAI-compatible routes as an integration
+  point, but capacity-aware admission decisions remain `待实现`
+- Gateway-local model guards in `RuntimeExecutor` already enforce configured
+  concurrency, queue, timeout, and circuit breaker limits
+- `LoadInspector` currently returns a lightweight registered-model snapshot; full
+  cluster and model load inspection APIs remain `待实现`
 
 #### Scaling Policy Layer
 - Uses inference-related metrics such as queue length, TTFT, and latency
@@ -221,10 +261,8 @@ graph TD
 - In `vllm_native` chat mode, delegates compatibility-sensitive OpenAI chat
   behavior to `src/infer_nexus/backends/vllm_native/chat.py` and passes native
   response or SSE chunks through without local delta reconstruction
-- In `vllm_native` embedding mode, uses an injected native embeddings serving
-  adapter contract and fails clearly if that adapter is unavailable; constructing
-  the real vLLM 0.18 embeddings serving object is still pending target-runtime
-  validation
+- In `vllm_native` embedding mode, uses the replica-local native embeddings
+  serving adapter path and fails clearly if that adapter is unavailable
 - In `local_best_effort` chat mode, uses replica-local `AsyncLLMEngine` where
   available, maps cumulative vLLM `RequestOutput` objects to internal
   `chat_delta` events, and lets `RuntimeExecutor` encode OpenAI-compatible SSE
@@ -389,10 +427,8 @@ Implementation notes:
   falls back to sync `LLM`. Streaming remains available as an OpenAI-compatible
   stream in that case, but it is compatibility streaming over a completed
   response rather than token-level incremental streaming.
-- Native embedding has a backend contract and payload-preservation tests, but
-  real vLLM 0.18 embeddings serving construction still needs target-environment
-  validation. Until then, production embedding models should use
-  `local_best_effort` or `vllm_openai_proxy`.
+- Native embedding uses the replica-local vLLM OpenAI serving adapter path for
+  `vllm_native` embedding models.
 - Rerank remains `local_best_effort` for local vLLM. `vllm_native` rerank is
   intentionally rejected in the first pass.
 - For compatibility-sensitive models that cannot yet use a validated native
@@ -544,9 +580,11 @@ Dependency-aware readiness checks remain `待实现`.
 ```text
 Client request
   -> API validation
-  -> authentication
+  -> optional auth hook (API key enforcement not wired yet)
   -> model resolution via catalog
-  -> admission control check
+  -> model artifact/readiness check
+  -> skeleton AdmissionController hook
+  -> RuntimeExecutor gateway-local guards when configured
   -> backend dispatch
       -> proxy backend: upstream OpenAI-compatible request/response passthrough
       -> local backend:
@@ -570,8 +608,9 @@ flowchart TD
   MR --> TK{Task matches?}
   TK -->|No| E1[404/400 OpenAI-style error]
   TK -->|Yes| MD[Check model artifact path]
-  MD --> AD[AdmissionController]
-  AD --> RQ[RuntimeDispatcher.resolve_target]
+  MD --> AD[AdmissionController hook]
+  AD --> GG[RuntimeExecutor gateway guards]
+  GG --> RQ[RuntimeDispatcher.resolve_target]
 
   RQ --> BT{Backend type?}
   BT -->|vllm| LX[Local Ray Serve path]
@@ -635,7 +674,8 @@ Each model entry should include at least:
   vLLM models that should use replica-local native serving semantics; legacy
   `strict_openai` is accepted only as a chat alias
 - `model_path`: Hugging Face ID or local model path for locally hosted models
-- `deployment_name`: Ray Serve deployment identifier for locally hosted models
+- deployment identifier: derived by the runtime/deployment layer for locally
+  hosted models
 - `dtype`
 - `tensor_parallel_size`
 - `max_model_len`
@@ -831,8 +871,11 @@ Admission control is required even without user-level resource isolation.
 Its purpose is to reject requests early when service quality would otherwise collapse.
 
 Current implementation status:
-- admission decision logic: `待实现`
-- only the gateway integration point exists today
+- `AdmissionController` decision logic is still a skeleton.
+- OpenAI-compatible routes call the admission hook before runtime dispatch.
+- `RuntimeExecutor` already provides gateway-local per-model guards for
+  configured inflight limits, queue limits, wait timeouts, stream timeouts, and
+  optional circuit breaker behavior.
 
 ### Admission inputs
 Per-model signals:
@@ -937,21 +980,43 @@ Current implementation status:
 Ray Serve's built-in Prometheus support should be used directly for runtime metrics. `infer-nexus` should add business-level and control-plane metrics on top.
 
 Current implementation status:
-- custom metrics emission: `待实现`
-- runtime metric aggregation into platform APIs: `待实现`
-- proxy per-model request counters and status breakdowns: `待实现`
-- proxy upstream latency histograms: `待实现`
-- proxy stream lifecycle counters: `待实现`
+- Gateway request counters, latency histograms, inflight gauges, error counters,
+  stream TTFT/TPOT/completion metrics, worker-admission metrics, model guard
+  metrics, Serve handle metrics, and circuit state metrics are implemented.
+- Runtime metric aggregation into platform APIs remains `待实现`.
+- Proxy upstream-specific status breakdowns and latency histograms remain
+  `待实现`.
+- Proxy stream lifecycle visibility is partially covered by generic stream
+  metrics; upstream-specific stream metrics remain `待实现`.
 
-### Recommended custom metrics
+### Implemented gateway metrics
 - `infer_nexus_requests_total`
 - `infer_nexus_request_latency_seconds`
-- `infer_nexus_ttft_seconds`
-- `infer_nexus_model_requests_total`
-- `infer_nexus_model_inflight_requests`
-- `infer_nexus_model_queue_length`
+- `infer_nexus_inflight_requests`
+- `infer_nexus_errors_total`
 - `infer_nexus_admission_rejections_total`
-- `infer_nexus_model_status`
+- `infer_nexus_stream_ttft_seconds`
+- `infer_nexus_stream_chunk_interval_seconds`
+- `infer_nexus_stream_tpot_seconds`
+- `infer_nexus_stream_completions_total`
+- `infer_nexus_gateway_worker_inflight`
+- `infer_nexus_gateway_worker_capacity`
+- `infer_nexus_gateway_worker_rejections_total`
+- `infer_nexus_model_inflight`
+- `infer_nexus_model_queue_depth`
+- `infer_nexus_runtime_guard_rejections_total`
+- `infer_nexus_admission_wait_seconds`
+- `infer_nexus_serve_handle_calls_total`
+- `infer_nexus_serve_handle_latency_seconds`
+- `infer_nexus_serve_handle_timeouts_total`
+- `infer_nexus_serve_circuit_state`
+
+### Future platform metrics
+- per-model status and degraded state
+- per-model scaling behavior
+- cluster accelerator allocation summary
+- proxy upstream latency and error breakdown
+- proxy upstream stream lifecycle visibility
 
 ### Monitoring views the platform should support
 - per-model request volume
@@ -1092,12 +1157,12 @@ Phase 1 should implement only the minimum platform needed to replace ad hoc pers
 - native load inspection APIs
 - basic admission control (`待实现`)
 - metric-driven autoscaling hooks (`待实现`)
-- Prometheus metrics integration (`待实现`)
+- Prometheus metrics integration for gateway/runtime guard paths
 - API key authentication (`待实现`)
 
 ### Nice-to-have but not required for Phase 1
-- full target-environment validation of `vllm_native` chat and embedding against
-  `vllm serve` behavior on Ray 2.48.0 + vLLM 0.18.x
+- broader production-comparison validation of `vllm_native` behavior against
+  standalone `vllm serve` behavior when upgrading Ray or vLLM versions
 - native `responses` API support
 - config reload and deployment reconcile without full process restart
 

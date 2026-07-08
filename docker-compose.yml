@@ -16,7 +16,7 @@ services:
       - -lc
       - >
         ray start --head
-        --node-ip-address=0.0.0.0
+        --node-ip-address=$$(hostname -i)
         --port=6379
         --dashboard-host=0.0.0.0
         --disable-usage-stats
@@ -61,6 +61,8 @@ services:
         $$RESOURCE_ARGS
         --block
     environment:
+      RAY_WORKER_NUM_GPUS: ${RAY_WORKER_NUM_GPUS:-1}
+      RAY_WORKER_RESOURCES: ${RAY_WORKER_RESOURCES:-}
       ASCEND_RT_VISIBLE_DEVICES: ${ASCEND_RT_VISIBLE_DEVICES:-}
       CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-}
       RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES: ${RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES:-}

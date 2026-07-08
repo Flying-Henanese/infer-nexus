@@ -5,7 +5,9 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        RUNTIME_BASE_IMAGE: ${RUNTIME_BASE_IMAGE:-python:3.11-slim}
+        BUILDER_BASE_IMAGE: ${BUILDER_BASE_IMAGE:-nvidia/cuda:12.2.0-devel-ubuntu22.04}
+        RUNTIME_BASE_IMAGE: ${RUNTIME_BASE_IMAGE:-nvidia/cuda:12.2.0-runtime-ubuntu22.04}
+        PYTHON_VERSION: ${PYTHON_VERSION:-3.11}
     command:
       - sh
       - -lc
@@ -28,6 +30,7 @@ services:
 
   ray-worker:
     image: infer-nexus:runtime
+    gpus: ${COMPOSE_GPU_REQUEST:-all}
     depends_on:
       ray-head:
         condition: service_healthy
@@ -64,6 +67,7 @@ services:
 
   serve-deployer:
     image: infer-nexus:runtime
+    gpus: ${COMPOSE_GPU_REQUEST:-all}
     depends_on:
       ray-head:
         condition: service_healthy

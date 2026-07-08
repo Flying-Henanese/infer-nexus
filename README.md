@@ -77,7 +77,7 @@ Validation coverage added by tests:
 
 ## Docker Compose Runtime Split
 
-The first-stage Compose deployment keeps the current infer-nexus runtime architecture and only separates process lifecycles. The runtime image uses a two-stage Dockerfile so dependency resolution stays in the builder stage while all services share the same final image:
+The first-stage Compose deployment keeps the current infer-nexus runtime architecture and only separates process lifecycles. The runtime image uses CUDA devel/runtime base images in a two-stage Dockerfile so dependency resolution stays in the builder stage while all services share the same CUDA-capable final image:
 
 - `ray-head` runs the Ray control plane.
 - `ray-worker` joins the Ray cluster and hosts Ray Serve replicas plus replica-local vLLM runtimes.
@@ -94,6 +94,10 @@ docker compose up
 Useful deployment variables:
 
 ```bash
+BUILDER_BASE_IMAGE=nvidia/cuda:12.2.0-devel-ubuntu22.04
+RUNTIME_BASE_IMAGE=nvidia/cuda:12.2.0-runtime-ubuntu22.04
+PYTHON_VERSION=3.11
+COMPOSE_GPU_REQUEST=all
 INFER_NEXUS_RAY_ADDRESS=ray-head:6379
 MODEL_STORE_HOST_PATH=/data/models
 GATEWAY_WORKERS=2
@@ -102,7 +106,7 @@ RAY_WORKER_RESOURCES={"NPU": 1}
 ASCEND_RT_VISIBLE_DEVICES=0,1
 ```
 
-Set only the accelerator variables that match the target runtime. Compose defines the visible accelerator pool; per-model replica resource requirements still belong in `config/models.yaml`.
+CUDA Compose runs require NVIDIA Container Toolkit on the host so Docker can mount the driver into `ray-worker`. Set only the accelerator variables that match the target runtime. Compose defines the visible accelerator pool; per-model replica resource requirements still belong in `config/models.yaml`.
 
 After startup, validate from the host:
 

@@ -67,6 +67,7 @@ services:
     volumes:
       - ./config:/app/config:ro
       - ${MODEL_STORE_HOST_PATH:-./models}:/models
+      - ./.infer-nexus/logs:/app/.infer-nexus/logs
     healthcheck:
       test: ["CMD-SHELL", "ray status --address=ray-head:6379 >/dev/null 2>&1"]
       interval: 10s
@@ -95,6 +96,7 @@ services:
     volumes:
       - ./config:/app/config:ro
       - ${MODEL_STORE_HOST_PATH:-./models}:/models
+      - ./.infer-nexus/logs:/app/.infer-nexus/logs
     restart: "no"
 
   gateway:
@@ -119,6 +121,7 @@ services:
     volumes:
       - ./config:/app/config:ro
       - ${MODEL_STORE_HOST_PATH:-./models}:/models
+      - ./.infer-nexus/logs:/app/.infer-nexus/logs
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2).read()\""]
       interval: 10s

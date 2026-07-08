@@ -77,7 +77,7 @@ Validation coverage added by tests:
 
 ## Docker Compose Runtime Split
 
-The first-stage Compose deployment keeps the current infer-nexus runtime architecture and only separates process lifecycles:
+The first-stage Compose deployment keeps the current infer-nexus runtime architecture and only separates process lifecycles. The runtime image uses a two-stage Dockerfile so dependency resolution stays in the builder stage while all services share the same final image:
 
 - `ray-head` runs the Ray control plane.
 - `ray-worker` joins the Ray cluster and hosts Ray Serve replicas plus replica-local vLLM runtimes.

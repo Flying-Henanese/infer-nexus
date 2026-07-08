@@ -7,7 +7,7 @@ services:
       args:
         RUNTIME_BASE_IMAGE: ${RUNTIME_BASE_IMAGE:-python:3.11-slim}
     command:
-      - bash
+      - sh
       - -lc
       - >
         ray start --head
@@ -32,20 +32,20 @@ services:
       ray-head:
         condition: service_healthy
     command:
-      - bash
+      - sh
       - -lc
       - >
         set -eu;
         RESOURCE_ARGS="";
-        if [ -n "${RAY_WORKER_NUM_GPUS:-}" ]; then
-          RESOURCE_ARGS="$RESOURCE_ARGS --num-gpus=${RAY_WORKER_NUM_GPUS}";
+        if [ -n "$${RAY_WORKER_NUM_GPUS:-}" ]; then
+          RESOURCE_ARGS="$$RESOURCE_ARGS --num-gpus=$${RAY_WORKER_NUM_GPUS}";
         fi;
-        if [ -n "${RAY_WORKER_RESOURCES:-}" ]; then
-          RESOURCE_ARGS="$RESOURCE_ARGS --resources=${RAY_WORKER_RESOURCES}";
+        if [ -n "$${RAY_WORKER_RESOURCES:-}" ]; then
+          RESOURCE_ARGS="$$RESOURCE_ARGS --resources=$${RAY_WORKER_RESOURCES}";
         fi;
         ray start --address=ray-head:6379
         --disable-usage-stats
-        $RESOURCE_ARGS
+        $$RESOURCE_ARGS
         --block
     environment:
       ASCEND_RT_VISIBLE_DEVICES: ${ASCEND_RT_VISIBLE_DEVICES:-}
@@ -70,7 +70,7 @@ services:
       ray-worker:
         condition: service_healthy
     command:
-      - bash
+      - sh
       - -lc
       - >
         python scripts/run_serve_runtime.py
@@ -89,7 +89,7 @@ services:
       serve-deployer:
         condition: service_completed_successfully
     command:
-      - bash
+      - sh
       - -lc
       - >
         python scripts/run_gateway.py

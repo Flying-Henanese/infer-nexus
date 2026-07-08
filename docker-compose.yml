@@ -56,7 +56,10 @@ services:
         if [ -n "$${RAY_WORKER_RESOURCES:-}" ]; then
           RESOURCE_ARGS="$$RESOURCE_ARGS --resources=$${RAY_WORKER_RESOURCES}";
         fi;
-        ray start --address=ray-head:6379
+        RAY_HEAD_IP=$$(python -c "import socket; print(socket.gethostbyname('ray-head'))");
+        RAY_ADDRESS="$${RAY_HEAD_IP}:6379";
+        ray start --address="$${RAY_ADDRESS}"
+        --node-ip-address=$$(hostname -i)
         --disable-usage-stats
         $$RESOURCE_ARGS
         --block
@@ -70,7 +73,7 @@ services:
       - ./config:/app/config:ro
       - ${MODEL_STORE_HOST_PATH:-./models}:/models
     healthcheck:
-      test: ["CMD-SHELL", "ray status --address=ray-head:6379 >/dev/null 2>&1"]
+      test: ["CMD-SHELL", "RAY_HEAD_IP=$$(python -c \"import socket; print(socket.gethostbyname('ray-head'))\"); ray status --address=$${RAY_HEAD_IP}:6379 >/dev/null 2>&1"]
       interval: 10s
       timeout: 5s
       retries: 30
@@ -89,9 +92,11 @@ services:
       - sh
       - -lc
       - >
+        RAY_HEAD_IP=$$(python -c "import socket; print(socket.gethostbyname('ray-head'))");
+        RAY_ADDRESS="$${INFER_NEXUS_RAY_ADDRESS:-$${RAY_HEAD_IP}:6379}";
         python scripts/run_serve_runtime.py
         --settings config/settings.compose.yaml
-        --ray-address ${INFER_NEXUS_RAY_ADDRESS:-ray-head:6379}
+        --ray-address "$${RAY_ADDRESS}"
         --proxy-location Disabled
         --ready-timeout-seconds ${SERVE_READY_TIMEOUT_SECONDS:-900}
     volumes:
@@ -109,13 +114,15 @@ services:
       - sh
       - -lc
       - >
+        RAY_HEAD_IP=$$(python -c "import socket; print(socket.gethostbyname('ray-head'))");
+        export INFER_NEXUS_RAY_ADDRESS="$${INFER_NEXUS_RAY_ADDRESS:-$${RAY_HEAD_IP}:6379}";
         python scripts/run_gateway.py
         --settings config/settings.compose.yaml
         --host 0.0.0.0
         --workers ${GATEWAY_WORKERS:-2}
     environment:
       INFER_NEXUS_SETTINGS: config/settings.compose.yaml
-      INFER_NEXUS_RAY_ADDRESS: ${INFER_NEXUS_RAY_ADDRESS:-ray-head:6379}
+      INFER_NEXUS_RAY_ADDRESS: ${INFER_NEXUS_RAY_ADDRESS:-}
     ports:
       - "8000:8000"
     volumes:

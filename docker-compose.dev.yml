@@ -1,0 +1,15 @@
+services:
+  ray-worker:
+    volumes:
+      - ./src:/app/src:ro
+      - ./scripts:/app/scripts:ro
+
+  serve-deployer:
+    volumes:
+      - ./src:/app/src:ro
+      - ./scripts:/app/scripts:ro
+
+  gateway:
+    volumes:
+      - ./src:/app/src:ro
+      - ./scripts:/app/scripts:ro

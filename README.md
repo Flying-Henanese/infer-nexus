@@ -110,6 +110,15 @@ ASCEND_RT_VISIBLE_DEVICES=0,1
 
 Containers run as the `infer-nexus` non-root user created in the image. Make sure mounted host paths such as `MODEL_STORE_HOST_PATH` are readable, and writable if runtime artifact downloads are expected, by UID/GID `10001:10001` or the overridden `APP_UID`/`APP_GID`. CUDA Compose runs require NVIDIA Container Toolkit on the host so Docker can mount the driver into `ray-worker`. Set only the accelerator variables that match the target runtime. Compose defines the visible accelerator pool; per-model replica resource requirements still belong in `config/models.yaml`.
 
+
+For development, layer the dev override on top of the base Compose file so source and script edits are visible without rebuilding the image:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+```
+
+The dev override mounts only `src/` and `scripts/`; the image-owned `/app/.venv` is left intact, while `config/` and the model store are already mounted by the base Compose file.
+
 After startup, validate from the host:
 
 ```bash

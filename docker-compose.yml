@@ -1,28 +1,113 @@
-
 services:
-  infer-nexus:
-    image: infer:v3
-    container_name: infer-nexus
-    privileged: true
+  ray-head:
+    image: infer-nexus:runtime
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        RUNTIME_BASE_IMAGE: ${RUNTIME_BASE_IMAGE:-python:3.11-slim}
+    command:
+      - bash
+      - -lc
+      - >
+        ray start --head
+        --node-ip-address=0.0.0.0
+        --port=6379
+        --dashboard-host=0.0.0.0
+        --disable-usage-stats
+        --block
+    ports:
+      - "8265:8265"
+    healthcheck:
+      test: ["CMD-SHELL", "ray status --address=127.0.0.1:6379 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+
+  ray-worker:
+    image: infer-nexus:runtime
+    depends_on:
+      ray-head:
+        condition: service_healthy
+    command:
+      - bash
+      - -lc
+      - >
+        set -eu;
+        RESOURCE_ARGS="";
+        if [ -n "${RAY_WORKER_NUM_GPUS:-}" ]; then
+          RESOURCE_ARGS="$RESOURCE_ARGS --num-gpus=${RAY_WORKER_NUM_GPUS}";
+        fi;
+        if [ -n "${RAY_WORKER_RESOURCES:-}" ]; then
+          RESOURCE_ARGS="$RESOURCE_ARGS --resources=${RAY_WORKER_RESOURCES}";
+        fi;
+        ray start --address=ray-head:6379
+        --disable-usage-stats
+        $RESOURCE_ARGS
+        --block
+    environment:
+      ASCEND_RT_VISIBLE_DEVICES: ${ASCEND_RT_VISIBLE_DEVICES:-}
+      CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-}
+      RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES: ${RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES:-}
+    volumes:
+      - ./config:/app/config:ro
+      - ${MODEL_STORE_HOST_PATH:-./models}:/models
+    healthcheck:
+      test: ["CMD-SHELL", "ray status --address=ray-head:6379 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
+
+  serve-deployer:
+    image: infer-nexus:runtime
+    depends_on:
+      ray-head:
+        condition: service_healthy
+      ray-worker:
+        condition: service_healthy
+    command:
+      - bash
+      - -lc
+      - >
+        python scripts/run_serve_runtime.py
+        --settings config/settings.compose.yaml
+        --ray-address ${INFER_NEXUS_RAY_ADDRESS:-ray-head:6379}
+        --proxy-location Disabled
+        --ready-timeout-seconds ${SERVE_READY_TIMEOUT_SECONDS:-900}
+    volumes:
+      - ./config:/app/config:ro
+      - ${MODEL_STORE_HOST_PATH:-./models}:/models
+    restart: "no"
+
+  gateway:
+    image: infer-nexus:runtime
+    depends_on:
+      serve-deployer:
+        condition: service_completed_successfully
+    command:
+      - bash
+      - -lc
+      - >
+        python scripts/run_gateway.py
+        --settings config/settings.compose.yaml
+        --host 0.0.0.0
+        --workers ${GATEWAY_WORKERS:-2}
+    environment:
+      INFER_NEXUS_SETTINGS: config/settings.compose.yaml
+      INFER_NEXUS_RAY_ADDRESS: ${INFER_NEXUS_RAY_ADDRESS:-ray-head:6379}
     ports:
       - "8000:8000"
-    environment:
-      - ASCEND_RT_VISIBLE_DEVICES=3,4,5,6,7
-      - PYTHONPATH=/app/infer-nexus/src:$PYTHONPATH
-    devices:
-      - /dev/davinci_manager
-      - /dev/devmm_svm
-      - /dev/hisi_hdc
     volumes:
-      - /usr/local/Ascend/driver:/usr/local/Ascend/driver
-      - /usr/local/dcmi:/usr/local/dcmi
-      - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi
-      - /usr/local/sbin:/usr/local/sbin
-      - /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool
-      # 挂载模型目录
-      - /data1/models:/app/models
-      # 挂载代码目录
-      - .:/app/infer-nexus
-    command: /bin/bash -c "/app/infer-nexus/scripts/start_minimal_ascend.sh && tail -f /dev/null"
-    stdin_open: true
-    tty: true
+      - ./config:/app/config:ro
+      - ${MODEL_STORE_HOST_PATH:-./models}:/models
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2).read()\""]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped

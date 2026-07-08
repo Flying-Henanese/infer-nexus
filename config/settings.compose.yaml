@@ -1,0 +1,50 @@
+service:
+  name: infer-nexus
+  host: 0.0.0.0
+  port: 8000
+  workers: 2
+  log_level: INFO
+  api_key_header: X-API-Key
+
+catalog:
+  models_path: config/models.yaml
+
+cluster:
+  inference_device_type: cuda
+  device_pool_boundary: ray_runtime_visible_devices
+  default_platform: cuda
+
+scheduler:
+  enable_admission_control: true
+  scale_up_cooldown_sec: 30
+  scale_down_cooldown_sec: 300
+  queue_length_threshold: 8
+  ttft_threshold_ms: 2500
+  p95_latency_threshold_ms: 10000
+
+runtime:
+  device_env_strategy: ray_managed
+  backend: vllm
+  execution_mode: serve
+  backend_init_mode: real
+  gateway_worker_max_inflight: 0
+  gateway_worker_retry_after_seconds: 1
+  serve_request_timeout_seconds: 120
+  serve_stream_idle_timeout_seconds: 30
+  serve_stream_max_lifetime_seconds: 900
+  max_inflight_per_model: 4
+  max_streaming_inflight_per_model: 0
+  max_non_streaming_inflight_per_model: 0
+  max_queued_per_model: 0
+  admission_acquire_timeout_seconds: 0
+  admission_queue_timeout_seconds: 0
+  circuit_breaker_enabled: false
+  circuit_breaker_failure_threshold: 3
+  circuit_breaker_cooldown_seconds: 60
+  runtime_worker_enabled: false
+  runtime_worker_request_timeout_seconds: 60
+  runtime_worker_start_timeout_seconds: 15
+
+model_store:
+  root_dir: /models
+  huggingface_endpoint: https://hf-mirror.com

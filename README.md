@@ -74,3 +74,39 @@ What changed in the refactored branch:
 Validation coverage added by tests:
 - Added/updated tests for remote model reference resolution, deployment override behavior,
   runtime spec metadata preservation, richer sampling params, and multimodal data URL normalization.
+
+## Docker Compose Runtime Split
+
+The first-stage Compose deployment keeps the current infer-nexus runtime architecture and only separates process lifecycles:
+
+- `ray-head` runs the Ray control plane.
+- `ray-worker` joins the Ray cluster and hosts Ray Serve replicas plus replica-local vLLM runtimes.
+- `serve-deployer` runs `scripts/run_serve_runtime.py` once, submits Ray Serve applications, waits for readiness, and exits.
+- `gateway` runs the FastAPI/Uvicorn API entrypoint and connects to Ray through `INFER_NEXUS_RAY_ADDRESS`.
+
+Basic startup flow:
+
+```bash
+docker compose build
+docker compose up
+```
+
+Useful deployment variables:
+
+```bash
+INFER_NEXUS_RAY_ADDRESS=ray-head:6379
+MODEL_STORE_HOST_PATH=/data/models
+GATEWAY_WORKERS=2
+RAY_WORKER_NUM_GPUS=1
+RAY_WORKER_RESOURCES={"NPU": 1}
+ASCEND_RT_VISIBLE_DEVICES=0,1
+```
+
+Set only the accelerator variables that match the target runtime. Compose defines the visible accelerator pool; per-model replica resource requirements still belong in `config/models.yaml`.
+
+After startup, validate from the host:
+
+```bash
+curl http://127.0.0.1:8000/healthz
+curl http://127.0.0.1:8000/v1/models
+```

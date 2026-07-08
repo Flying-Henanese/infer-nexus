@@ -22,6 +22,16 @@ from infer_nexus.runtime.handles import ServeDeploymentHandleResolver
 from infer_nexus.runtime.serve_app import ServeApplicationBuilder
 
 
+def initialize_ray_connection(ray_address: str) -> None:
+    """Connect this gateway process to the configured Ray cluster."""
+    try:
+        import ray
+    except ImportError as exc:
+        raise RuntimeError(
+            "Ray is not installed. Install the 'serve' extra to enable serve execution."
+        ) from exc
+    ray.init(address=ray_address, ignore_reinit_error=True)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """在应用启动阶段装配运行期依赖，并在关闭时释放生命周期上下文。"""
@@ -41,6 +51,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     handle_resolver = None
     # 4) 仅在 serve 模式下准备句柄解析器；stub 模式不依赖 Ray Serve。
     if settings.runtime.execution_mode == "serve":
+        if settings.runtime.ray_address:
+            initialize_ray_connection(settings.runtime.ray_address)
         handle_resolver = ServeDeploymentHandleResolver()
     runtime_executor = RuntimeExecutor(
         mode=settings.runtime.execution_mode,

@@ -1,5 +1,6 @@
 """应用配置模型和加载逻辑。"""
 
+import os
 from pathlib import Path
 from typing import Literal
 
@@ -52,6 +53,7 @@ class RuntimeSettings(BaseModel):
     backend: str = "vllm"
     execution_mode: str = "stub"
     backend_init_mode: str = "stub"
+    ray_address: str | None = None
     gateway_worker_max_inflight: int = Field(default=0, ge=0)
     gateway_worker_retry_after_seconds: int = Field(default=1, ge=1)
     serve_request_timeout_seconds: int | float = Field(default=120, gt=0)
@@ -76,6 +78,21 @@ class ModelStoreSettings(BaseModel):
 
     root_dir: str = "models"
     huggingface_endpoint: str = "https://hf-mirror.com"
+
+
+def _apply_env_overrides(settings: "Settings") -> "Settings":
+    """Apply deployment-specific environment overrides after YAML loading."""
+    ray_address = os.getenv("INFER_NEXUS_RAY_ADDRESS")
+    if ray_address is None:
+        return settings
+    normalized = ray_address.strip()
+    return settings.model_copy(
+        update={
+            "runtime": settings.runtime.model_copy(
+                update={"ray_address": normalized or None}
+            )
+        }
+    )
 
 
 class Settings(BaseModel):
@@ -109,4 +126,4 @@ def load_settings(path: str | Path = "config/settings.yaml") -> Settings:
     with config_path.open("r", encoding="utf-8") as handle:
         raw = yaml.safe_load(handle) or {}
 
-    return Settings.model_validate(raw)
+    return _apply_env_overrides(Settings.model_validate(raw))

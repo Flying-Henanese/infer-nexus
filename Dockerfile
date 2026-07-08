@@ -78,6 +78,7 @@ RUN sed -i 's/archive.ubuntu.com/mirrors.aliyun.com/g' /etc/apt/sources.list \
         python${PYTHON_VERSION} \
         python${PYTHON_VERSION}-dev \
         python${PYTHON_VERSION}-venv \
+        build-essential \
         cuda-cudart-dev-12-2 \
         cuda-nvrtc-12-2 \
         libgl1 \

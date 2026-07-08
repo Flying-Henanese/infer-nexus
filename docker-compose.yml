@@ -34,7 +34,13 @@ services:
   ray-worker:
     image: infer-nexus:runtime
     user: infer-nexus
-    gpus: ${COMPOSE_GPU_REQUEST:-all}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: ${COMPOSE_GPU_REQUEST:-all}
+              capabilities: [gpu]
     depends_on:
       ray-head:
         condition: service_healthy

@@ -1,6 +1,7 @@
 services:
   ray-head:
     image: infer-nexus:runtime
+    user: infer-nexus
     build:
       context: .
       dockerfile: Dockerfile
@@ -8,6 +9,8 @@ services:
         BUILDER_BASE_IMAGE: ${BUILDER_BASE_IMAGE:-nvidia/cuda:12.2.0-devel-ubuntu22.04}
         RUNTIME_BASE_IMAGE: ${RUNTIME_BASE_IMAGE:-nvidia/cuda:12.2.0-runtime-ubuntu22.04}
         PYTHON_VERSION: ${PYTHON_VERSION:-3.11}
+        APP_UID: ${APP_UID:-10001}
+        APP_GID: ${APP_GID:-10001}
     command:
       - sh
       - -lc
@@ -30,6 +33,7 @@ services:
 
   ray-worker:
     image: infer-nexus:runtime
+    user: infer-nexus
     gpus: ${COMPOSE_GPU_REQUEST:-all}
     depends_on:
       ray-head:
@@ -67,7 +71,7 @@ services:
 
   serve-deployer:
     image: infer-nexus:runtime
-    gpus: ${COMPOSE_GPU_REQUEST:-all}
+    user: infer-nexus
     depends_on:
       ray-head:
         condition: service_healthy
@@ -89,6 +93,7 @@ services:
 
   gateway:
     image: infer-nexus:runtime
+    user: infer-nexus
     depends_on:
       serve-deployer:
         condition: service_completed_successfully

@@ -4,6 +4,9 @@ ARG BUILDER_BASE_IMAGE=nvidia/cuda:12.2.0-devel-ubuntu22.04
 ARG RUNTIME_BASE_IMAGE=nvidia/cuda:12.2.0-runtime-ubuntu22.04
 ARG PYTHON_VERSION=3.11
 ARG UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+ARG APP_USER=infer-nexus
+ARG APP_UID=10001
+ARG APP_GID=10001
 
 FROM ${BUILDER_BASE_IMAGE} AS builder
 
@@ -49,10 +52,19 @@ RUN uv venv .venv --python ${PYTHON_VERSION} \
 FROM ${RUNTIME_BASE_IMAGE} AS runtime
 
 ARG PYTHON_VERSION
+ARG APP_USER
+ARG APP_UID
+ARG APP_GID
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/app/src \
+    HOME=/home/${APP_USER} \
+    XDG_CACHE_HOME=/home/${APP_USER}/.cache \
+    HF_HOME=/home/${APP_USER}/.cache/huggingface \
+    VLLM_CACHE_ROOT=/home/${APP_USER}/.cache/vllm \
+    MODELSCOPE_CACHE=/home/${APP_USER}/.cache/modelscope \
+    RAY_TMPDIR=/tmp/ray \
     PATH=/app/.venv/bin:$PATH
 
 RUN sed -i 's/archive.ubuntu.com/mirrors.aliyun.com/g' /etc/apt/sources.list \
@@ -74,13 +86,20 @@ RUN sed -i 's/archive.ubuntu.com/mirrors.aliyun.com/g' /etc/apt/sources.list \
     && ln -sf /usr/lib/x86_64-linux-gnu/libcuda.so.1 /usr/lib/x86_64-linux-gnu/libcuda.so \
     && rm -rf /var/lib/apt/lists/*
 
+RUN groupadd --gid ${APP_GID} ${APP_USER} \
+    && useradd --uid ${APP_UID} --gid ${APP_GID} --create-home --home-dir /home/${APP_USER} --shell /usr/sbin/nologin ${APP_USER} \
+    && mkdir -p /app /models /tmp/ray /home/${APP_USER}/.cache/huggingface /home/${APP_USER}/.cache/modelscope /home/${APP_USER}/.cache/vllm \
+    && chown -R ${APP_UID}:${APP_GID} /app /models /tmp/ray /home/${APP_USER}
+
 WORKDIR /app
 
-COPY --from=builder /app/.venv /app/.venv
-COPY src ./src
-COPY config ./config
-COPY scripts ./scripts
-COPY docs ./docs
-COPY README.md ./README.md
+COPY --from=builder --chown=${APP_UID}:${APP_GID} /app/.venv /app/.venv
+COPY --chown=${APP_UID}:${APP_GID} src ./src
+COPY --chown=${APP_UID}:${APP_GID} config ./config
+COPY --chown=${APP_UID}:${APP_GID} scripts ./scripts
+COPY --chown=${APP_UID}:${APP_GID} docs ./docs
+COPY --chown=${APP_UID}:${APP_GID} README.md ./README.md
+
+USER ${APP_USER}
 
 EXPOSE 8000 8265

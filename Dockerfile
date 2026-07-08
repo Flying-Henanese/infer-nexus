@@ -44,10 +44,9 @@ RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
 WORKDIR /app
 
 COPY pyproject.toml uv.lock README.md ./
-COPY src ./src
 
 RUN uv venv .venv --python ${PYTHON_VERSION} \
-    && uv sync --frozen --preview-features extra-build-dependencies --extra serve --extra vllm --extra artifacts --no-dev --python .venv/bin/python
+    && uv sync --frozen --preview-features extra-build-dependencies --extra serve --extra vllm --extra artifacts --no-dev --no-install-project --python .venv/bin/python
 
 FROM ${RUNTIME_BASE_IMAGE} AS runtime
 
@@ -94,11 +93,6 @@ RUN groupadd --gid ${APP_GID} ${APP_USER} \
 WORKDIR /app
 
 COPY --from=builder --chown=${APP_UID}:${APP_GID} /app/.venv /app/.venv
-COPY --chown=${APP_UID}:${APP_GID} src ./src
-COPY --chown=${APP_UID}:${APP_GID} config ./config
-COPY --chown=${APP_UID}:${APP_GID} scripts ./scripts
-COPY --chown=${APP_UID}:${APP_GID} docs ./docs
-COPY --chown=${APP_UID}:${APP_GID} README.md ./README.md
 
 USER ${APP_USER}
 

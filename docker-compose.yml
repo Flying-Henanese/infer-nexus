@@ -70,6 +70,10 @@ services:
       CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-}
       RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES: ${RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES:-}
     volumes:
+      - ./src:/app/src:ro
+      - ./scripts:/app/scripts:ro
+      - ./docs:/app/docs:ro
+      - ./README.md:/app/README.md:ro
       - ./config:/app/config:ro
       - ${MODEL_STORE_HOST_PATH:-./models}:/models
       - ./.infer-nexus/logs:/app/.infer-nexus/logs
@@ -93,14 +97,25 @@ services:
       - sh
       - -lc
       - >
+        set -eu;
+        trap 'ray stop --force >/dev/null 2>&1 || true' EXIT;
         RAY_HEAD_IP=$$(python -c "import socket; print(socket.gethostbyname('ray-head'))");
         RAY_ADDRESS="$${INFER_NEXUS_RAY_ADDRESS:-$${RAY_HEAD_IP}:6379}";
+        ray start --address="$${RAY_ADDRESS}"
+        --node-ip-address=$$(hostname -i)
+        --num-cpus=0
+        --num-gpus=0
+        --disable-usage-stats;
         python scripts/run_serve_runtime.py
         --settings config/settings.compose.yaml
         --ray-address "$${RAY_ADDRESS}"
         --proxy-location Disabled
         --ready-timeout-seconds ${SERVE_READY_TIMEOUT_SECONDS:-900}
     volumes:
+      - ./src:/app/src:ro
+      - ./scripts:/app/scripts:ro
+      - ./docs:/app/docs:ro
+      - ./README.md:/app/README.md:ro
       - ./config:/app/config:ro
       - ${MODEL_STORE_HOST_PATH:-./models}:/models
       - ./.infer-nexus/logs:/app/.infer-nexus/logs
@@ -128,6 +143,10 @@ services:
     ports:
       - "8000:8000"
     volumes:
+      - ./src:/app/src:ro
+      - ./scripts:/app/scripts:ro
+      - ./docs:/app/docs:ro
+      - ./README.md:/app/README.md:ro
       - ./config:/app/config:ro
       - ${MODEL_STORE_HOST_PATH:-./models}:/models
       - ./.infer-nexus/logs:/app/.infer-nexus/logs

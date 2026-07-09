@@ -29,6 +29,7 @@ Current enabled models are local `backend: vllm` entries. Do not assume that pro
 - `vllm.request_defaults` holds default request values.
 - `vllm.request_policy` controls allowed OpenAI-style fields.
 - `vllm.openai_serving` controls native vLLM OpenAI serving adapter behavior.
+- `deployment_config.request_router_config` holds Ray Serve request-router options. Cache affinity is configured here, for example `request_router_class: ray.serve.llm.request_router.PrefixCacheAffinityRouter`.
 - `proxy_config` is only for `backend: vllm_openai_proxy`.
 
 ## Current Non-Goals

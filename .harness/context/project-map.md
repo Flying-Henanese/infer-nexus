@@ -10,6 +10,8 @@ Use this file to choose the first source files to inspect. It is a navigation ma
 - `tests/`: unit, API, dispatcher, runtime, benchmark, and smoke-test coverage.
 - `docs/`: long-form architecture, operations, monitoring, and historical design notes.
 - `monitoring/`: Prometheus example configuration.
+- `dockerfile`: root container runtime image definition for the current Compose flow.
+- `docker-compose.yml`: root containerized runtime topology.
 - `.harness/`: Codex collaboration context, plans, checklists, and run summaries.
 
 ## Application Package
@@ -79,11 +81,24 @@ Use this file to choose the first source files to inspect. It is a navigation ma
 ## Configuration
 
 - `config/settings.yaml`
-  - Service, catalog path, scheduler, runtime mode, gateway guard, model store, and cluster settings.
+  - Default service, catalog path, scheduler, runtime mode, gateway guard, model store, and cluster settings.
+
+- `config/settings.compose.yaml`
+  - Root Compose settings entrypoint used by `serve-deployer` and `gateway`.
 
 - `config/models.yaml`
   - Active model catalog.
   - Current enabled entries are local `backend: vllm` models unless changed in this file.
+  - Ray Serve request-router options, including cache-affinity router class settings, belong under each model's `deployment_config.request_router_config`.
+
+## Container Runtime
+
+- `docker-compose.yml`
+  - Defines `ray-head`, `ray-worker`, one-shot `serve-deployer`, and long-running `gateway`.
+  - Compose owns container lifecycle; Ray Serve owns deployment and replica lifecycle after apps are submitted.
+
+- `dockerfile`
+  - Builds the shared runtime image. Keep platform-specific dependency choices in image/build settings rather than request-path code.
 
 ## Scripts
 
@@ -100,7 +115,7 @@ Use this file to choose the first source files to inspect. It is a navigation ma
   - Inspects Ray Serve and vLLM metric visibility from Prometheus or raw metrics endpoints.
 
 - `scripts/environment_check/`
-  - CUDA and Ascend dependency checks/install helpers for performance monitoring environments.
+  - Accelerator dependency checks/install helpers for performance monitoring environments.
 
 ## Tests
 

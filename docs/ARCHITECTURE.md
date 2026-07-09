@@ -9,7 +9,7 @@ The project uses:
 - `uv` for dependency and environment management
 - `Ray Serve` for deployment lifecycle, routing, and autoscaling support
 - `vLLM` as the local runtime backend
-- CUDA GPU and Huawei Ascend NPU as supported accelerator platforms
+- accelerator-backed local runtime through deployment-provided platform configuration
 - OpenAI-compatible upstream proxying for compatibility-sensitive models
 - OpenAI-compatible northbound APIs for client compatibility
 
@@ -78,7 +78,7 @@ Not implemented:
 
 4. Shared accelerator pool
    - All locally hosted model services use the same accelerator pool.
-   - CUDA GPU and Ascend NPU are selected at the platform configuration layer.
+   - Accelerator platform details are selected at the image, Compose/service, and settings layer.
    - No user-level hardware reservation or hard partitioning in Phase 1.
 
 5. Warm replicas for low-frequency large models
@@ -101,7 +101,7 @@ Client
           -> Backend Dispatch per Model
               -> vllm_openai_proxy -> Upstream vLLM/OpenAI-compatible server
               -> vllm (local) -> Ray Serve Deployments -> replica-local vLLM Runtime
-                 -> CUDA GPU or Ascend NPU resource pool
+                 -> shared accelerator resource pool
           -> Load Inspector
           -> Scaling Policy
 ```
@@ -248,7 +248,7 @@ graph TD
 #### Ray Serve Runtime
 - Owns deployment lifecycle and replica management
 - Handles internal routing to replicas
-- Maps per-replica accelerator demand to CUDA `num_gpus` or Ray custom `NPU` resources based on platform configuration
+- Maps per-replica accelerator demand to Ray actor resource options based on platform configuration
 - Exposes runtime and deployment metrics through Prometheus-compatible endpoints
 
 #### vLLM Backend
@@ -271,8 +271,7 @@ graph TD
 - Keeps rerank local-best-effort only in the current implementation;
   `vllm_native` rerank is rejected because vLLM rerank serving protocols are not
   OpenAI-compatible
-- Supports the same backend abstraction on CUDA and Ascend environments; Ascend
-  deployments rely on the environment-provided `vllm-ascend` runtime stack
+- Supports the same backend abstraction across accelerator platforms; platform-specific runtime stacks are provided by the selected deployment environment
 
 #### OpenAI Proxy Backend
 - Preserves northbound SDK compatibility (`base_url + model`)
@@ -308,16 +307,16 @@ Rationale:
 For proxy-backed models, the gateway routes to one explicitly configured upstream endpoint per model. The gateway does not own an upstream replica pool in this phase.
 
 ### 4.3 Accelerator resource model
-All locally hosted models share one accelerator pool. In CUDA environments this
-pool is exposed to Ray as GPUs. In Ascend environments this pool is exposed to
-Ray as custom `NPU` resources.
+All locally hosted models share one accelerator pool. The way that pool is
+exposed to Ray is a deployment configuration concern, not a request-path or
+backend-control-flow concern.
 
 Rationale:
 - Matches the current internal environment
 - Keeps scheduling and operations simple
 - Maximizes hardware sharing in development and testing
-- Keeps model configuration portable across CUDA and Ascend by treating
-  `gpu_per_replica` as logical accelerator demand
+- Keeps model configuration portable by treating `gpu_per_replica` as logical
+  accelerator demand
 
 Constraint:
 - Resource admission must avoid accepting traffic the cluster cannot serve reasonably
@@ -329,52 +328,37 @@ The platform must distinguish between two separate concerns:
 1. Resource pool boundary
    - Defines how much accelerator capacity is assigned to the entire `infer-nexus` platform
    - This is set at the Ray node or cluster process boundary
-   - Example: make only 4 A100 GPUs or 4 Ascend NPUs visible to the Ray runtime used by `infer-nexus`
+   - Example: make only the intended subset of accelerator devices visible to the Ray runtime used by `infer-nexus`
 
 2. Deployment resource requests
    - Defines how much of that shared pool each deployment replica consumes
-   - This is expressed through Ray or Ray Serve resource requirements such as GPU count per replica or custom NPU resources
+   - This is expressed through Ray or Ray Serve resource requirements for each replica
    - This does not bind a deployment to specific device IDs ahead of time
 
 Phase 1 should implement platform-level pooling, not static per-deployment device pinning.
 
-#### Recommended CUDA pattern
-For CUDA environments, the recommended pattern is:
-- limit the GPUs visible to the Ray node that runs `infer-nexus`
-- start Ray with a matching GPU resource count
-- let Ray Serve schedule replicas inside that bounded pool
+#### Current containerized accelerator boundary
+The application architecture should remain platform-neutral. Accelerator-specific
+behavior belongs at the deployment configuration layer: the container image,
+Compose service settings, runtime environment variables, and `config/settings*.yaml`.
 
-Conceptually:
-- `CUDA_VISIBLE_DEVICES=0,1,2,3` defines the total GPU pool visible to `infer-nexus`
-- Ray then treats that pool as 4 schedulable GPU resources
-- a deployment with `num_gpus=1` consumes one unit from the pool
-- a deployment with `num_gpus=4` consumes the full pool
+The current root `dockerfile` and `docker-compose.yml` describe the default
+containerized runtime path:
+- `dockerfile` builds a shared runtime image from configurable base image args,
+  with CUDA base images as the checked-in defaults.
+- `docker-compose.yml` defines `ray-head`, `ray-worker`, one-shot
+  `serve-deployer`, and long-running `gateway` services.
+- `config/settings.compose.yaml` is the Compose settings entrypoint.
+- `ray-worker` derives the Ray accelerator budget from `CUDA_VISIBLE_DEVICES`
+  and starts Ray with the matching `--num-gpus` value.
+- `serve-deployer` and `gateway` run with `--num-gpus=0`; they connect to the
+  Ray cluster and do not own accelerator scheduling.
+- The runtime image carries the Python environment, while source files,
+  configuration, docs, and model storage are mounted into the containers.
 
-This means `CUDA_VISIBLE_DEVICES` is still useful, but only to define the platform resource boundary. It should not be used as a per-model or per-deployment static binding mechanism.
-
-#### Recommended Ascend pattern
-For Ascend environments, the same principle applies, with NPU-specific resource
-mapping:
-- set `cluster.inference_device_type: npu` in `config/settings.yaml`
-- define the visible NPU set through `ASCEND_RT_VISIBLE_DEVICES`
-- start Ray with a matching custom resource declaration such as
-  `--resources '{"NPU": 4}'`
-- let Ray Serve schedule replicas by consuming `resources: {"NPU": gpu_per_replica}`
-
-Current implementation details:
-- `DeploymentFactory(inference_device_type="npu")` maps the model's
-  `gpu_per_replica` value to Ray actor options `resources: {"NPU": ...}`
-  instead of CUDA `num_gpus`
-- `scripts/start_minimal_ascend.sh` performs minimal Ascend bootstrap,
-  exports `ASCEND_RT_VISIBLE_DEVICES`, sets
-  `RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1`, starts a Ray head with
-  custom `NPU` resources when needed, then deploys Serve and the gateway
-- `pyproject.ascend.toml`, `dockerfile`, and `docker-compose.yml` describe the
-  current Ascend container path, including reliance on a Huawei-provided
-  Ascend Docker image that already includes the validated CANN / `torch-npu` /
-  `vllm` / `vllm-ascend` / Ray runtime stack
-
-If additional backend-specific environment handling is required for `vllm-ascend`, that logic should remain an implementation detail of the backend integration layer rather than a manual per-deployment operational step.
+The same program logic should be usable with another accelerator platform by
+changing the image, Compose/service wiring, and settings files, not by adding
+separate request, catalog, dispatcher, or backend control flow.
 
 #### Design rule
 The architecture should follow these rules:
@@ -386,7 +370,7 @@ The architecture should follow these rules:
 This separation is necessary to preserve shared-pool scheduling and avoid falling back to manual device partitioning.
 
 #### Operational caveat observed in current implementation
-- With fractional CUDA `num_gpus` or fractional custom `NPU` resources such as `0.3` or `0.6`, Ray may co-locate multiple model replicas on one physical accelerator.
+- With fractional accelerator requests such as `0.3` or `0.6`, Ray may co-locate multiple model replicas on one physical accelerator.
 - In this mode, deployments can still fail with vLLM KV cache initialization errors even when catalog config is valid.
 - For stability-first bring-up, prefer one-replica-per-device (`gpu_per_replica=1`) before reintroducing fractional sharing.
 
@@ -399,8 +383,9 @@ Current implementation supports two backends:
 Rationale:
 - `vllm`: good fit when local runtime control and resource ownership are needed
 - `vllm_openai_proxy`: highest compatibility with official upstream server behavior
-- Ascend support is handled as a platform/runtime variant of the local `vllm`
-  backend, not as a separate northbound backend type
+- Platform-specific runtime support is handled by the selected container image,
+  Compose wiring, settings, and local `vllm` runtime stack, not as a separate
+  northbound backend type
 
 Implementation notes:
 - Keep backend abstraction thin to avoid hard-coupling gateway logic to one runtime.
@@ -446,14 +431,16 @@ Implementation notes:
   OpenAI-compatible requests to a Ray Serve LLM application, preserving the
   current control-plane boundary while delegating vLLM protocol fidelity to Ray
   Serve LLM.
-- The current implementation does not use `build_openai_app`. It does, however,
-  support using Ray Serve LLM's `PrefixCacheAffinityRouter` through
-  `deployment_config.request_router_config` for local vLLM chat deployments.
-  This is a deployment-router integration inside the existing custom gateway and
-  Serve deployment path, not adoption of Ray Serve LLM's stock OpenAI ingress.
-- On Ascend, the backend assumes the Huawei-provided runtime image has already
-  installed and validated CANN, `torch-npu`, `vllm`, `vllm-ascend`, and Ray.
-  The application code should avoid replacing those packages during startup.
+- The current implementation does not use `build_openai_app`. It supports cache
+  affinity by passing Ray Serve deployment router configuration from
+  `config/models.yaml`, for example
+  `deployment_config.request_router_config.request_router_class:
+  ray.serve.llm.request_router.PrefixCacheAffinityRouter`. This is a
+  deployment-router integration inside the existing custom gateway and Serve
+  deployment path, not adoption of Ray Serve LLM's stock OpenAI ingress.
+- The application code should not install, replace, or mutate low-level
+  accelerator runtime packages during startup. Those dependencies belong to the
+  selected container image and environment.
 - Header forwarding policy should remain explicit and model-scoped.
 - If `forward_authorization` is enabled for a proxy model, the gateway should forward the inbound client `Authorization` header to the configured upstream service (`待实现`).
 - If proxy auth is also configured through static or environment-derived bearer tokens, precedence rules must be defined explicitly before enabling `forward_authorization` (`待实现`).
@@ -702,7 +689,6 @@ Recommended initial files:
 - `config/settings.yaml`
 - `config/models.yaml`
 - `pyproject.toml` for the default development/runtime dependency set
-- `pyproject.ascend.toml` for the Ascend container dependency boundary
 
 ## 9.1 Local Model Store and Offline Registration
 
@@ -771,44 +757,40 @@ Current implementation note:
 - `vllm_native` chat currently requires `vllm.openai_serving.enabled: true`
   because the replica constructs vLLM OpenAI chat serving objects inside the
   existing Ray Serve replica rather than starting a separate HTTP server
-- platform accelerator selection is configured in `config/settings.yaml` through
-  `cluster.inference_device_type`, currently `cuda` or `npu`
-- on `cuda`, Serve deployments request Ray CUDA resources through `num_gpus`
-- on `npu`, Serve deployments request Ray custom resources through
-  `resources: {"NPU": gpu_per_replica}`; the Ray cluster must be started with a
-  matching custom `NPU` resource budget
+- platform accelerator selection is configured outside request-handling code,
+  primarily through the selected container image, Compose service wiring,
+  environment variables, and `config/settings*.yaml`
+- in the current root Compose path, Serve deployments request Ray accelerator
+  resources through `num_gpus`; the Ray worker process derives the available
+  accelerator budget from `CUDA_VISIBLE_DEVICES`
 
-### 9.2 Ascend Runtime Packaging
+### 9.2 Container Runtime Packaging
 
-Ascend support is intentionally packaged as a platform-specific runtime
-environment rather than a separate application architecture. The current
-implementation uses a Huawei-provided Ascend Docker image as the runtime base;
-that image already contains the NPU runtime stack and core inference/serving
-components such as `torch-npu`, `vllm`, `vllm-ascend`, and Ray.
+Platform-specific runtime dependencies are intentionally packaged outside the
+application control flow. The current root container path uses a shared runtime
+image for `gateway`, `ray-head`, `ray-worker`, and `serve-deployer`, with service
+roles selected by Compose commands and settings.
 
-Current files:
-- `pyproject.ascend.toml` constrains packages that are expected to be provided
-  by the Huawei Ascend base image, including `torch-npu`, `vllm`, `vllm-ascend`,
-  and Ray
-- `dockerfile` builds from the current Huawei Ascend base image and syncs the project
-  using the Ascend pyproject
-- `docker-compose.yml` mounts Ascend device nodes, driver/tooling paths, model
-  storage, and the working tree into the container
-- `scripts/start_minimal_ascend.sh` starts the minimal Ray Serve plus gateway
-  flow on Ascend NPU
+Current root files:
+- `dockerfile` builds from configurable builder/runtime base images; the checked-in
+  defaults are CUDA base images and the image contains the Python environment
+  under `/app/.venv`
+- `docker-compose.yml` starts `ray-head`, `ray-worker`, one-shot
+  `serve-deployer`, and long-running `gateway`
+- `config/settings.compose.yaml` is the Compose settings file used by both
+  `serve-deployer` and `gateway`
+- `docker-compose.yml` mounts model storage and the working tree content needed
+  by the runtime containers; the image itself keeps dependencies, not a baked
+  copy of the application source
 
 Operational assumptions:
-- CANN, device drivers, runtime libraries, and `npu-smi` are provided by the
-  host/container environment before `infer-nexus` starts
-- the service does not install or mutate the NPU runtime stack at application
-  startup
-- cross-platform code behavior is selected by configuration, primarily
-  `cluster.inference_device_type` in `config/settings.yaml`; model-serving code
-  should not require separate CUDA-only or Ascend-only request paths
-- `ASCEND_RT_VISIBLE_DEVICES` defines the NPU visibility boundary for the
-  platform process
-- Ray custom `NPU` resources must match the accelerator budget intended for
-  `infer-nexus`
+- the selected image and host runtime provide the accelerator driver/tooling
+  stack before `infer-nexus` starts
+- the service does not install or mutate low-level accelerator runtime packages
+  at application startup
+- platform-specific behavior should be expressed in deployment files and
+  settings, while model-serving code remains shared
+- `serve-deployer` and Ray Serve replicas must see consistent model paths
 
 ### Runtime implications
 At runtime, `infer-nexus` should:
@@ -1126,7 +1108,6 @@ config/
 docker-compose.yml
 dockerfile
 pyproject.toml
-pyproject.ascend.toml
 tests/
 scripts/
   run_gateway.py
@@ -1170,23 +1151,10 @@ Phase 1 should implement only the minimum platform needed to replace ad hoc pers
 
 The following should remain possible without architectural rework:
 - controlled dynamic registration
-- deeper Ascend runtime hardening, including more explicit NPU health and
+- deeper accelerator runtime hardening, including more explicit health and
   capacity reporting
 - richer rerank and multimodal support
 - stronger quota and rate-limit controls
 - admin APIs for model lifecycle operations
 - a thin internal UI built on top of native APIs
 - convergence from the current two-process startup shape toward a single operator-facing startup flow while preserving one external API entrypoint
-
-## 19. Recommended Next Step
-
-The next implementation artifact should be a repository scaffold that matches this architecture but keeps Phase 1 scope disciplined.
-
-Recommended immediate deliverables:
-1. project skeleton with `uv`
-2. config schema and model catalog loader
-3. FastAPI gateway with placeholder OpenAI-compatible routes
-4. Ray Serve integration skeleton
-5. admission and metrics interfaces
-
-This keeps the first coding step aligned with the intended runtime architecture instead of drifting into ad hoc service assembly.

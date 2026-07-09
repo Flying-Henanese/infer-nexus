@@ -32,17 +32,32 @@ Proxy models use `backend: vllm_openai_proxy` and are forwarded to an upstream O
 
 ## Startup And State
 
-- `src/infer_nexus/main.py` loads `config/settings.yaml`.
+- `src/infer_nexus/main.py` loads the selected settings file, usually `config/settings.yaml` locally or `config/settings.compose.yaml` under the root Compose flow.
 - The catalog is loaded from one configured YAML file, currently `config/models.yaml`.
 - `ModelRegistry`, `LocalModelStore`, `ServeApplicationBuilder`, `RuntimeExecutor`, `WorkerAdmissionController`, and `RuntimeDispatcher` are attached to `app.state`.
 - Platform APIs are currently read-only catalog/status/load/capacity views.
 - `control/reconciler.py` exists only as a skeleton.
+
+## Containerized Runtime Shape
+
+The root `docker-compose.yml` is the current containerized runtime entrypoint:
+
+```text
+client
+-> gateway container
+-> Ray Serve deployment handle
+-> Ray Serve replica in ray-worker
+-> replica-local vLLM runtime
+```
+
+Compose owns container lifecycle for `ray-head`, `ray-worker`, one-shot `serve-deployer`, and long-running `gateway`. Ray Serve owns local deployment and replica lifecycle after `serve-deployer` submits the applications. Platform-specific accelerator details should stay in Docker image, Compose, environment, and settings files, not in request-path code.
 
 ## Current Control Boundaries
 
 - `infer-nexus` owns public HTTP ingress, model lookup, request validation, admission checks, proxying, and app-level metrics.
 - Ray Serve owns local deployment lifecycle, replica placement, replica routing, and Serve-level metrics.
 - vLLM owns replica-local model execution for local models.
+- Cache affinity, when enabled, is configured through `config/models.yaml` deployment router settings such as `deployment_config.request_router_config.request_router_class`.
 - Upstream OpenAI-compatible servers own protocol behavior for proxy models.
 
 ## Implemented Runtime Protections
@@ -57,6 +72,6 @@ Do not treat these as current architecture:
 
 - dynamic model registration
 - multi-node placement/control plane
-- automatic heterogeneous hardware scheduling
-- prefix-cache sticky routing as an active production direction
+- automatic heterogeneous hardware scheduling in application logic
+- gateway-owned prefix-cache sticky routing
 

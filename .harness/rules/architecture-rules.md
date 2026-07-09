@@ -37,16 +37,15 @@ The platform uses one shared accelerator pool.
 Implications:
 - the pool boundary is defined at the Ray runtime boundary, not inside individual model configs
 - model configs describe resource demand per replica, not fixed device IDs
-- do not implement static `CUDA_VISIBLE_DEVICES` assignment per model or deployment
+- do not implement static accelerator-device assignment per model or deployment
 
 ### 4. Platform-level pool boundary
-For CUDA, treat `CUDA_VISIBLE_DEVICES` as a mechanism for defining the overall `infer-nexus` pool visible to Ray, not as a mechanism for manual model pinning.
-
-For Ascend, follow the same principle with the relevant accelerator visibility controls.
+Treat platform visibility controls as mechanisms for defining the overall `infer-nexus` accelerator pool visible to Ray, not as mechanisms for manual model pinning.
 
 Implementation rule:
-- pool boundary belongs to deployment or ops startup configuration
+- pool boundary belongs to container image, Compose/service wiring, settings, or ops startup configuration
 - per-replica resource demand belongs to model configuration and Ray Serve deployment settings
+- application request, catalog, dispatcher, and backend control flow should remain platform-neutral
 
 ### 5. OpenAI-compatible northbound APIs
 Northbound APIs must prefer OpenAI-compatible request and response shapes for model inference.
@@ -110,4 +109,4 @@ execution semantics, read docs/inference_backend_design.md first.
 Implementation rule:
 - keep a thin backend abstraction layer
 - isolate engine-specific startup and request adaptation logic
-- keep the future path open for `vllm-ascend`
+- keep platform-specific runtime dependencies in deployment packaging and settings

@@ -31,7 +31,11 @@ against source before changing code.
   - Current runbook for gateway metrics plus Ray Serve hosted vLLM monitoring.
 
 - `docs/DEPLOYMENT_CHECKLIST.md`
-  - Current deployment bring-up checklist, especially for CUDA/Ray Serve validation.
+  - Current deployment bring-up checklist for Ray Serve validation.
+
+- `docs/DOCKER_COMPOSE_RUNTIME_SPLIT_PLAN.md`
+  - Current reference for the root Compose container lifecycle split.
+  - Use for `gateway`, `ray-head`, `ray-worker`, `serve-deployer`, `dockerfile`, `docker-compose.yml`, and `config/settings.compose.yaml` questions.
 
 ## Current But Narrow
 
@@ -46,6 +50,7 @@ against source before changing code.
 - `docs/PREFIX_CACHE_STICKY_DESIGN.md`
   - Current narrow reference for the prefix-cache affinity design position.
   - Use when discussing why cache locality should be handled through Ray Serve replica-level routing instead of gateway-owned session stickiness.
+  - The supported configuration entrypoint is `config/models.yaml` under `deployment_config.request_router_config`, for example `request_router_class: ray.serve.llm.request_router.PrefixCacheAffinityRouter`.
   - Treat runtime benefit and payload-shape compatibility as environment-dependent; verify against the active Ray Serve version and request path.
 
 ## Future Design Only

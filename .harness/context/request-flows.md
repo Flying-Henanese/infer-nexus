@@ -5,18 +5,26 @@ Use this file to orient yourself before tracing request behavior. Verify details
 ## App Startup
 
 1. `scripts/run_gateway.py` starts the FastAPI app from `src/infer_nexus/main.py`.
-2. `lifespan()` loads `config/settings.yaml`.
+2. `lifespan()` loads the selected settings file, usually `config/settings.yaml` locally or `config/settings.compose.yaml` in the root Compose flow.
 3. `load_model_catalog(settings.catalog.models_path)` loads `config/models.yaml`.
 4. `ModelRegistry` indexes model names, aliases, and served model names.
 5. `LocalModelStore`, `ServeApplicationBuilder`, `RuntimeExecutor`, `WorkerAdmissionController`, and `RuntimeDispatcher` are created.
 6. These objects are attached to `app.state`.
 7. `create_app()` registers health, metrics, OpenAI-compatible, compatibility, and platform routers.
 
+## Compose Runtime Startup
+
+1. `docker-compose.yml` starts `ray-head`.
+2. `ray-worker` joins the Ray cluster and registers the accelerator budget exposed by the Compose/runtime environment.
+3. `serve-deployer` runs `scripts/run_serve_runtime.py --settings config/settings.compose.yaml`, submits Ray Serve apps, waits for readiness, and exits.
+4. `gateway` runs `scripts/run_gateway.py --settings config/settings.compose.yaml` and serves the public API.
+5. The gateway reaches local models through cached Ray Serve deployment handles.
+
 ## Serve Runtime Startup
 
 1. `scripts/run_serve_runtime.py` loads settings and the model catalog.
 2. `ServeApplicationBuilder.build_serve_bindings()` builds one Ray Serve application binding per local `backend: vllm` model.
-3. `DeploymentFactory` maps each model to deployment kwargs and Ray actor options.
+3. `DeploymentFactory` maps each model to deployment kwargs and Ray actor options, including optional `deployment_config.request_router_config` such as a cache-affinity `request_router_class`.
 4. Each Ray Serve app is submitted with `serve.run(..., route_prefix=None, blocking=False)`.
 5. The script waits for Serve applications to become ready.
 6. The gateway later reaches these apps through cached deployment handles.

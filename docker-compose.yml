@@ -39,7 +39,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              count: ${COMPOSE_GPU_REQUEST:-all}
+              count: all
               capabilities: [gpu]
     depends_on:
       ray-head:
@@ -49,13 +49,16 @@ services:
       - -lc
       - >
         set -eu;
-        RESOURCE_ARGS="";
-        if [ -n "$${RAY_WORKER_NUM_GPUS:-}" ]; then
-          RESOURCE_ARGS="$$RESOURCE_ARGS --num-gpus=$${RAY_WORKER_NUM_GPUS}";
+        if [ -z "$${CUDA_VISIBLE_DEVICES:-}" ]; then
+          echo "CUDA_VISIBLE_DEVICES must define the infer-nexus GPU pool, for example: 0,1,2,3." >&2;
+          exit 1;
         fi;
-        if [ -n "$${RAY_WORKER_RESOURCES:-}" ]; then
-          RESOURCE_ARGS="$$RESOURCE_ARGS --resources=$${RAY_WORKER_RESOURCES}";
+        DERIVED_NUM_GPUS=$$(python -c "import os; v=os.environ.get('CUDA_VISIBLE_DEVICES',''); print(len([x for x in v.split(',') if x.strip()]))");
+        if [ "$${DERIVED_NUM_GPUS}" -le 0 ]; then
+          echo "CUDA_VISIBLE_DEVICES must contain at least one device id." >&2;
+          exit 1;
         fi;
+        RESOURCE_ARGS="--num-gpus=$${DERIVED_NUM_GPUS}";
         RAY_HEAD_IP=$$(python -c "import socket; print(socket.gethostbyname('ray-head'))");
         RAY_ADDRESS="$${RAY_HEAD_IP}:6379";
         ray start --address="$${RAY_ADDRESS}"
@@ -64,11 +67,7 @@ services:
         $$RESOURCE_ARGS
         --block
     environment:
-      RAY_WORKER_NUM_GPUS: ${RAY_WORKER_NUM_GPUS:-1}
-      RAY_WORKER_RESOURCES: ${RAY_WORKER_RESOURCES:-}
-      ASCEND_RT_VISIBLE_DEVICES: ${ASCEND_RT_VISIBLE_DEVICES:-}
-      CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-}
-      RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES: ${RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES:-}
+      CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:?CUDA_VISIBLE_DEVICES must define the infer-nexus GPU pool}
     volumes:
       - ./src:/app/src:ro
       - ./scripts:/app/scripts:ro

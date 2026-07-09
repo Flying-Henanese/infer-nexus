@@ -38,8 +38,7 @@ PROXY_LOCATION="Disabled"
 INSTALL=1
 RELOAD=0
 GATEWAY_WORKERS=""
-CUDA_VISIBLE_DEVICES_VALUE="0,1,2,3"
-NUM_GPUS="4"
+CUDA_VISIBLE_DEVICES_VALUE="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 RAY_BIN="${RAY_BIN:-ray}"
 UV_BIN="${UV_BIN:-uv}"
@@ -53,7 +52,6 @@ Options:
   --no-install               Skip dependency sync before startup
   --install-artifacts        Also install the optional artifacts extra
   --ray-address ADDR         Ray address passed to the Serve runtime launcher
-  --num-gpus N               GPU count for a locally started Ray head
   --cuda-visible-devices CSV Export CUDA_VISIBLE_DEVICES before starting Ray/runtime
   --proxy-location VALUE     Ray Serve proxy location setting
   --gateway-workers N        Gateway worker process count (default: settings.service.workers)
@@ -61,10 +59,11 @@ Options:
   -h, --help                 Show this help
 
 Examples:
-  scripts/start_minimal.sh --cuda-visible-devices 0,1,2,3 --num-gpus 4
+  scripts/start_minimal.sh --cuda-visible-devices 0,1,2,3
   scripts/start_minimal.sh --no-install --ray-address auto
 
 Environment overrides:
+  CUDA_VISIBLE_DEVICES=0,1,2,3  GPU pool boundary; Ray GPU count is derived from this list
   PYTHON_BIN=/path/to/python  Python interpreter for gateway and Serve runtime
   RAY_BIN=/path/to/ray        Ray CLI used for `ray status` and `ray start`
   UV_BIN=/path/to/uv          uv binary used only for optional dependency sync
@@ -86,8 +85,10 @@ while [[ $# -gt 0 ]]; do
     --install-artifacts) INSTALL_ARTIFACTS=1; shift;;
     # Override the Ray address passed into the runtime launcher.
     --ray-address) RAY_ADDRESS="$2"; shift 2;;
-    # Set the GPU count for a locally spawned Ray head.
-    --num-gpus) NUM_GPUS="$2"; shift 2;;
+    --num-gpus)
+      echo "--num-gpus is no longer supported. Set --cuda-visible-devices or CUDA_VISIBLE_DEVICES instead." >&2
+      exit 2
+      ;;
     # Export CUDA_VISIBLE_DEVICES before Ray starts so both Ray and the
     # runtime see the same GPU subset.
     --cuda-visible-devices) CUDA_VISIBLE_DEVICES_VALUE="$2"; shift 2;;
@@ -119,6 +120,31 @@ cd "${ROOT_DIR}"
 # This keeps the Ray head, Serve runtime, and gateway aligned on the same device set.
 if [[ -n "${CUDA_VISIBLE_DEVICES_VALUE}" ]]; then
   export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES_VALUE}"
+fi
+
+count_csv_items() {
+  local value="$1"
+  local count=0
+  local item
+  IFS=',' read -ra items <<<"${value}"
+  for item in "${items[@]}"; do
+    item="${item//[[:space:]]/}"
+    if [[ -n "${item}" ]]; then
+      count=$((count + 1))
+    fi
+  done
+  printf '%s\n' "${count}"
+}
+
+if [[ -z "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+  echo "CUDA_VISIBLE_DEVICES must define the infer-nexus GPU pool, for example: 0,1,2,3." >&2
+  exit 1
+fi
+
+NUM_GPUS="$(count_csv_items "${CUDA_VISIBLE_DEVICES}")"
+if [[ "${NUM_GPUS}" -le 0 ]]; then
+  echo "CUDA_VISIBLE_DEVICES must contain at least one device id." >&2
+  exit 1
 fi
 
 # Optionally sync the project environment before startup.
@@ -171,9 +197,7 @@ EOF
   # Build the `ray start` argument list incrementally so we only pass flags
   # that are relevant for this invocation.
   local args=(start --head --disable-usage-stats)
-  if [[ -n "${NUM_GPUS}" ]]; then
-    args+=(--num-gpus "${NUM_GPUS}")
-  fi
+  args+=(--num-gpus "${NUM_GPUS}")
 
   # Ray prints useful diagnostics during startup; capture them in the Ray log.
   # Note: Ray daemonizes, so the command itself returns quickly after spawn.

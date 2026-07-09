@@ -99,16 +99,13 @@ RUNTIME_BASE_IMAGE=nvidia/cuda:12.2.0-runtime-ubuntu22.04
 PYTHON_VERSION=3.11
 APP_UID=10001
 APP_GID=10001
-COMPOSE_GPU_REQUEST=all
+CUDA_VISIBLE_DEVICES=0,1,2,3
 INFER_NEXUS_RAY_ADDRESS=ray-head:6379
 MODEL_STORE_HOST_PATH=/data/models
 GATEWAY_WORKERS=2
-RAY_WORKER_NUM_GPUS=1
-RAY_WORKER_RESOURCES={"NPU": 1}
-ASCEND_RT_VISIBLE_DEVICES=0,1
 ```
 
-Containers run as the `infer-nexus` non-root user created in the image. Make sure mounted host paths such as `MODEL_STORE_HOST_PATH` are readable, and writable if runtime artifact downloads are expected, by UID/GID `10001:10001` or the overridden `APP_UID`/`APP_GID`. CUDA Compose runs require NVIDIA Container Toolkit on the host so Docker can mount the driver into `ray-worker`. Set only the accelerator variables that match the target runtime. Compose defines the visible accelerator pool; per-model replica resource requirements still belong in `config/models.yaml`.
+Containers run as the `infer-nexus` non-root user created in the image. Make sure mounted host paths such as `MODEL_STORE_HOST_PATH` are readable, and writable if runtime artifact downloads are expected, by UID/GID `10001:10001` or the overridden `APP_UID`/`APP_GID`. CUDA Compose runs require NVIDIA Container Toolkit on the host so Docker can mount the driver into `ray-worker`. `CUDA_VISIBLE_DEVICES` defines the visible accelerator pool; per-model replica resource requirements still belong in `config/models.yaml`.
 
 
 For development, layer the dev override on top of the base Compose file so source and script edits are visible without rebuilding the image:

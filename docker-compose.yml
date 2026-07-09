@@ -131,8 +131,15 @@ services:
       - sh
       - -lc
       - >
+        set -eu;
+        trap 'ray stop --force >/dev/null 2>&1 || true' EXIT;
         RAY_HEAD_IP=$$(python -c "import socket; print(socket.gethostbyname('ray-head'))");
         export INFER_NEXUS_RAY_ADDRESS="$${INFER_NEXUS_RAY_ADDRESS:-$${RAY_HEAD_IP}:6379}";
+        ray start --address="$${INFER_NEXUS_RAY_ADDRESS}"
+        --node-ip-address=$$(hostname -i)
+        --num-cpus=0
+        --num-gpus=0
+        --disable-usage-stats;
         python scripts/run_gateway.py
         --settings config/settings.compose.yaml
         --host 0.0.0.0

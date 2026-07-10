@@ -1,23 +1,34 @@
-# 基础镜像：mineru:npu-latest，由docker load 命令导入
-# 导入所用的 tar 包来源于 https://atomgit.com/Ascend-SACT/Mineru-Optimization.git 仓库中的镜像mineru-ascend.tar
-FROM mineru:npu-latest
+# syntax=docker/dockerfile:1
 
-# 设置工作目录
-WORKDIR /app
+# 基础镜像：默认 mineru:npu-latest，由 docker load 命令导入。
+# 导入所用的 tar 包来源于 https://atomgit.com/Ascend-SACT/Mineru-Optimization.git 仓库中的镜像 mineru-ascend.tar。
+# 如果部署侧换成 vLLM 官方昇腾镜像，可以通过 ASCEND_BASE_IMAGE 覆盖；镜像内自带的 Python / torch / vLLM / vLLM-Ascend 栈必须保持不被覆盖。
+ARG ASCEND_BASE_IMAGE=mineru:npu-latest
+ARG UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+ARG APP_USER=infer-nexus
+ARG APP_UID=10001
+ARG APP_GID=10001
 
-# 配置 uv 使用阿里云镜像源，加速依赖安装过程
-ENV UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+FROM ${ASCEND_BASE_IMAGE} AS runtime
 
-RUN pip install --no-cache-dir uv -i https://mirrors.aliyun.com/pypi/simple/
+ARG UV_INDEX_URL
+ARG APP_USER
+ARG APP_UID
+ARG APP_GID
 
-# 本地的 pyproject.ascend.toml 复制到容器内并重命名为 pyproject.toml
-COPY pyproject.ascend.toml ./pyproject.toml
-# 满足UV安装依赖时需要的 README.md 文件
-COPY README.md ./README.md
-
-# 使用 uv 安装依赖
-
-RUN uv pip install --system --no-cache .
+# 使用基础镜像自带的系统 Python，不创建项目虚拟环境，也不改写 PATH 到 /app/.venv。
+# PYTHONPATH 只负责让运行时挂载的 src/ 代码可导入。
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/app/src \
+    HOME=/home/${APP_USER} \
+    XDG_CACHE_HOME=/home/${APP_USER}/.cache \
+    HF_HOME=/home/${APP_USER}/.cache/huggingface \
+    VLLM_CACHE_ROOT=/home/${APP_USER}/.cache/vllm \
+    MODELSCOPE_CACHE=/home/${APP_USER}/.cache/modelscope \
+    RAY_TMPDIR=/tmp/ray \
+    UV_INDEX_URL=${UV_INDEX_URL}
 
 # Install monitoring/profiling helpers used by Ascend benchmark runs.
 # CANN, npu-smi, hccn_tool, msprof, and msopprof are provided by the Ascend
@@ -45,3 +56,30 @@ RUN apt-get update \
         sed -i 's/^ENABLED=.*/ENABLED="true"/' /etc/default/sysstat; \
     fi \
     && rm -rf /var/lib/apt/lists/*
+
+# 设置工作目录。
+WORKDIR /app
+
+# 本地的 pyproject.ascend.toml 复制到容器内并重命名为 pyproject.toml。
+# 满足 uv 导出和安装依赖时需要的 README.md 文件。
+COPY pyproject.ascend.toml ./pyproject.toml
+COPY README.md ./
+
+# 配置 uv 使用镜像源，加速依赖安装过程。
+# 先从 Ascend 版 pyproject 导出 requirements.txt，再删除 vLLM 昇腾镜像已经提供的运行时包。
+# 这些包包括 torch / torch-npu / torchaudio / torchvision / transformers / vLLM / vLLM-Ascend，不能由项目安装覆盖。
+RUN python -m pip install --no-cache-dir uv -i ${UV_INDEX_URL} \
+    && uv pip compile pyproject.toml \
+        --extra artifacts \
+        --output-file requirements.txt \
+    && sed -i -E '/^(torch|torch-npu|torchaudio|torchvision|transformers|vllm|vllm-ascend)([[:space:]=<>!~]|$)/Id' requirements.txt \
+    && uv pip install --system --no-cache -r requirements.txt
+
+RUN groupadd --gid ${APP_GID} ${APP_USER} \
+    && useradd --uid ${APP_UID} --gid ${APP_GID} --create-home --home-dir /home/${APP_USER} --shell /usr/sbin/nologin ${APP_USER} \
+    && mkdir -p /app /models /tmp/ray /home/${APP_USER}/.cache/huggingface /home/${APP_USER}/.cache/modelscope /home/${APP_USER}/.cache/vllm \
+    && chown -R ${APP_UID}:${APP_GID} /app /models /tmp/ray /home/${APP_USER}
+
+USER ${APP_USER}
+
+EXPOSE 8000 8265

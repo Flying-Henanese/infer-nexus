@@ -1,28 +1,163 @@
+x-infer-nexus-image: &infer-nexus-image
+  image: infer-nexus:ascend-runtime
+  build:
+    context: ..
+    dockerfile: ascend_deploy/dockerfile
+    args:
+      ASCEND_BASE_IMAGE: ${ASCEND_BASE_IMAGE:-mineru:npu-latest}
+      APP_UID: ${APP_UID:-10001}
+      APP_GID: ${APP_GID:-10001}
+
+x-app-volumes: &app-volumes
+  - ../src:/app/src:ro
+  - ../scripts:/app/scripts:ro
+  - ../docs:/app/docs:ro
+  - ../README.md:/app/README.md:ro
+  - ../config:/app/config:ro
+  - ${MODEL_STORE_HOST_PATH:-../models}:/models
+  - ../.infer-nexus/logs:/app/.infer-nexus/logs
 
 services:
-  infer-nexus:
-    image: infer:v3
-    container_name: infer-nexus
-    privileged: true
+  ray-head:
+    <<: *infer-nexus-image
+    user: infer-nexus
+    command:
+      - sh
+      - -lc
+      - >
+        ray start --head
+        --node-ip-address=$$(hostname -i)
+        --port=6379
+        --dashboard-host=0.0.0.0
+        --disable-usage-stats
+        --block
     ports:
-      - "8000:8000"
+      - "8265:8265"
+    healthcheck:
+      test: ["CMD-SHELL", "ray status --address=127.0.0.1:6379 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+
+  ray-worker:
+    <<: *infer-nexus-image
+    user: infer-nexus
+    privileged: true
+    depends_on:
+      ray-head:
+        condition: service_healthy
+    command:
+      - sh
+      - -lc
+      - >
+        set -eu;
+        if [ -z "$${ASCEND_RT_VISIBLE_DEVICES:-}" ]; then
+          echo "ASCEND_RT_VISIBLE_DEVICES must define the infer-nexus NPU pool, for example: 0,1,2,3." >&2;
+          exit 1;
+        fi;
+        DERIVED_NUM_NPUS=$$(python -c "import os; v=os.environ.get('ASCEND_RT_VISIBLE_DEVICES',''); print(len([x for x in v.split(',') if x.strip()]))");
+        if [ "$${DERIVED_NUM_NPUS}" -le 0 ]; then
+          echo "ASCEND_RT_VISIBLE_DEVICES must contain at least one device id." >&2;
+          exit 1;
+        fi;
+        RESOURCE_ARGS="--resources={\"NPU\":$${DERIVED_NUM_NPUS}}";
+        RAY_HEAD_IP=$$(python -c "import socket; print(socket.gethostbyname('ray-head'))");
+        RAY_ADDRESS="$${RAY_HEAD_IP}:6379";
+        ray start --address="$${RAY_ADDRESS}"
+        --node-ip-address=$$(hostname -i)
+        --disable-usage-stats
+        $$RESOURCE_ARGS
+        --block
     environment:
-      - ASCEND_RT_VISIBLE_DEVICES=3,4,5,6,7
-      - PYTHONPATH=/app/infer-nexus/src:$PYTHONPATH
+      ASCEND_RT_VISIBLE_DEVICES: ${ASCEND_RT_VISIBLE_DEVICES:?ASCEND_RT_VISIBLE_DEVICES must define the infer-nexus NPU pool}
+      RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES: ${RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES:-1}
     devices:
       - /dev/davinci_manager
       - /dev/devmm_svm
       - /dev/hisi_hdc
     volumes:
-      - /usr/local/Ascend/driver:/usr/local/Ascend/driver
-      - /usr/local/dcmi:/usr/local/dcmi
-      - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi
-      - /usr/local/sbin:/usr/local/sbin
-      - /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool
-      # 挂载模型目录
-      - /data1/models:/app/models
-      # 挂载代码目录
-      - .:/app/infer-nexus
-    command: /bin/bash -c "/app/infer-nexus/scripts/start_minimal_ascend.sh && tail -f /dev/null"
-    stdin_open: true
-    tty: true
+      - ../src:/app/src:ro
+      - ../scripts:/app/scripts:ro
+      - ../docs:/app/docs:ro
+      - ../README.md:/app/README.md:ro
+      - ../config:/app/config:ro
+      - ${MODEL_STORE_HOST_PATH:-../models}:/models
+      - ../.infer-nexus/logs:/app/.infer-nexus/logs
+      - /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro
+      - /usr/local/dcmi:/usr/local/dcmi:ro
+      - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro
+      - /usr/local/sbin:/usr/local/sbin:ro
+      - /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool:ro
+    healthcheck:
+      test: ["CMD-SHELL", "RAY_HEAD_IP=$$(python -c \"import socket; print(socket.gethostbyname('ray-head'))\"); ray status --address=$${RAY_HEAD_IP}:6379 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
+
+  serve-deployer:
+    <<: *infer-nexus-image
+    user: infer-nexus
+    depends_on:
+      ray-head:
+        condition: service_healthy
+      ray-worker:
+        condition: service_healthy
+    command:
+      - sh
+      - -lc
+      - >
+        set -eu;
+        trap 'ray stop --force >/dev/null 2>&1 || true' EXIT;
+        RAY_HEAD_IP=$$(python -c "import socket; print(socket.gethostbyname('ray-head'))");
+        RAY_ADDRESS="$${INFER_NEXUS_RAY_ADDRESS:-$${RAY_HEAD_IP}:6379}";
+        ray start --address="$${RAY_ADDRESS}"
+        --node-ip-address=$$(hostname -i)
+        --num-cpus=0
+        --disable-usage-stats;
+        python scripts/run_serve_runtime.py
+        --settings config/settings.ascend-compose.yaml
+        --ray-address "$${RAY_ADDRESS}"
+        --proxy-location Disabled
+        --ready-timeout-seconds ${SERVE_READY_TIMEOUT_SECONDS:-900}
+    volumes: *app-volumes
+    restart: "no"
+
+  gateway:
+    <<: *infer-nexus-image
+    user: infer-nexus
+    depends_on:
+      serve-deployer:
+        condition: service_completed_successfully
+    command:
+      - sh
+      - -lc
+      - >
+        set -eu;
+        trap 'ray stop --force >/dev/null 2>&1 || true' EXIT;
+        RAY_HEAD_IP=$$(python -c "import socket; print(socket.gethostbyname('ray-head'))");
+        export INFER_NEXUS_RAY_ADDRESS="$${INFER_NEXUS_RAY_ADDRESS:-$${RAY_HEAD_IP}:6379}";
+        ray start --address="$${INFER_NEXUS_RAY_ADDRESS}"
+        --node-ip-address=$$(hostname -i)
+        --num-cpus=0
+        --disable-usage-stats;
+        python scripts/run_gateway.py
+        --settings config/settings.ascend-compose.yaml
+        --host 0.0.0.0
+        --workers ${GATEWAY_WORKERS:-2}
+    environment:
+      INFER_NEXUS_SETTINGS: config/settings.ascend-compose.yaml
+      INFER_NEXUS_RAY_ADDRESS: ${INFER_NEXUS_RAY_ADDRESS:-}
+    ports:
+      - "8000:8000"
+    volumes: *app-volumes
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2).read()\""]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped

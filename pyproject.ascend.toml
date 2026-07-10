@@ -49,24 +49,10 @@ packages = ["src/infer_nexus"]
 
 [tool.uv]
 default-groups = []
-# uv-specific constraints for packages provided by the Ascend base image.
-# These entries are not direct project dependencies; they only constrain
-# resolution if one of these packages is requested directly or transitively.
-# This prevents uv sync from silently replacing the validated NPU runtime stack.
-constraint-dependencies = [
-  # These packages are provided by the Ascend base image.
-  # Keep them constrained so project dependency sync cannot silently replace
-  # the validated NPU runtime stack.
-  "torch==2.9.0",
-  "torch-npu==2.9.0.post1",
-  "torchaudio==2.9.0",
-  "torchvision==0.24.0",
-  "transformers==4.57.6",
-  "vllm==0.18.0",
-  "vllm-ascend==0.18.0rc1",
-]
 
-# following items are simply provided for reference. 
+# following items are provided by the Ascend base image and must stay out of
+# dependency installation targets. The Ascend Dockerfile exports requirements,
+# removes these package names, and installs only the cleaned application deps.
 # they will not affect project dependencies.
 [tool.infer-nexus.ascend-image]
 base = "Mineru-optimization"

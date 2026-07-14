@@ -3,7 +3,7 @@
 # 基础镜像：默认 mineru:npu-latest，由 docker load 命令导入。
 # 导入所用的 tar 包来源于 https://atomgit.com/Ascend-SACT/Mineru-Optimization.git 仓库中的镜像 mineru-ascend.tar。
 # 如果部署侧换成 vLLM 官方昇腾镜像，可以通过 ASCEND_BASE_IMAGE 覆盖；镜像内自带的 Python / torch / vLLM / vLLM-Ascend 栈必须保持不被覆盖。
-ARG ASCEND_BASE_IMAGE=mineru:npu-latest
+ARG ASCEND_BASE_IMAGE=quay.m.daocloud.io/ascend/vllm-ascend:v0.18.0
 ARG UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
 ARG APP_USER=infer-nexus
 ARG APP_UID=10001
@@ -68,11 +68,12 @@ COPY README.md ./
 # 配置 uv 使用镜像源，加速依赖安装过程。
 # 先从 Ascend 版 pyproject 导出 requirements.txt，再删除 vLLM 昇腾镜像已经提供的运行时包。
 # 这些包包括 torch / torch-npu / torchaudio / torchvision / transformers / vLLM / vLLM-Ascend，不能由项目安装覆盖。
+# 添加huggingface-hub去除，同样不能覆盖安装
 RUN python -m pip install --no-cache-dir uv -i ${UV_INDEX_URL} \
     && uv pip compile pyproject.toml \
         --extra artifacts \
         --output-file requirements.txt \
-    && sed -i -E '/^(torch|torch-npu|torchaudio|torchvision|transformers|vllm|vllm-ascend)([[:space:]=<>!~]|$)/Id' requirements.txt \
+    && sed -i -E '/^(torch|torch-npu|torchaudio|torchvision|transformers|vllm|vllm-ascend|huggingface-hub)([[:space:]=<>!~]|$)/Id' requirements.txt \
     && uv pip install --system --no-cache -r requirements.txt
 
 RUN groupadd --gid ${APP_GID} ${APP_USER} \

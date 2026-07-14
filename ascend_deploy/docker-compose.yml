@@ -1,5 +1,5 @@
 x-infer-nexus-image: &infer-nexus-image
-  image: infer-nexus:ascend-runtime
+  image: infer:v5
   build:
     context: ..
     dockerfile: ascend_deploy/dockerfile
@@ -22,7 +22,7 @@ services:
     <<: *infer-nexus-image
     user: infer-nexus
     command:
-      - sh
+      - bash
       - -lc
       - >
         ray start --head
@@ -33,6 +33,9 @@ services:
         --block
     ports:
       - "8265:8265"
+    # 需要infer-nexus的module，卷挂载
+    volumes:
+      - ../src:/app/src:ro
     healthcheck:
       test: ["CMD-SHELL", "ray status --address=127.0.0.1:6379 >/dev/null 2>&1"]
       interval: 10s
@@ -44,12 +47,16 @@ services:
   ray-worker:
     <<: *infer-nexus-image
     user: infer-nexus
+    # 用户添加到设备组
+    group_add:
+       - "${ASCEND_DEVICE_GID:-1003}"
     privileged: true
     depends_on:
       ray-head:
         condition: service_healthy
     command:
-      - sh
+      # 权限执行问题，由sh改为bash
+      - bash
       - -lc
       - >
         set -eu;
@@ -107,7 +114,7 @@ services:
       ray-worker:
         condition: service_healthy
     command:
-      - sh
+      - bash
       - -lc
       - >
         set -eu;
@@ -133,7 +140,7 @@ services:
       serve-deployer:
         condition: service_completed_successfully
     command:
-      - sh
+      - bash
       - -lc
       - >
         set -eu;

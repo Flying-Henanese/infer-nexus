@@ -22,9 +22,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-artifacts = [
-  "huggingface_hub>=0.32.0",
-]
+# huggingface-hub去除，使用镜像自带版本
+artifacts = []
 ascend-image = []
 ascend-monitoring = [
   "matplotlib>=3.9.0",
@@ -49,6 +48,13 @@ packages = ["src/infer_nexus"]
 
 [tool.uv]
 default-groups = []
+# 适配低版本ray,避免自动升级
+# setuptools仅适用于vllm-ascend=0.18及以下
+constraint-dependencies = [
+  "protobuf==6.33.6",
+  "setuptools<82.0"
+]
+
 
 # following items are provided by the Ascend base image and must stay out of
 # dependency installation targets. The Ascend Dockerfile exports requirements,

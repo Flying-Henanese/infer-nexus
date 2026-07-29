@@ -31,3 +31,10 @@ A Phase 1 implementation should satisfy these conditions:
 - no static per-model device pinning is introduced
 - a path exists for Ray Serve-backed deployments
 - admission and load-awareness have explicit interfaces, even if some behavior is initially stubbed
+
+## Shared A100 Deployment And Validation
+
+For a code change that requires real-runtime validation, follow
+`../workflows/remote-deploy-and-validate.md` before reporting completion. The
+workflow requires an intentional local commit and push, a remote fast-forward
+pull, Compose recreation, and runtime health validation.

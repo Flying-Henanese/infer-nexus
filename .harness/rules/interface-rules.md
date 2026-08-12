@@ -2,6 +2,8 @@
 
 Read this when a task changes configuration schema, model catalog behavior, HTTP APIs, metrics, logs, or error semantics.
 
+This file is normative. Consult `.harness/context/current-architecture.md`, `model-config.md`, and `monitoring-benchmark.md` for current implementation status and known checked-in inconsistencies.
+
 ## Data and Config Rules
 
 ### Config belongs in files
@@ -17,6 +19,10 @@ Do not hardcode these in source unless there is a temporary bootstrap reason.
 ### Recommended config split
 - `config/settings.yaml` for platform-level settings
 - `config/models.yaml` for model registry definitions
+
+Deployment-specific settings also exist:
+- `config/settings.compose.yaml` for the root CUDA Compose flow
+- `config/settings.ascend-compose.yaml` for the Ascend Compose flow
 
 ### Model config expectations
 Each model config should be able to describe at least:

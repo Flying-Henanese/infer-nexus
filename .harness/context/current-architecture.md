@@ -17,6 +17,8 @@ client
 -> local vllm / Ray Serve DeploymentHandle / vllm_openai_proxy
 ```
 
+`runtime/worker_client.py` defines a future runtime-worker isolation boundary, but `main.py` does not construct or inject a runtime-worker client. It is not an active execution path.
+
 Local `backend: vllm` models use Ray Serve deployments in serve mode:
 
 ```text
@@ -32,15 +34,20 @@ Proxy models use `backend: vllm_openai_proxy` and are forwarded to an upstream O
 
 ## Startup And State
 
-- `src/infer_nexus/main.py` loads the selected settings file, usually `config/settings.yaml` locally or `config/settings.compose.yaml` under the root Compose flow.
+- `src/infer_nexus/main.py` loads the selected settings file: `config/settings.yaml` by default, `config/settings.compose.yaml` in the root CUDA Compose flow, or `config/settings.ascend-compose.yaml` in the Ascend Compose flow.
 - The catalog is loaded from one configured YAML file, currently `config/models.yaml`.
 - `ModelRegistry`, `LocalModelStore`, `ServeApplicationBuilder`, `RuntimeExecutor`, `WorkerAdmissionController`, and `RuntimeDispatcher` are attached to `app.state`.
 - Platform APIs are currently read-only catalog/status/load/capacity views.
 - `control/reconciler.py` exists only as a skeleton.
 
-## Containerized Runtime Shape
+## Containerized Runtime Shapes
 
-The root `docker-compose.yml` is the current containerized runtime entrypoint:
+The repository has two current Compose entrypoints with the same service topology:
+
+- root `docker-compose.yml` + root `Dockerfile` + `config/settings.compose.yaml` for the CUDA path
+- `ascend_deploy/docker-compose.yml` + `ascend_deploy/dockerfile` + `config/settings.ascend-compose.yaml` for the Ascend NPU path
+
+Both use this runtime shape:
 
 ```text
 client
@@ -50,7 +57,7 @@ client
 -> replica-local vLLM runtime
 ```
 
-Compose owns container lifecycle for `ray-head`, `ray-worker`, one-shot `serve-deployer`, and long-running `gateway`. Ray Serve owns local deployment and replica lifecycle after `serve-deployer` submits the applications. Platform-specific accelerator details should stay in Docker image, Compose, environment, and settings files, not in request-path code.
+Compose owns container lifecycle for `ray-head`, `ray-worker`, one-shot `serve-deployer`, and long-running `gateway`. Ray Serve owns local deployment and replica lifecycle after `serve-deployer` submits the applications. The CUDA worker registers GPU resources derived from `CUDA_VISIBLE_DEVICES`; the Ascend worker registers custom `NPU` resources derived from `ASCEND_RT_VISIBLE_DEVICES`. Platform-specific accelerator details stay in image, Compose, environment, and settings files rather than request-path code.
 
 ## Current Control Boundaries
 
@@ -66,6 +73,13 @@ Compose owns container lifecycle for `ray-head`, `ray-worker`, one-shot `serve-d
 - Runtime executor has per-model guards, bounded queue settings, handle timeouts, stream idle/lifetime timeouts, and optional circuit breaker settings.
 - Serve deployment handles are cached by `(app_name, deployment_name)`.
 
+## Known Checked-in Integration Gaps
+
+- `config/settings.yaml` currently selects `inference_device_type: npu`, while `scripts/start_minimal.sh` registers only GPU resources and also defaults to that settings file. Use the platform-specific settings/startup pairing deliberately; the defaults are not currently self-consistent.
+- Enabled entries in `config/models.yaml` currently use absolute `/app/models/...` paths. Absolute paths bypass `model_store.root_dir`, so they match neither the default local `models/` root nor the `/models` mount used by both Compose variants.
+- `AdmissionController.check_model_request()` is a no-op integration hook. Active protection currently comes from task/model validation, artifact checks, process-local worker admission, and `RuntimeExecutor` guards; readiness- and cluster-capacity-aware admission are not implemented.
+- The full unit suite is not green against the current catalog. Many API, dispatcher, runtime, and script tests still expect the previous three-model fixture and old aliases. See `.harness/checklists/verification.md` before interpreting full-suite failures.
+
 ## Out Of Current Scope
 
 Do not treat these as current architecture:
@@ -74,4 +88,4 @@ Do not treat these as current architecture:
 - multi-node placement/control plane
 - automatic heterogeneous hardware scheduling in application logic
 - gateway-owned prefix-cache sticky routing
-
+- active runtime-worker process isolation

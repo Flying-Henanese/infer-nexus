@@ -2,6 +2,8 @@
 
 Read this when a task changes model lifecycle, Ray Serve runtime boundaries, accelerator placement, admission, scaling, or backend abstractions.
 
+This file is normative. A requirement below does not imply that the current code already satisfies it. Check `.harness/context/current-architecture.md` before relying on current behavior.
+
 ## Non-Goals
 
 Unless the user explicitly changes scope, do not add:
@@ -23,8 +25,8 @@ Implications:
 - model registration happens at startup or through a controlled reconcile path
 - do not add APIs that let users arbitrarily register models at runtime unless explicitly requested
 
-### 2. One deployment per model
-Use one Ray Serve deployment per model in Phase 1.
+### 2. One deployment per locally hosted model
+Use one Ray Serve deployment per local `backend: vllm` model in Phase 1. Proxy-backed models route to configured upstream services and do not create local Ray Serve deployments.
 
 Implications:
 - each model has a distinct deployment identity

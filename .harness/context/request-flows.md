@@ -5,20 +5,34 @@ Use this file to orient yourself before tracing request behavior. Verify details
 ## App Startup
 
 1. `scripts/run_gateway.py` starts the FastAPI app from `src/infer_nexus/main.py`.
-2. `lifespan()` loads the selected settings file, usually `config/settings.yaml` locally or `config/settings.compose.yaml` in the root Compose flow.
+2. `lifespan()` loads the selected settings file: `config/settings.yaml` by default, `config/settings.compose.yaml` in the root CUDA Compose flow, or `config/settings.ascend-compose.yaml` in the Ascend Compose flow.
 3. `load_model_catalog(settings.catalog.models_path)` loads `config/models.yaml`.
 4. `ModelRegistry` indexes model names, aliases, and served model names.
 5. `LocalModelStore`, `ServeApplicationBuilder`, `RuntimeExecutor`, `WorkerAdmissionController`, and `RuntimeDispatcher` are created.
 6. These objects are attached to `app.state`.
 7. `create_app()` registers health, metrics, OpenAI-compatible, compatibility, and platform routers.
 
-## Compose Runtime Startup
+## Root CUDA Compose Runtime Startup
 
 1. `docker-compose.yml` starts `ray-head`.
 2. `ray-worker` joins the Ray cluster and registers the accelerator budget exposed by the Compose/runtime environment.
 3. `serve-deployer` runs `scripts/run_serve_runtime.py --settings config/settings.compose.yaml`, submits Ray Serve apps, waits for readiness, and exits.
 4. `gateway` runs `scripts/run_gateway.py --settings config/settings.compose.yaml` and serves the public API.
 5. The gateway reaches local models through cached Ray Serve deployment handles.
+
+## Ascend Compose Runtime Startup
+
+1. `ascend_deploy/docker-compose.yml` starts `ray-head` using the Ascend-specific image.
+2. `ray-worker` derives an NPU count from `ASCEND_RT_VISIBLE_DEVICES` and registers matching custom Ray `NPU` resources.
+3. `serve-deployer` runs `scripts/run_serve_runtime.py --settings config/settings.ascend-compose.yaml`, submits Ray Serve apps, waits for readiness, and exits.
+4. `gateway` runs `scripts/run_gateway.py --settings config/settings.ascend-compose.yaml` and serves the public API.
+5. The gateway reaches local models through cached Ray Serve deployment handles.
+
+## Local Script Startup Caveat
+
+- `scripts/start_minimal.sh` is CUDA-oriented and registers GPU resources.
+- `scripts/start_minimal_ascend.sh` registers custom NPU resources.
+- The checked-in default settings/device pairing is not self-consistent for both scripts. See the canonical gap description in `.harness/context/current-architecture.md`.
 
 ## Serve Runtime Startup
 
@@ -44,7 +58,7 @@ Use this file to orient yourself before tracing request behavior. Verify details
 3. The route resolves `request.model` through `ModelRegistry` and requires `task: chat`.
 4. `_check_model_ready()` validates local model artifacts for non-proxy models and runs admission checks.
 5. `RuntimeDispatcher.dispatch_chat()` resolves a `RuntimeTarget`.
-6. `RuntimeExecutor.execute_chat()` chooses proxy, runtime-worker, serve-handle, or local/stub behavior.
+6. `RuntimeExecutor.execute_chat()` chooses proxy, Serve-handle, or local/stub behavior. A runtime-worker protocol exists, but no client is injected by `main.py`, so that isolation path is inactive.
 7. For local serve mode, the executor gets a cached Ray Serve deployment handle and calls `chat_completion.remote(...)` or `chat_completion_stream.remote(...)`.
 8. For proxy mode, the executor rewrites only the model field and forwards to the configured upstream OpenAI-compatible endpoint.
 9. Route-level metrics record request status, errors, inflight state, and token usage when available.
@@ -115,4 +129,3 @@ Use this file to orient yourself before tracing request behavior. Verify details
 1. `api/health_routes.py` returns a basic `HealthResponse`.
 2. Current readiness is the same as liveness.
 3. These paths do not validate Ray Serve, model artifacts, or downstream model readiness.
-

@@ -10,6 +10,8 @@ Use it as a short, current guide to:
 
 Do not store secrets, large logs, model artifacts, or generated benchmark outputs here.
 
+Files under `context/` describe the checked-in implementation and configuration as they exist now. Files under `rules/` are normative guardrails and may describe required target behavior that is still only partial or stubbed. Do not infer that a rule is already implemented without checking the matching context file and source.
+
 ## Current Entry Points
 
 - `context/current-architecture.md`: current implemented architecture baseline.

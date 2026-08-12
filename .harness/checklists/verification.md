@@ -29,6 +29,18 @@ git diff --check
 
 If `uv run --frozen` is blocked by local environment state, report that clearly and use compile checks where useful.
 
+## Current Repository Test Baseline
+
+As observed on 2026-08-12, `uv run --frozen pytest -q` completes but is not green: 101 tests pass and 52 fail.
+
+Known contributors:
+
+- shared fixtures and many API/dispatcher/runtime/script tests still expect the previous three-model catalog and aliases, while `config/models.yaml` currently has five enabled models
+- a small set of API tests attempts to replace slotted `RuntimeExecutor` instance methods and fails because those attributes are read-only
+- the installed `uv` warns that `tool.uv.extra-build-dependencies` is not recognized unless the relevant preview support/version is used
+
+For unrelated work, run the smallest relevant tests and compare any full-suite failures with this baseline. Do not describe the repository as fully green, and do not treat every known baseline failure as caused by a documentation-only change.
+
 ## For Runtime/Gateway Changes
 
 Check the relevant unit tests around:
@@ -51,4 +63,3 @@ Check:
 - `tests/test_api.py` for gateway metrics exposure
 
 Live metric validation requires a running gateway/Ray Serve environment.
-

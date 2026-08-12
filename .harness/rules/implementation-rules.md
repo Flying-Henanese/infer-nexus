@@ -2,6 +2,8 @@
 
 This is the routing index for detailed implementation guardrails. Keep this file short; open only the narrow rule file that matches the task.
 
+Rule files are normative: they describe constraints and desired behavior. They are not an implementation-status report. For current behavior and known checked-in gaps, read the matching file under `.harness/context/` and verify against source.
+
 ## Rule Files
 
 - `.harness/rules/architecture-rules.md`: model lifecycle, Ray Serve boundaries, accelerator pool rules, admission, scaling, and backend substitution.

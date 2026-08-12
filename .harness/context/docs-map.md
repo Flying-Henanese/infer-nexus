@@ -35,7 +35,11 @@ against source before changing code.
 
 - `docs/DOCKER_COMPOSE_RUNTIME_SPLIT_PLAN.md`
   - Current reference for the root Compose container lifecycle split.
-  - Use for `gateway`, `ray-head`, `ray-worker`, `serve-deployer`, `dockerfile`, `docker-compose.yml`, and `config/settings.compose.yaml` questions.
+  - Use for `gateway`, `ray-head`, `ray-worker`, `serve-deployer`, `Dockerfile`, `docker-compose.yml`, and `config/settings.compose.yaml` questions.
+
+- `docs/ASCEND_DEPLOYMENT_CONFIGURATION.md`
+  - Current deployment reference for `ascend_deploy/`, `pyproject.ascend.toml`, and `config/settings.ascend-compose.yaml`.
+  - It correctly documents `/models` as the Compose model-store mount; the enabled catalog currently still contains conflicting absolute `/app/models/...` paths.
 
 ## Current But Narrow
 
@@ -53,6 +57,10 @@ against source before changing code.
   - The supported configuration entrypoint is `config/models.yaml` under `deployment_config.request_router_config`, for example `request_router_class: ray.serve.llm.request_router.PrefixCacheAffinityRouter`.
   - Treat runtime benefit and payload-shape compatibility as environment-dependent; verify against the active Ray Serve version and request path.
 
+- `docs/RAY_SERVE_LLM_EVALUATION_PLAN.md`
+  - Current evaluation plan, not an implemented backend.
+  - Use when evaluating `ray.serve.llm`, `LLMConfig`, or `build_openai_app`; the active runtime still uses the custom `ModelRuntimeReplica` and backend adapters.
+
 ## Future Design Only
 
 Do not treat these as current implementation:
@@ -69,4 +77,3 @@ They are useful for future planning, but current source code does not implement 
 - `docs/qwen3_reranker_vllm_notes.md`
 
 Use these for historical troubleshooting context, not as general architecture source of truth.
-

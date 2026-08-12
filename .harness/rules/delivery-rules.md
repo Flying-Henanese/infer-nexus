@@ -2,6 +2,8 @@
 
 Read this when planning implementation order, checking Phase 1 scope, or deciding whether work is complete.
 
+The sequence and acceptance criteria below are delivery targets, not a claim that every item is fully implemented. Check `.harness/context/current-architecture.md` for active behavior and known gaps.
+
 ## Development Sequence
 
 Unless the user asks otherwise, build in this order:

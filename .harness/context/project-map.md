@@ -10,9 +10,11 @@ Use this file to choose the first source files to inspect. It is a navigation ma
 - `tests/`: unit, API, dispatcher, runtime, benchmark, and smoke-test coverage.
 - `docs/`: long-form architecture, operations, monitoring, and historical design notes.
 - `monitoring/`: Prometheus example configuration.
-- `dockerfile`: root container runtime image definition for the current Compose flow.
-- `docker-compose.yml`: root containerized runtime topology.
-- `.harness/`: Codex collaboration context, plans, checklists, and run summaries.
+- `Dockerfile`: root CUDA-oriented container runtime image definition.
+- `docker-compose.yml`: root CUDA containerized runtime topology.
+- `ascend_deploy/`: Ascend-specific image and Compose topology.
+- `pyproject.ascend.toml`: application dependency set used when building the Ascend image without replacing its vendor runtime stack.
+- `.harness/`: Codex collaboration context, rules, and checklists.
 
 ## Application Package
 
@@ -54,7 +56,7 @@ Use this file to choose the first source files to inspect. It is a navigation ma
 
 - `src/infer_nexus/control/`
   - Control-plane helpers.
-  - `admission.py`: model-level admission checks.
+  - `admission.py`: no-op model-level admission integration hook; readiness, queue, and cluster-capacity decisions are not implemented there.
   - `worker_admission.py`: process-local gateway worker inflight guard.
   - `load_inspector.py`: current load snapshot.
   - `scaler.py` and `policies.py`: scaling policy scaffolding.
@@ -86,19 +88,28 @@ Use this file to choose the first source files to inspect. It is a navigation ma
 - `config/settings.compose.yaml`
   - Root Compose settings entrypoint used by `serve-deployer` and `gateway`.
 
+- `config/settings.ascend-compose.yaml`
+  - Ascend Compose settings entrypoint; requests custom Ray `NPU` resources.
+
 - `config/models.yaml`
   - Active model catalog.
   - Current enabled entries are local `backend: vllm` models unless changed in this file.
   - Ray Serve request-router options, including cache-affinity router class settings, belong under each model's `deployment_config.request_router_config`.
 
-## Container Runtime
+## Container Runtimes
 
 - `docker-compose.yml`
   - Defines `ray-head`, `ray-worker`, one-shot `serve-deployer`, and long-running `gateway`.
   - Compose owns container lifecycle; Ray Serve owns deployment and replica lifecycle after apps are submitted.
 
-- `dockerfile`
-  - Builds the shared runtime image. Keep platform-specific dependency choices in image/build settings rather than request-path code.
+- `Dockerfile`
+  - Builds the root CUDA-oriented shared runtime image.
+
+- `ascend_deploy/docker-compose.yml`
+  - Defines the same four service roles for Ascend and registers custom Ray `NPU` resources from `ASCEND_RT_VISIBLE_DEVICES`.
+
+- `ascend_deploy/dockerfile`
+  - Builds on an Ascend runtime image and installs application dependencies without intentionally replacing the image-provided torch/vLLM/vLLM-Ascend stack.
 
 ## Scripts
 
@@ -110,6 +121,15 @@ Use this file to choose the first source files to inspect. It is a navigation ma
 
 - `scripts/run_benchmark.py`
   - CLI wrapper for the benchmark runner.
+
+- `scripts/start_minimal.sh`
+  - Local CUDA-oriented bootstrap that registers Ray GPU resources.
+
+- `scripts/start_minimal_ascend.sh`
+  - Local Ascend bootstrap that registers custom Ray `NPU` resources.
+
+- `scripts/stop_minimal.sh`
+  - Stops local gateway/runtime/Ray processes tracked by the minimal startup scripts.
 
 - `scripts/monitoring/inspect_ray_serve_vllm_metrics.py`
   - Inspects Ray Serve and vLLM metric visibility from Prometheus or raw metrics endpoints.
@@ -125,6 +145,8 @@ Use this file to choose the first source files to inspect. It is a navigation ma
 - `tests/test_main.py`: app lifespan and dependency wiring.
 - `tests/test_proxy_streaming.py`: proxy streaming behavior.
 - `tests/test_model_store.py`: local model artifact resolution.
+- `tests/test_config.py`: settings loading and environment override behavior.
+- `tests/test_scripts.py`: gateway and Serve launcher behavior.
 - `tests/test_benchmark_*.py`: benchmark runner, report, metrics, and workloads.
 - Smoke scripts under `tests/` require local model/runtime context and are not generic unit tests.
-
+- See `.harness/checklists/verification.md` for the current full-suite baseline before interpreting failures.

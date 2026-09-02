@@ -8,13 +8,13 @@ set -euo pipefail
 # 2. optionally install / sync dependencies with uv
 # 3. ensure a Ray head is available, starting one if needed
 # 4. deploy the Serve runtime process
-# 5. launch the FastAPI gateway
+# 5. verify the Ray Serve Gateway ingress
 #
 # Keeping these steps in one place makes local bring-up reproducible and also
 # gives us a single log/pid directory to inspect when something fails.
 #
-# Logs:   .infer-nexus/logs/{ray,serve_runtime,gateway}.log
-# PIDs:   .infer-nexus/pids/{serve_runtime,gateway}.pid
+# Logs:   .infer-nexus/logs/{ray,serve_runtime}.log
+# PIDs:   .infer-nexus/pids/{serve_runtime}.pid
 # Status: .infer-nexus/STATUS
 
 # Resolve the repository root relative to this script so the command works
@@ -34,10 +34,8 @@ RAY_STATE_FILE="${STATE_DIR}/ray_state.env"
 # Default runtime settings and startup behavior.
 SETTINGS="config/settings.yaml"
 RAY_ADDRESS="auto"
-PROXY_LOCATION="Disabled"
+PROXY_LOCATION="HeadOnly"
 INSTALL=1
-RELOAD=0
-GATEWAY_WORKERS=""
 CUDA_VISIBLE_DEVICES_VALUE="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 RAY_BIN="${RAY_BIN:-ray}"
@@ -54,8 +52,6 @@ Options:
   --ray-address ADDR         Ray address passed to the Serve runtime launcher
   --cuda-visible-devices CSV Export CUDA_VISIBLE_DEVICES before starting Ray/runtime
   --proxy-location VALUE     Ray Serve proxy location setting
-  --gateway-workers N        Gateway worker process count (default: settings.service.workers)
-  --reload                   Enable uvicorn reload for the gateway
   -h, --help                 Show this help
 
 Examples:
@@ -64,7 +60,7 @@ Examples:
 
 Environment overrides:
   CUDA_VISIBLE_DEVICES=0,1,2,3  GPU pool boundary; Ray GPU count is derived from this list
-  PYTHON_BIN=/path/to/python  Python interpreter for gateway and Serve runtime
+  PYTHON_BIN=/path/to/python  Python interpreter for Serve runtime
   RAY_BIN=/path/to/ray        Ray CLI used for `ray status` and `ray start`
   UV_BIN=/path/to/uv          uv binary used only for optional dependency sync
 EOF
@@ -94,10 +90,6 @@ while [[ $# -gt 0 ]]; do
     --cuda-visible-devices) CUDA_VISIBLE_DEVICES_VALUE="$2"; shift 2;;
     # Forward the proxy location to the Serve runtime launcher.
     --proxy-location) PROXY_LOCATION="$2"; shift 2;;
-    # Override the number of HTTP gateway worker processes.
-    --gateway-workers) GATEWAY_WORKERS="$2"; shift 2;;
-    # Developer convenience: turn on hot-reload for the gateway process.
-    --reload) RELOAD=1; shift;;
     # Standard help flag.
     -h|--help) usage; exit 0;;
     # Fail fast on unknown flags so typos do not silently change behavior.
@@ -117,7 +109,7 @@ rm -f "${RAY_STATE_FILE}"
 cd "${ROOT_DIR}"
 
 # If the caller supplied a GPU allowlist, export it before starting any process.
-# This keeps the Ray head, Serve runtime, and gateway aligned on the same device set.
+# This keeps the Ray head and Serve runtime aligned on the same device set.
 if [[ -n "${CUDA_VISIBLE_DEVICES_VALUE}" ]]; then
   export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES_VALUE}"
 fi
@@ -161,7 +153,7 @@ if [[ "${INSTALL}" -eq 1 ]]; then
   fi
 fi
 
-# The runtime launcher and gateway should both use the same selected Python interpreter.
+# The runtime launcher uses the selected Python interpreter.
 if ! "${PYTHON_BIN}" -V >/dev/null 2>&1; then
   echo "Configured PYTHON_BIN='${PYTHON_BIN}' is not executable." >&2
   exit 1
@@ -170,6 +162,11 @@ fi
 # Ray is a hard dependency for the runtime deployment step.
 if ! "${RAY_BIN}" --version >/dev/null 2>&1; then
   echo "Configured RAY_BIN='${RAY_BIN}' is not executable. Did you install ray in the selected environment?" >&2
+  exit 1
+fi
+
+if ! command -v curl >/dev/null 2>&1; then
+  echo "Missing 'curl' for the Serve Gateway ingress health check." >&2
   exit 1
 fi
 
@@ -225,7 +222,7 @@ EOF
 }
 
 # Check whether a pid file points at a currently live process.
-# We use pid files for the long-running gateway and the serve-runtime launcher.
+# We use a pid file only for the one-shot Serve runtime launcher.
 pid_is_running() {
   local pid_file="$1"
   [[ -f "${pid_file}" ]] || return 1
@@ -268,7 +265,6 @@ start_ray_head_if_needed
 # Track the two background processes separately so we can detect and reuse
 # already-running instances on subsequent invocations.
 SERVE_PID_FILE="${PID_DIR}/serve_runtime.pid"
-GATEWAY_PID_FILE="${PID_DIR}/gateway.pid"
 
 STARTED_SERVE_RUNTIME=0
 
@@ -298,23 +294,25 @@ if [[ "${STARTED_SERVE_RUNTIME}" -eq 1 ]]; then
   fi
 fi
 
-# The gateway is a long-lived HTTP process. Reuse it if it is already alive;
-# otherwise start a new one and leave it running in the background.
-if pid_is_running "${GATEWAY_PID_FILE}"; then
-  echo "Gateway already running (pid $(cat "${GATEWAY_PID_FILE}"))."
-else
-  # Build the gateway command first so we can add `--reload` only when asked.
-  gateway_args=("${PYTHON_BIN}" scripts/run_gateway.py --settings "${SETTINGS}")
-  if [[ -n "${GATEWAY_WORKERS}" ]]; then
-    gateway_args+=(--workers "${GATEWAY_WORKERS}")
-  fi
-  if [[ "${RELOAD}" -eq 1 ]]; then
-    gateway_args+=(--reload)
-  fi
+wait_for_serve_gateway_ready() {
+  local timeout_seconds="$1"
+  local waited=0
 
-  # Start the gateway in the background and capture its stdout/stderr in a log.
-  (exec "${gateway_args[@]}") >"${LOG_DIR}/gateway.log" 2>&1 &
-  echo $! >"${GATEWAY_PID_FILE}"
+  while [[ "${waited}" -lt "${timeout_seconds}" ]]; do
+    if curl --fail --silent --show-error --max-time 1 \
+      "http://127.0.0.1:8000/readyz" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+
+  echo "Timed out waiting for the Serve Gateway ingress. See ${LOG_DIR}/serve_runtime.log" >&2
+  return 1
+}
+
+if ! wait_for_serve_gateway_ready 120; then
+  exit 1
 fi
 
 # Publish the overall status for any wrapper scripts or tooling watching the
@@ -324,11 +322,7 @@ write_status "started"
 echo "Started."
 echo "Logs: ${LOG_DIR}"
 echo "PIDs: ${PID_DIR}"
-if [[ -n "${GATEWAY_WORKERS}" ]]; then
-  echo "Gateway workers: ${GATEWAY_WORKERS}"
-else
-  echo "Gateway workers: settings.service.workers"
-fi
+echo "Public API: Ray Serve Gateway ingress (HeadOnly proxy)"
 echo "Try:"
 echo "  curl http://127.0.0.1:8000/healthz"
 echo "  curl http://127.0.0.1:8000/v1/models"

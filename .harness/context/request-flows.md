@@ -4,7 +4,7 @@ Use this file to orient yourself before tracing request behavior. Verify details
 
 ## App Startup
 
-1. `scripts/run_gateway.py` starts the FastAPI app from `src/infer_nexus/main.py`.
+1. `scripts/run_gateway.py` starts the FastAPI app from `src/infer_nexus/main.py` only for local/stub debugging. In Serve mode, `InferNexusGatewayIngress` owns the same FastAPI app inside a Serve replica.
 2. `lifespan()` loads the selected settings file: `config/settings.yaml` by default, `config/settings.compose.yaml` in the root CUDA Compose flow, or `config/settings.ascend-compose.yaml` in the Ascend Compose flow.
 3. `load_model_catalog(settings.catalog.models_path)` loads `config/models.yaml`.
 4. `ModelRegistry` indexes model names, aliases, and served model names.
@@ -17,16 +17,16 @@ Use this file to orient yourself before tracing request behavior. Verify details
 1. `docker-compose.yml` starts `ray-head`.
 2. `ray-worker` joins the Ray cluster and registers the accelerator budget exposed by the Compose/runtime environment.
 3. `serve-deployer` runs `scripts/run_serve_runtime.py --settings config/settings.compose.yaml`, submits Ray Serve apps, waits for readiness, and exits.
-4. `gateway` runs `scripts/run_gateway.py --settings config/settings.compose.yaml` and serves the public API.
-5. The gateway reaches local models through cached Ray Serve deployment handles.
+4. `serve-deployer` deploys the CPU-only `infer-nexus-gateway` application after all model applications are healthy.
+5. `ray-head:8000` exposes the Serve HTTP proxy; Gateway ingress reaches local models through cached Ray Serve deployment handles.
 
 ## Ascend Compose Runtime Startup
 
 1. `ascend_deploy/docker-compose.yml` starts `ray-head` using the Ascend-specific image.
 2. `ray-worker` derives an NPU count from `ASCEND_RT_VISIBLE_DEVICES` and registers matching custom Ray `NPU` resources.
 3. `serve-deployer` runs `scripts/run_serve_runtime.py --settings config/settings.ascend-compose.yaml`, submits Ray Serve apps, waits for readiness, and exits.
-4. `gateway` runs `scripts/run_gateway.py --settings config/settings.ascend-compose.yaml` and serves the public API.
-5. The gateway reaches local models through cached Ray Serve deployment handles.
+4. `serve-deployer` deploys the CPU-only `infer-nexus-gateway` application after all model applications are healthy.
+5. `ray-head:8000` exposes the Serve HTTP proxy; Gateway ingress reaches local models through cached Ray Serve deployment handles.
 
 ## Local Script Startup Caveat
 
@@ -39,9 +39,9 @@ Use this file to orient yourself before tracing request behavior. Verify details
 1. `scripts/run_serve_runtime.py` loads settings and the model catalog.
 2. `ServeApplicationBuilder.build_serve_bindings()` builds one Ray Serve application binding per local `backend: vllm` model.
 3. `DeploymentFactory` maps each model to deployment kwargs and Ray actor options, including optional `deployment_config.request_router_config` such as a cache-affinity `request_router_class`.
-4. Each Ray Serve app is submitted with `serve.run(..., route_prefix=None, blocking=False)`.
-5. The script waits for Serve applications to become ready.
-6. The gateway later reaches these apps through cached deployment handles.
+4. Each model Ray Serve app is submitted with `serve.run(..., route_prefix=None, blocking=False)`.
+5. The script waits for model applications, then submits the one Gateway application with route prefix `/`.
+6. Gateway ingress later reaches these apps through cached deployment handles.
 
 ## `/v1/models`
 
@@ -126,6 +126,10 @@ Use this file to orient yourself before tracing request behavior. Verify details
 
 ## `/healthz` And `/readyz`
 
-1. `api/health_routes.py` returns a basic `HealthResponse`.
-2. Current readiness is the same as liveness.
-3. These paths do not validate Ray Serve, model artifacts, or downstream model readiness.
+1. `/healthz` returns a basic process-liveness `HealthResponse`.
+2. In stub/local-debug mode, `/readyz` returns the same successful response.
+3. In Serve mode, `/readyz` asks the replica's cached handle resolver for
+   `serve.status()` and returns 503 unless every configured local model
+   application is running and its deployment is healthy.
+4. The public Gateway's finite Serve queue rejects before FastAPI with HTTP
+   503; scrape Ray's `serve_deployment_queued_queries` for that outer pressure.

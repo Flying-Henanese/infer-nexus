@@ -601,17 +601,30 @@ class RuntimeExecutor:
             guard = self._get_guard(target, stream=True)
             await guard.acquire()
             guard_acquired = True
-            stream_handle = handle
             options_method = getattr(handle, "options", None)
-            if callable(options_method):
-                try:
-                    stream_handle = options_method(stream=True)
-                except Exception:
-                    # Fallback to legacy handle invocation for environments lacking stream options support.
-                    stream_handle = handle
+            if not callable(options_method):
+                raise RuntimeNotConnectedError(
+                    f"Serve streaming is unavailable for model '{self._metric_model(target)}' "
+                    f"because deployment '{target.deployment_name}' in app '{target.app_name}' "
+                    "does not expose handle.options(stream=True).",
+                    code="streaming_unavailable",
+                )
+            try:
+                stream_handle = options_method(stream=True)
+            except Exception as exc:
+                raise RuntimeNotConnectedError(
+                    f"Serve streaming is unavailable for model '{self._metric_model(target)}' "
+                    f"at deployment '{target.deployment_name}' in app '{target.app_name}': {exc}",
+                    code="streaming_unavailable",
+                ) from exc
             stream_remote_method = getattr(stream_handle, method_name, None)
             if stream_remote_method is None or not hasattr(stream_remote_method, "remote"):
-                stream_remote_method = remote_method
+                raise RuntimeNotConnectedError(
+                    f"Streaming Serve handle for model '{self._metric_model(target)}' "
+                    f"at deployment '{target.deployment_name}' in app '{target.app_name}' "
+                    f"does not expose '{method_name}.remote(...)'.",
+                    code="streaming_unavailable",
+                )
 
             response = stream_remote_method.remote(request_payload=payload)
             GATEWAY_METRICS.observe_serve_handle_call(

@@ -1,6 +1,6 @@
 # Ascend 平台部署配置说明
 
-本文用于指导在 Ascend NPU 平台上部署 infer-nexus。当前部署方式使用 Docker Compose 管理 ray-head、ray-worker、serve-deployer 和 gateway。
+本文用于指导在 Ascend NPU 平台上部署 infer-nexus。当前部署方式使用 Docker Compose 管理 ray-head、ray-worker 和 serve-deployer；公网 API 由 ray-head 上的 Ray Serve Gateway ingress 提供。
 
 ## 一、需要配置的文件
 
@@ -342,12 +342,12 @@ docker compose -f ascend_deploy/docker-compose.yml ps
 - ray-head：运行中且健康。
 - ray-worker：运行中且健康。
 - serve-deployer：成功执行后退出，退出码应为 0。
-- gateway：运行中且健康。
+- `ray-head:8000` 的 `/healthz`、`/readyz` 和 `/v1/models` 可访问。
 
 ### 9.2 查看日志
 
 ~~~bash
-docker compose -f ascend_deploy/docker-compose.yml logs -f ray-worker serve-deployer gateway
+docker compose -f ascend_deploy/docker-compose.yml logs -f ray-head ray-worker serve-deployer
 ~~~
 
 重点检查 Ray 的 NPU 资源、模型目录、vLLM 初始化和 Serve 健康状态。
@@ -386,8 +386,7 @@ python scripts/smoke_chat_remote.py --base-url http://127.0.0.1:8000/v1 --model 
 - 宿主机和容器内可以看到目标 NPU。
 - Ray Worker 成功注册预期的 NPU 资源。
 - serve-deployer 以退出码 0 完成。
-- Gateway 保持运行并通过健康检查。
+- Serve Gateway ingress 通过健康检查。
 - /v1/models 返回预期模型。
 - 至少一个 Chat 请求成功。
 - 日志中没有持续的模型加载、资源不足或 NPU 初始化错误。
-

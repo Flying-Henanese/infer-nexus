@@ -13,8 +13,8 @@ set -euo pipefail
 # - The container image is expected to already include the required Python
 #   dependencies for Infer Nexus on Ascend.
 #
-# Logs:   .infer-nexus/logs/{ray,serve_runtime,gateway}.log
-# PIDs:   .infer-nexus/pids/{serve_runtime,gateway}.pid
+# Logs:   .infer-nexus/logs/{ray,serve_runtime}.log
+# PIDs:   .infer-nexus/pids/{serve_runtime}.pid
 # Status: .infer-nexus/STATUS
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -26,9 +26,7 @@ RAY_STATE_FILE="${STATE_DIR}/ray_state.env"
 
 SETTINGS="config/settings.yaml"
 RAY_ADDRESS="auto"
-PROXY_LOCATION="Disabled"
-RELOAD=0
-GATEWAY_WORKERS=""
+PROXY_LOCATION="HeadOnly"
 ASCEND_VISIBLE_DEVICES_VALUE=""
 NUM_NPUS="4"
 CHECK_DEVICES=1
@@ -43,10 +41,8 @@ Options:
   --num-npus N                Fallback NPU count when no Ascend visible-device list is set
   --ascend-visible-devices CSV
                              Export ASCEND_RT_VISIBLE_DEVICES before startup
-  --gateway-workers N         Gateway worker process count (default: settings.service.workers)
   --no-device-check           Skip /dev/davinci* preflight checks
   --proxy-location VALUE      Ray Serve proxy location setting
-  --reload                    Enable uvicorn reload for the gateway
   -h, --help                  Show this help
 
 Examples:
@@ -62,10 +58,8 @@ while [[ $# -gt 0 ]]; do
     --ray-address) RAY_ADDRESS="$2"; shift 2;;
     --num-npus) NUM_NPUS="$2"; shift 2;;
     --ascend-visible-devices) ASCEND_VISIBLE_DEVICES_VALUE="$2"; shift 2;;
-    --gateway-workers) GATEWAY_WORKERS="$2"; shift 2;;
     --no-device-check) CHECK_DEVICES=0; shift;;
     --proxy-location) PROXY_LOCATION="$2"; shift 2;;
-    --reload) RELOAD=1; shift;;
     -h|--help) usage; exit 0;;
     *) echo "Unknown argument: $1" >&2; usage; exit 2;;
   esac
@@ -137,13 +131,8 @@ if ! command -v python >/dev/null 2>&1; then
   exit 1
 fi
 
-if ! command -v uvicorn >/dev/null 2>&1; then
-  echo "Missing 'uvicorn' in PATH. The container image must provide the runtime environment." >&2
-  exit 1
-fi
-
 if ! command -v curl >/dev/null 2>&1; then
-  echo "Missing 'curl' in PATH. The container image must provide curl for gateway health checks." >&2
+  echo "Missing 'curl' in PATH. The container image must provide it for Serve Gateway health checks." >&2
   exit 1
 fi
 
@@ -221,18 +210,12 @@ write_status() {
   printf '%s\n' "${msg}" >"${STATE_DIR}/STATUS"
 }
 
-wait_for_gateway_ready() {
-  local pid_file="$1"
-  local timeout_seconds="$2"
-  local url="http://127.0.0.1:8000/healthz"
+wait_for_serve_gateway_ready() {
+  local timeout_seconds="$1"
+  local url="http://127.0.0.1:8000/readyz"
   local waited=0
 
   while [[ "${waited}" -lt "${timeout_seconds}" ]]; do
-    if ! pid_is_running "${pid_file}"; then
-      echo "Gateway exited before becoming ready. See ${LOG_DIR}/gateway.log" >&2
-      return 1
-    fi
-
     if curl -fsS --max-time 1 "${url}" >/dev/null 2>&1; then
       return 0
     fi
@@ -241,14 +224,13 @@ wait_for_gateway_ready() {
     waited=$((waited + 1))
   done
 
-  echo "Timed out waiting for gateway to listen on ${url}. See ${LOG_DIR}/gateway.log" >&2
+  echo "Timed out waiting for Serve Gateway ingress on ${url}. See ${LOG_DIR}/serve_runtime.log" >&2
   return 1
 }
 
 start_ray_head_if_needed
 
 SERVE_PID_FILE="${PID_DIR}/serve_runtime.pid"
-GATEWAY_PID_FILE="${PID_DIR}/gateway.pid"
 
 STARTED_SERVE_RUNTIME=0
 
@@ -272,22 +254,7 @@ if [[ "${STARTED_SERVE_RUNTIME}" -eq 1 ]]; then
   fi
 fi
 
-if pid_is_running "${GATEWAY_PID_FILE}"; then
-  echo "Gateway already running (pid $(cat "${GATEWAY_PID_FILE}"))."
-else
-  gateway_args=(python scripts/run_gateway.py --settings "${SETTINGS}")
-  if [[ -n "${GATEWAY_WORKERS}" ]]; then
-    gateway_args+=(--workers "${GATEWAY_WORKERS}")
-  fi
-  if [[ "${RELOAD}" -eq 1 ]]; then
-    gateway_args+=(--reload)
-  fi
-
-  (PYTHONUNBUFFERED=1 exec "${gateway_args[@]}") >"${LOG_DIR}/gateway.log" 2>&1 &
-  echo $! >"${GATEWAY_PID_FILE}"
-fi
-
-if ! wait_for_gateway_ready "${GATEWAY_PID_FILE}" 120; then
+if ! wait_for_serve_gateway_ready 120; then
   exit 1
 fi
 
@@ -298,11 +265,7 @@ echo "ASCEND_RT_VISIBLE_DEVICES=${ASCEND_RT_VISIBLE_DEVICES:-}"
 echo "Ray NPU resources: ${NUM_NPUS}"
 echo "Logs: ${LOG_DIR}"
 echo "PIDs: ${PID_DIR}"
-if [[ -n "${GATEWAY_WORKERS}" ]]; then
-  echo "Gateway workers: ${GATEWAY_WORKERS}"
-else
-  echo "Gateway workers: settings.service.workers"
-fi
+echo "Public API: Ray Serve Gateway ingress (HeadOnly proxy)"
 echo "Try:"
 echo "  curl http://127.0.0.1:8000/healthz"
 echo "  curl http://127.0.0.1:8000/v1/models"

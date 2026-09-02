@@ -210,7 +210,7 @@ def runtime_not_connected_status(code: str) -> tuple[int, str]:
     """Map gateway-stage runtime errors to stable OpenAI-style response classes."""
     if code == "upstream_timeout":
         return 504, "service_unavailable_error"
-    if code == "runtime_circuit_open":
+    if code in {"runtime_circuit_open", "streaming_unavailable"}:
         return 503, "service_unavailable_error"
     if code == "backend_misconfigured":
         return 500, "internal_server_error"

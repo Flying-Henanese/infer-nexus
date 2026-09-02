@@ -1,0 +1,105 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: infer-nexus-gateway
+  namespace: ray
+  labels:
+    app.kubernetes.io/name: infer-nexus-gateway
+    app.kubernetes.io/part-of: infer-nexus
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: infer-nexus-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: infer-nexus-gateway
+        app.kubernetes.io/part-of: infer-nexus
+    spec:
+      # The gateway is CPU-only and runs on the T4 control-plane host.  This
+      # toleration is required because the node is tainted NoSchedule.
+      nodeSelector:
+        kubernetes.io/hostname: bms-v38f-0004
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: gateway
+          image: infer-nexus:runtime
+          imagePullPolicy: Never
+          workingDir: /workspace/infer-nexus
+          command: ["python", "scripts/run_gateway.py"]
+          args:
+            - --settings
+            - config/settings.k8s.yaml
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8000"
+            - --workers
+            - "1"
+          env:
+            - name: PYTHONPATH
+              value: /workspace/infer-nexus/src
+            - name: INFER_NEXUS_SETTINGS
+              value: config/settings.k8s.yaml
+            - name: INFER_NEXUS_RAY_ADDRESS
+              value: ray://infer-nexus-ray-head-svc.ray.svc.cluster.local:10001
+          ports:
+            - name: http
+              containerPort: 8000
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          volumeMounts:
+            - name: infer-nexus-source
+              mountPath: /workspace/infer-nexus
+              readOnly: true
+            - name: infer-nexus-models
+              mountPath: /models
+              readOnly: true
+      volumes:
+        - name: infer-nexus-source
+          hostPath:
+            path: /nas_data/zhousj/infer-nexus
+            type: Directory
+        - name: infer-nexus-models
+          hostPath:
+            path: /nas_data/models
+            type: Directory
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: infer-nexus-gateway
+  namespace: ray
+  labels:
+    app.kubernetes.io/name: infer-nexus-gateway
+    app.kubernetes.io/part-of: infer-nexus
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: infer-nexus-gateway
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+      nodePort: 30800

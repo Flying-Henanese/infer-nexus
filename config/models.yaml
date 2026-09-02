@@ -4,7 +4,7 @@ models:
   #   task: chat
   #   backend: vllm
   #   compat_mode: vllm_native
-  #   model_path: /nas_data/zhousj/qwen-vl
+  #   model_path: /models/Qwen/Qwen3-VL-8B-Instruct
   #   dtype: bfloat16
   #   tensor_parallel_size: 1
   #   max_model_len: 10000
@@ -27,7 +27,7 @@ models:
     task: chat
     backend: vllm
     compat_mode: vllm_native
-    model_path: /app/models/Qwen/Qwen3.5-27B
+    model_path: /models/Qwen/Qwen3.5-27B
     dtype: auto
     tensor_parallel_size: 1
     max_model_len: 30000
@@ -71,7 +71,7 @@ models:
     task: chat
     backend: vllm
     compat_mode: vllm_native
-    model_path: /app/models/opendatalab/MinerU2.5-Pro-2604-1.2B
+    model_path: /models/opendatalab/MinerU2.5-Pro-2604-1.2B
     dtype: auto
     tensor_parallel_size: 1
     max_model_len: 8192
@@ -83,7 +83,7 @@ models:
     capabilities:
       - vision
     engine_kwargs:
-      # 这里是ascend平台的numa绑定配置，vllm在ascend平台上运行时需要开启 
+      # 这里是ascend平台的numa绑定配置，vllm在ascend平台上运行时需要开启
       # enable_cpu_binding: true
       # 这里是vllm的trust_remote_code配置，开启后可以加载模型自定义的代码
       # numa_bind: true
@@ -103,7 +103,7 @@ models:
     task: embedding
     backend: vllm
     compat_mode: vllm_native
-    model_path: /app/models/Qwen/Qwen3-Embedding-8B
+    model_path: /models/Qwen/Qwen3-Embedding-8B
     dtype: bfloat16
     tensor_parallel_size: 1
     max_model_len: 8192
@@ -123,7 +123,7 @@ models:
     alias: bge-reranker
     task: rerank
     backend: vllm
-    model_path: /app/models/BAAI/bge-reranker-large
+    model_path: /models/BAAI/bge-reranker-v2-m3
     dtype: float16
     tensor_parallel_size: 1
     max_model_len: 512
@@ -143,7 +143,7 @@ models:
     task: chat
     backend: vllm
     compat_mode: vllm_native
-    model_path: /app/models/Qwen/Qwen3.5-9B
+    model_path: /models/Qwen/Qwen3.5-9B
     dtype: auto
     tensor_parallel_size: 1
     max_model_len: 12000

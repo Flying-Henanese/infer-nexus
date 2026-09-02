@@ -75,6 +75,6 @@ runtime:
   runtime_worker_start_timeout_seconds: 15
 
 model_store:
-  root_dir: models
+  root_dir: /models
   # use mirror endpoint to prevent blocking in mainland China
   huggingface_endpoint: https://hf-mirror.com

@@ -1,0 +1,197 @@
+# Recovery manifest for the shared NAS deployment directory.
+#
+# 2026-08-31: keep four A100-194 workers while bringing up one recovered
+# A100-213 worker.  The current five Serve replicas use one worker each, so
+# do not scale A100-194 down until their placement has been intentionally
+# reconciled.
+#
+# 2026-09-01: enable KubeRay in-tree autoscaling. a100-213-workers keeps a
+# warm baseline of two workers (min=2, max=4) so the Qwen3.5-9B Serve replica
+# (8 CPU per replica, exactly one per worker) can upscale without waiting for
+# a new worker pod. Toggling enableInTreeAutoscaling recreates the cluster,
+# so resubmit Serve apps once via serve-deployer.job.yaml after applying.
+# t4-inference-workers stays disabled: T4 16GB cannot host the registered
+# large models and model configs carry no hardware-type constraints yet.
+apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: infer-nexus-ray
+  namespace: ray
+  labels:
+    app.kubernetes.io/name: infer-nexus
+    app.kubernetes.io/component: ray-cluster
+spec:
+  rayVersion: "2.55.1"
+  # Let the Ray autoscaler manage worker counts between minReplicas/maxReplicas.
+  enableInTreeAutoscaling: true
+  upgradeStrategy:
+    type: Recreate
+  headGroupSpec:
+    rayStartParams:
+      num-gpus: "0"
+    template:
+      spec:
+        nodeSelector:
+          kubernetes.io/hostname: bms-3qab-0001-0001
+        containers:
+          - name: ray-head
+            image: infer-nexus:runtime
+            imagePullPolicy: Never
+            workingDir: /workspace/infer-nexus
+            env:
+              - name: PYTHONPATH
+                value: /workspace/infer-nexus/src
+            resources:
+              requests:
+                cpu: "2"
+                memory: 8Gi
+              limits:
+                cpu: "2"
+                memory: 8Gi
+            volumeMounts:
+              - name: infer-nexus-source
+                mountPath: /workspace/infer-nexus
+                readOnly: true
+              - name: infer-nexus-models
+                mountPath: /models
+                readOnly: true
+        volumes:
+          - name: infer-nexus-source
+            hostPath:
+              path: /nas_data/zhousj/infer-nexus
+              type: Directory
+          - name: infer-nexus-models
+            hostPath:
+              path: /nas_data/models
+              type: Directory
+  workerGroupSpecs:
+    - groupName: a100-workers
+      replicas: 4
+      minReplicas: 1
+      maxReplicas: 4
+      rayStartParams: {}
+      template:
+        spec:
+          nodeSelector:
+            kubernetes.io/hostname: bms-3qab-0001-0001
+          containers:
+            - name: ray-worker
+              image: infer-nexus:runtime
+              imagePullPolicy: Never
+              workingDir: /workspace/infer-nexus
+              env:
+                - name: PYTHONPATH
+                  value: /workspace/infer-nexus/src
+              resources:
+                requests:
+                  cpu: "8"
+                  memory: 32Gi
+                  nvidia.com/gpu: "1"
+                limits:
+                  cpu: "8"
+                  memory: 32Gi
+                  nvidia.com/gpu: "1"
+              volumeMounts:
+                - name: infer-nexus-source
+                  mountPath: /workspace/infer-nexus
+                  readOnly: true
+                - name: infer-nexus-models
+                  mountPath: /models
+                  readOnly: true
+          volumes:
+            - name: infer-nexus-source
+              hostPath:
+                path: /nas_data/zhousj/infer-nexus
+                type: Directory
+            - name: infer-nexus-models
+              hostPath:
+                path: /nas_data/models
+                type: Directory
+    - groupName: a100-213-workers
+      replicas: 2
+      minReplicas: 2
+      maxReplicas: 4
+      rayStartParams: {}
+      template:
+        spec:
+          nodeSelector:
+            kubernetes.io/hostname: bms-3qab-0001-0003
+          containers:
+            - name: ray-worker
+              image: infer-nexus:runtime
+              imagePullPolicy: Never
+              workingDir: /workspace/infer-nexus
+              env:
+                - name: PYTHONPATH
+                  value: /workspace/infer-nexus/src
+              resources:
+                requests:
+                  cpu: "8"
+                  memory: 32Gi
+                  nvidia.com/gpu: "1"
+                limits:
+                  cpu: "8"
+                  memory: 32Gi
+                  nvidia.com/gpu: "1"
+              volumeMounts:
+                - name: infer-nexus-source
+                  mountPath: /workspace/infer-nexus
+                  readOnly: true
+                - name: infer-nexus-models
+                  mountPath: /models
+                  readOnly: true
+          volumes:
+            - name: infer-nexus-source
+              hostPath:
+                path: /nas_data/zhousj/infer-nexus
+                type: Directory
+            - name: infer-nexus-models
+              hostPath:
+                path: /nas_data/models
+                type: Directory
+    - groupName: t4-inference-workers
+      replicas: 0
+      minReplicas: 0
+      maxReplicas: 8
+      rayStartParams: {}
+      template:
+        spec:
+          nodeSelector:
+            kubernetes.io/hostname: bms-v38f-0004
+          tolerations:
+            - key: node-role.kubernetes.io/control-plane
+              operator: Exists
+              effect: NoSchedule
+          containers:
+            - name: ray-worker
+              image: infer-nexus:runtime
+              imagePullPolicy: Never
+              workingDir: /workspace/infer-nexus
+              env:
+                - name: PYTHONPATH
+                  value: /workspace/infer-nexus/src
+              resources:
+                requests:
+                  cpu: "8"
+                  memory: 32Gi
+                  nvidia.com/gpu: "1"
+                limits:
+                  cpu: "8"
+                  memory: 32Gi
+                  nvidia.com/gpu: "1"
+              volumeMounts:
+                - name: infer-nexus-source
+                  mountPath: /workspace/infer-nexus
+                  readOnly: true
+                - name: infer-nexus-models
+                  mountPath: /models
+                  readOnly: true
+          volumes:
+            - name: infer-nexus-source
+              hostPath:
+                path: /nas_data/zhousj/infer-nexus
+                type: Directory
+            - name: infer-nexus-models
+              hostPath:
+                path: /nas_data/models
+                type: Directory

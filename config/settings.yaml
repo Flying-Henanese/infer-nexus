@@ -39,6 +39,14 @@ runtime:
   # so the service can start quickly for simulation and workflow debugging.
   # For real environment, switch to `real` to initialize the actual backend engine.
   backend_init_mode: real
+  gateway_ingress:
+    enabled: true
+    application_name: infer-nexus-gateway
+    route_prefix: /
+    num_replicas: 1
+    num_cpus: 0.5
+    max_ongoing_requests: 16
+    max_queued_requests: 32
   # Per-process active request cap for one Python gateway worker. 0 disables it.
   gateway_worker_max_inflight: 0
   # Retry hint returned with a process-local overload response.

@@ -50,6 +50,13 @@ Check the relevant unit tests around:
 - `tests/test_main.py`
 - `tests/test_runtime.py`
 - `tests/test_proxy_streaming.py`
+- `tests/test_gateway_ingress.py`
+- `tests/test_serve_gateway_poc.py` with `INFER_NEXUS_RUN_RAY_INTEGRATION=1` on the pinned Ray runtime
+- In Serve mode, verify `/readyz` returns 503 while a configured model
+  application is unavailable, then 200 only after every model app is healthy.
+- For gateway queue saturation, confirm the Serve proxy returns HTTP 503 and
+  inspect `serve_deployment_queued_queries`; this rejection happens before
+  FastAPI metrics or worker admission.
 
 For real serve-mode validation, use the deployment checklist in `docs/DEPLOYMENT_CHECKLIST.md`.
 

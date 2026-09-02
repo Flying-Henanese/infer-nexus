@@ -4,9 +4,9 @@ Shared inference service factory for internal development and testing.
 
 ## Current Runtime Shape
 
-- Runtime mode: `Gateway + per-model backend dispatch`
-- Gateway: `FastAPI` (`/v1/*` OpenAI-compatible + `/api/*` platform APIs)
-- Default gateway bind: `0.0.0.0:8000`
+- Runtime mode: `Ray Serve Gateway ingress + per-model backend dispatch`
+- Gateway: `FastAPI` routes carried by a CPU-only Ray Serve ingress (`/v1/*` OpenAI-compatible + `/api/*` platform APIs)
+- Public endpoint: Ray head Serve HTTP proxy on `0.0.0.0:8000`
 - Supported task APIs: `chat`, `embeddings`, `rerank`
 - Backends:
   - `vllm`: local Ray Serve + `LLM.chat/embed/score` path
@@ -82,7 +82,7 @@ The first-stage Compose deployment keeps the current infer-nexus runtime archite
 - `ray-head` runs the Ray control plane.
 - `ray-worker` joins the Ray cluster and hosts Ray Serve replicas plus replica-local vLLM runtimes.
 - `serve-deployer` runs `scripts/run_serve_runtime.py` once, submits Ray Serve applications, waits for readiness, and exits.
-- `gateway` runs the FastAPI/Uvicorn API entrypoint and connects to Ray through `INFER_NEXUS_RAY_ADDRESS`.
+- The `ray-head` Serve HTTP proxy exposes the CPU-only FastAPI Gateway ingress on port 8000; no standalone Uvicorn inference gateway is deployed.
 
 Basic startup flow:
 

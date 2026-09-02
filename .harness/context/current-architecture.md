@@ -8,7 +8,8 @@ Current OpenAI-compatible inference path:
 
 ```text
 client
--> FastAPI gateway
+-> Ray Serve HTTP proxy
+-> InferNexusGatewayIngress (FastAPI API surface)
 -> api/openai_routes.py
 -> api/deps.py
 -> ModelRegistry
@@ -51,13 +52,22 @@ Both use this runtime shape:
 
 ```text
 client
--> gateway container
+-> ray-head Serve HTTP proxy
+-> InferNexusGatewayIngress
 -> Ray Serve deployment handle
 -> Ray Serve replica in ray-worker
 -> replica-local vLLM runtime
 ```
 
-Compose owns container lifecycle for `ray-head`, `ray-worker`, one-shot `serve-deployer`, and long-running `gateway`. Ray Serve owns local deployment and replica lifecycle after `serve-deployer` submits the applications. The CUDA worker registers GPU resources derived from `CUDA_VISIBLE_DEVICES`; the Ascend worker registers custom `NPU` resources derived from `ASCEND_RT_VISIBLE_DEVICES`. Platform-specific accelerator details stay in image, Compose, environment, and settings files rather than request-path code.
+Compose owns `ray-head`, `ray-worker`, and the one-shot `serve-deployer`.
+Ray Serve owns the CPU-only public Gateway ingress plus model deployment and
+replica lifecycle after `serve-deployer` submits the applications.
+`ray-head:8000` is the Compose public API port; there is no separate Compose
+Uvicorn gateway service in serve mode. The CUDA worker registers GPU resources
+derived from `CUDA_VISIBLE_DEVICES`; the Ascend worker registers custom `NPU`
+resources derived from `ASCEND_RT_VISIBLE_DEVICES`. Platform-specific
+accelerator details stay in image, Compose, environment, and settings files
+rather than request-path code.
 
 ## Current Control Boundaries
 
@@ -72,6 +82,8 @@ Compose owns container lifecycle for `ray-head`, `ray-worker`, one-shot `serve-d
 - Process-local gateway worker admission is wired through `WorkerAdmissionMiddleware`.
 - Runtime executor has per-model guards, bounded queue settings, handle timeouts, stream idle/lifetime timeouts, and optional circuit breaker settings.
 - Serve deployment handles are cached by `(app_name, deployment_name)`.
+- Streaming handles must support `options(stream=True)`; unavailable capability
+  fails explicitly and never falls back to unary invocation.
 
 ## Known Checked-in Integration Gaps
 

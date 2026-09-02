@@ -34,8 +34,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--proxy-location",
-        default="Disabled",
-        help="Serve proxy location. Default disables Serve HTTP proxy to avoid port conflicts.",
+        default="HeadOnly",
+        help="Serve proxy location. HeadOnly exposes the public Gateway ingress on the Ray head.",
     )
     parser.add_argument(
         "--blocking",
@@ -171,10 +171,18 @@ def main() -> None:
         "working_dir": ".",
         # 排除这些文件，防止 Ray 自动触发环境构建逻辑
         "excludes": ["pyproject.toml", "uv.lock", ".venv", ".git"],
-        "env_vars": {"RAY_RUNTIME_ENV_MODIFY_PYTHON_PATH": "0"},
+        "env_vars": {
+            "RAY_RUNTIME_ENV_MODIFY_PYTHON_PATH": "0",
+            # The Gateway ingress reads the same validated deployment settings
+            # inside its Serve replica; it must not inherit a Ray Client address.
+            "INFER_NEXUS_SETTINGS": args.settings,
+        },
     }
     ray.init(address=args.ray_address, runtime_env=runtime_env)
-    serve.start(proxy_location=args.proxy_location)
+    serve.start(
+        proxy_location=args.proxy_location,
+        http_options={"host": settings.service.host, "port": settings.service.port},
+    )
 
     bindings = builder.build_serve_bindings(registry, serve=serve)
     app_names: list[str] = []
@@ -194,8 +202,29 @@ def main() -> None:
         timeout_seconds=args.ready_timeout_seconds,
         poll_interval_seconds=args.ready_poll_interval_seconds,
     )
+
+    gateway_spec = builder.build_gateway_spec(registry, settings=settings)
+    gateway_binding = builder.build_gateway_binding(
+        registry,
+        settings=settings,
+        serve=serve,
+    )
+    serve.run(
+        gateway_binding,
+        name=gateway_spec.application_name,
+        route_prefix=gateway_spec.route_prefix,
+        blocking=False,
+    )
+    wait_for_serve_applications_ready(
+        serve=serve,
+        app_names=[gateway_spec.application_name],
+        timeout_seconds=args.ready_timeout_seconds,
+        poll_interval_seconds=args.ready_poll_interval_seconds,
+    )
     print(
-        f"infer-nexus Serve runtime deployed {len(app_names)} application(s) "
+        f"infer-nexus Serve runtime deployed {len(app_names)} model application(s) and "
+        f"Gateway application '{gateway_spec.application_name}' at "
+        f"{settings.service.host}:{settings.service.port}{gateway_spec.route_prefix} "
         f"with proxy_location={args.proxy_location!r}"
     )
 

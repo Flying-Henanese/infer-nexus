@@ -4,6 +4,7 @@ from pathlib import Path
 
 import yaml
 
+from infer_nexus.catalog.loader import load_model_catalog
 from infer_nexus.core.config import load_settings
 
 
@@ -14,6 +15,7 @@ def test_kubernetes_settings_explicitly_bound_the_gateway_ingress() -> None:
     """KubeRay must not inherit deployment capacity from Uvicorn defaults."""
     settings = load_settings(REPOSITORY_ROOT / "config/settings.k8s.yaml")
 
+    assert settings.catalog.models_path == "config/models.k8s-smoke.yaml"
     assert settings.runtime.gateway_ingress.model_dump() == {
         "enabled": True,
         "application_name": "infer-nexus-gateway",
@@ -23,6 +25,13 @@ def test_kubernetes_settings_explicitly_bound_the_gateway_ingress() -> None:
         "max_ongoing_requests": 16,
         "max_queued_requests": 32,
     }
+    catalog = load_model_catalog(REPOSITORY_ROOT / settings.catalog.models_path)
+    assert [
+        (model.name, model.alias, model.min_replicas, model.max_replicas)
+        for model in catalog.models
+    ] == [
+        ("Qwen3.5-9B", "qwen3.5-9b", 1, 1)
+    ]
 
 
 def test_stable_nodeport_targets_only_the_ray_head_serve_proxy() -> None:

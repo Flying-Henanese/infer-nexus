@@ -1,0 +1,44 @@
+# Bounded KubeRay rollout catalog.
+#
+# Keep this intentionally to one warm chat model while validating the
+# Serve-native NodePort path. The full pre-registered inventory remains in
+# config/models.yaml and requires a separate capacity-planned deployment.
+models:
+  - name: Qwen3.5-9B
+    alias: qwen3.5-9b
+    task: chat
+    backend: vllm
+    compat_mode: vllm_native
+    model_path: /models/Qwen/Qwen3.5-9B
+    dtype: auto
+    tensor_parallel_size: 1
+    max_model_len: 12000
+    cpu_per_replica: 8
+    gpu_per_replica: 0.6
+    gpu_memory_utilization: 0.6
+    min_replicas: 1
+    max_replicas: 1
+    deployment_config:
+      serve_deployment_kwargs:
+        max_queued_requests: 32
+        max_ongoing_requests: 2
+    capabilities:
+      - vision
+    engine_kwargs:
+      trust_remote_code: true
+      tool_call_parser: qwen3_coder
+      enable_auto_tool_choice: true
+      limit_mm_per_prompt:
+        image: 10
+    vllm:
+      request_policy:
+        allow_tools: true
+        allow_reasoning: true
+      openai_serving:
+        enabled: true
+        enable_reasoning: true
+        reasoning_parser: qwen3
+    labels:
+      - internal
+      - llm
+      - multimodal

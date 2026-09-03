@@ -25,6 +25,14 @@ The deployer is a one-shot RayJob, not an autoscaling companion for the
 RayCluster. Re-run it only after an intentional catalog or runtime deployment
 change. Updating the catalog does not reload existing Serve applications.
 
+## Current smoke catalog
+
+`config/settings.k8s.yaml` currently selects
+`config/models.k8s-smoke.yaml`, which deploys one warm `qwen3.5-9b` replica
+for a bounded end-to-end validation. The full five-model inventory remains
+unchanged in `config/models.yaml`; restoring it requires a separate capacity
+review and a new deployer Job submission.
+
 ## Controlled rollout
 
 The former controller used `proxy_location=Disabled`. A running controller

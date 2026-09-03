@@ -7,7 +7,9 @@ service:
   api_key_header: X-API-Key
 
 catalog:
-  models_path: config/models.yaml
+  # The KubeRay smoke rollout intentionally deploys one model. The full
+  # catalog remains in config/models.yaml for a later capacity-planned rollout.
+  models_path: config/models.k8s-smoke.yaml
 
 cluster:
   inference_device_type: cuda

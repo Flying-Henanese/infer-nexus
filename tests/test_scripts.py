@@ -138,7 +138,7 @@ def test_run_serve_runtime_main_deploys_per_model_apps(monkeypatch, prepared_mod
     class FakeApplicationStatus:
         def __init__(self) -> None:
             self.status = 'RUNNING'
-            self.deployments = {'model-qwen3-32b-instruct': FakeDeploymentStatus('HEALTHY')}
+            self.deployments = {'model-Qwen3.5-9B': FakeDeploymentStatus('HEALTHY')}
 
     class FakeServeStatus:
         def __init__(self) -> None:

@@ -21,7 +21,7 @@ Use this file before editing `config/models.yaml`.
 
 ## Enabled Model Pattern
 
-Current enabled models are five local `backend: vllm` entries. Do not assume that proxy models are active just because proxy support exists in code. Tests consume the active catalog directly; check `.harness/checklists/verification.md` for the current catalog-coupled test baseline.
+The active catalog currently contains only the local `Qwen3.5-9B` `backend: vllm` entry for A100 Compose validation. The other declared local models are commented out and do not deploy. Do not assume that proxy models are active just because proxy support exists in code. Tests consume the active catalog directly; check `.harness/checklists/verification.md` for the current catalog-coupled test baseline.
 
 ## Placement Rules
 
@@ -37,9 +37,9 @@ Current enabled models are five local `backend: vllm` entries. Do not assume tha
 
 - Default `config/settings.yaml` resolves relative model paths under the repository-local `models/` directory.
 - Both Compose variants mount the model store at `/models` and set `model_store.root_dir: /models`.
-- Enabled entries currently use absolute `/app/models/...` values.
-- `LocalModelStore` preserves absolute paths instead of resolving them under `root_dir`, so those entries point at neither configured storage location.
-- Use paths relative to the configured model-store root, or absolute paths that match the selected runtime mount. This file records the mismatch but does not change `config/models.yaml`.
+- The active Qwen3.5-9B entry uses the relative `Qwen/Qwen3.5-9B` path. Its Compose model-store root is `/models`, matching the host-mounted model directory.
+- `LocalModelStore` preserves absolute paths instead of resolving them under `root_dir`; the commented-out entries retain historical `/app/models/...` paths and must be corrected before re-enabling them.
+- Use paths relative to the configured model-store root, or absolute paths that match the selected runtime mount.
 
 ## Current Non-Goals
 

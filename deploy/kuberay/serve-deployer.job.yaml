@@ -17,6 +17,7 @@ spec:
     python scripts/run_serve_runtime.py
     --settings config/settings.k8s.yaml
     --ray-address auto
+    --proxy-location HeadOnly
     --ready-timeout-seconds 1800
   # The driver runs inside this RayCluster. Reserving one CPU here fragments
   # the only empty 8-CPU worker and blocks the Qwen3.5-9B replica (8 CPU).

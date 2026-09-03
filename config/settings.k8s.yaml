@@ -31,6 +31,17 @@ scheduler:
 runtime:
   device_env_strategy: ray_managed
   backend: vllm
+  # Production requests enter through the Ray head's HeadOnly Serve proxy.
+  # These values deliberately do not inherit the standalone Uvicorn worker
+  # settings above: they define the bounded CPU-only Serve deployment.
+  gateway_ingress:
+    enabled: true
+    application_name: infer-nexus-gateway
+    route_prefix: /
+    num_replicas: 1
+    num_cpus: 0.5
+    max_ongoing_requests: 16
+    max_queued_requests: 32
   # Stub-only: skips real model execution and uses mocked runtime responses.
   # Useful for local API contract testing and integration without GPU/models.
   # For real environment, switch to `serve` to enable real inference execution.

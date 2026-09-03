@@ -1,0 +1,22 @@
+# Stable northbound entrypoint for the Serve-native Gateway ingress.
+#
+# The selector intentionally targets only the Ray head's Serve HTTP proxy. It
+# does not expose the Ray dashboard, GCS, Ray Client, or metrics ports.
+apiVersion: v1
+kind: Service
+metadata:
+  name: infer-nexus-gateway
+  namespace: ray
+  labels:
+    app.kubernetes.io/name: infer-nexus-gateway
+    app.kubernetes.io/part-of: infer-nexus
+spec:
+  type: NodePort
+  selector:
+    ray.io/cluster: infer-nexus-ray
+    ray.io/node-type: head
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+      nodePort: 30800

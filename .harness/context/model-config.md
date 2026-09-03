@@ -32,8 +32,22 @@ The active catalog currently contains only the local `Qwen3.5-9B` `backend: vllm
 - `vllm.openai_serving` controls native vLLM OpenAI serving adapter behavior.
 - `deployment_config.request_router_config` holds Ray Serve request-router options. Cache affinity is configured here, for example `request_router_class: ray.serve.llm.request_router.PrefixCacheAffinityRouter`.
 - `proxy_config` is only for `backend: vllm_openai_proxy`.
+- `gpu_per_replica` is the cross-platform accelerator-demand field: the CUDA
+  deployment factory converts it to Ray `num_gpus`, while the Ascend factory
+  converts it to `resources: {NPU: ...}`. It never identifies a fixed physical
+  device.
 
-## Current Path Mismatch
+## Current Validation Capacity
+
+- Qwen3.5-9B has `min_replicas: 1`, `max_replicas: 3`, and requests `0.6`
+  accelerator units per replica.
+- The A100 Compose validation used a two-GPU pool and proved one warm replica
+  and the full HTTP/SSE request path. It does not establish that all three
+  configured replicas fit in that pool.
+- Ascend uses the same catalog and resource demand. Its actual NPU capacity and
+  multi-replica visibility still require target-host validation.
+
+## Model Store Paths And Historical Entries
 
 - Default `config/settings.yaml` resolves relative model paths under the repository-local `models/` directory.
 - Both Compose variants mount the model store at `/models` and set `model_store.root_dir: /models`.

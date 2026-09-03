@@ -31,15 +31,16 @@ against source before changing code.
   - Current runbook for gateway metrics plus Ray Serve hosted vLLM monitoring.
 
 - `docs/DEPLOYMENT_CHECKLIST.md`
-  - Current deployment bring-up checklist for Ray Serve validation.
-
-- `docs/DOCKER_COMPOSE_RUNTIME_SPLIT_PLAN.md`
-  - Current reference for the root Compose container lifecycle split.
-  - Use for `gateway`, `ray-head`, `ray-worker`, `serve-deployer`, `Dockerfile`, `docker-compose.yml`, and `config/settings.compose.yaml` questions.
+  - Current reference for the Ray Serve bring-up sequence and endpoint checks.
+  - Its chat example still names the disabled `qwen3.5-27b` catalog entry. For
+    the current validation catalog, use `qwen3.5-9b` instead, as specified in
+    `.harness/workflows/remote-deploy-and-validate.md`.
 
 - `docs/ASCEND_DEPLOYMENT_CONFIGURATION.md`
   - Current deployment reference for `ascend_deploy/`, `pyproject.ascend.toml`, and `config/settings.ascend-compose.yaml`.
-  - It correctly documents `/models` as the Compose model-store mount; the enabled catalog currently still contains conflicting absolute `/app/models/...` paths.
+  - It documents `/models` as the Compose model-store mount. The active
+    Qwen3.5-9B catalog entry is relative to that mount; commented historical
+    entries still require path correction before they are enabled.
 
 ## Current But Narrow
 
@@ -49,7 +50,9 @@ against source before changing code.
 
 - `docs/OPENAI_PROXY_REFACTOR_PLAN.md`
   - Use as proxy architecture background.
-  - Current code supports proxy dispatch for chat, embeddings, and rerank, but production config currently still uses local `backend: vllm` for enabled models such as MinerU.
+  - Current code supports proxy dispatch for chat, embeddings, and rerank, but
+    the active validation catalog uses only the local Qwen3.5-9B
+    `backend: vllm` model.
 
 - `docs/PREFIX_CACHE_STICKY_DESIGN.md`
   - Current narrow reference for the prefix-cache affinity design position.
@@ -69,7 +72,18 @@ Do not treat these as current implementation:
 - `docs/MULTI_NODE_INFERENCE_CONTROL_PLANE.md`
 - `docs/VLLM_NATIVE_METRICS_DESIGN.md`
 
-They are useful for future planning, but current source code does not implement their main target capabilities.
+They are useful for future planning, but current source code does not implement
+their main target capabilities.
+
+## Superseded Plans
+
+- `docs/DOCKER_COMPOSE_RUNTIME_SPLIT_PLAN.md`
+  - Describes the earlier four-container topology with a standalone Uvicorn
+    `gateway` service.
+  - It is superseded for current runtime behavior by `docs/ARCHITECTURE.md`,
+    `docs/DEPLOYMENT_CHECKLIST.md`, and the checked-in Compose files. Current
+    Compose has only `ray-head`, `ray-worker`, and one-shot `serve-deployer`;
+    the Gateway is a Ray Serve deployment behind `ray-head:8000`.
 
 ## Debug Records
 

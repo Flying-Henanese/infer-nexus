@@ -94,7 +94,8 @@ Use this file to choose the first source files to inspect. It is a navigation ma
 
 - `config/models.yaml`
   - Active model catalog.
-  - Current enabled entries are local `backend: vllm` models unless changed in this file.
+  - The current validation catalog enables only the local Qwen3.5-9B
+    `backend: vllm` model; the remaining catalog entries are commented out.
   - Ray Serve request-router options, including cache-affinity router class settings, belong under each model's `deployment_config.request_router_config`.
 
 ## Container Runtimes
@@ -107,7 +108,10 @@ Use this file to choose the first source files to inspect. It is a navigation ma
   - Builds the root CUDA-oriented shared runtime image.
 
 - `ascend_deploy/docker-compose.yml`
-  - Defines the same four service roles for Ascend and registers custom Ray `NPU` resources from `ASCEND_RT_VISIBLE_DEVICES`.
+  - Defines the same three Compose services as CUDA: `ray-head`, `ray-worker`,
+    and one-shot `serve-deployer`.
+  - Registers custom Ray `NPU` resources from `ASCEND_RT_VISIBLE_DEVICES`; the
+    public Gateway remains a CPU-only Serve deployment behind `ray-head:8000`.
 
 - `ascend_deploy/dockerfile`
   - Builds on an Ascend runtime image and installs application dependencies without intentionally replacing the image-provided torch/vLLM/vLLM-Ascend stack.

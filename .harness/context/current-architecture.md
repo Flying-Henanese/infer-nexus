@@ -63,11 +63,24 @@ Compose owns `ray-head`, `ray-worker`, and the one-shot `serve-deployer`.
 Ray Serve owns the CPU-only public Gateway ingress plus model deployment and
 replica lifecycle after `serve-deployer` submits the applications.
 `ray-head:8000` is the Compose public API port; there is no separate Compose
-Uvicorn gateway service in serve mode. The CUDA worker registers GPU resources
-derived from `CUDA_VISIBLE_DEVICES`; the Ascend worker registers custom `NPU`
-resources derived from `ASCEND_RT_VISIBLE_DEVICES`. Platform-specific
-accelerator details stay in image, Compose, environment, and settings files
-rather than request-path code.
+Uvicorn gateway service in Serve mode. Only `ray-head` and `ray-worker` remain
+running after the deployment job exits successfully. The CUDA worker registers
+GPU resources derived from `CUDA_VISIBLE_DEVICES`; the Ascend worker registers
+custom `NPU` resources derived from `ASCEND_RT_VISIBLE_DEVICES`.
+Platform-specific accelerator details stay in image, Compose, environment, and
+settings files rather than request-path code.
+
+## Verified Runtime Status
+
+- The root CUDA Compose path has been validated end to end on A100 with the
+  active Qwen3.5-9B catalog: host requests to `127.0.0.1:8000` (mapped to
+  `ray-head:8000`) reached the Serve HTTP proxy, Gateway ingress, a vLLM model
+  replica, and the HTTP/SSE response path. `/healthz`, `/readyz`, `/v1/models`,
+  non-streaming chat, and streaming chat were checked.
+- The Ascend Compose file has the same three-service topology and the same
+  Gateway deployment path. Its Compose rendering and NPU resource mapping have
+  been checked locally, but it has not yet received an end-to-end run on an
+  Ascend host.
 
 ## Current Control Boundaries
 
@@ -87,8 +100,18 @@ rather than request-path code.
 
 ## Known Checked-in Integration Gaps
 
-- `config/settings.yaml` currently selects `inference_device_type: npu`, while `scripts/start_minimal.sh` registers only GPU resources and also defaults to that settings file. Use the platform-specific settings/startup pairing deliberately; the defaults are not currently self-consistent.
-- Enabled entries in `config/models.yaml` currently use absolute `/app/models/...` paths. Absolute paths bypass `model_store.root_dir`, so they match neither the default local `models/` root nor the `/models` mount used by both Compose variants.
+- `config/settings.yaml` now defaults to CUDA and matches
+  `scripts/start_minimal.sh`. `scripts/start_minimal_ascend.sh` still defaults
+  to `config/settings.yaml`, so callers must pass
+  `--settings config/settings.ascend-compose.yaml` for an Ascend launch.
+- The active Qwen3.5-9B catalog entry uses a relative path that resolves below
+  the Compose `/models` mount. The commented historical entries retain
+  `/app/models/...` paths and must be corrected before being re-enabled.
+- Ascend starts the worker with
+  `RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1` by default for runtime
+  compatibility. A real Ascend run must prove that Ray actor allocation and
+  `ASCEND_RT_VISIBLE_DEVICES` agree before multi-replica autoscaling is relied
+  upon.
 - `AdmissionController.check_model_request()` is a no-op integration hook. Active protection currently comes from task/model validation, artifact checks, process-local worker admission, and `RuntimeExecutor` guards; readiness- and cluster-capacity-aware admission are not implemented.
 - The full unit suite is not green against the current catalog. Many API, dispatcher, runtime, and script tests still expect the previous three-model fixture and old aliases. See `.harness/checklists/verification.md` before interpreting full-suite failures.
 

@@ -30,9 +30,11 @@ Use this file to orient yourself before tracing request behavior. Verify details
 
 ## Local Script Startup Caveat
 
-- `scripts/start_minimal.sh` is CUDA-oriented and registers GPU resources.
-- `scripts/start_minimal_ascend.sh` registers custom NPU resources.
-- The checked-in default settings/device pairing is not self-consistent for both scripts. See the canonical gap description in `.harness/context/current-architecture.md`.
+- `scripts/start_minimal.sh` is CUDA-oriented, registers GPU resources, and
+  matches the CUDA default in `config/settings.yaml`.
+- `scripts/start_minimal_ascend.sh` registers custom NPU resources, but its
+  default settings argument is still `config/settings.yaml`. Invoke it with
+  `--settings config/settings.ascend-compose.yaml` on Ascend.
 
 ## Serve Runtime Startup
 

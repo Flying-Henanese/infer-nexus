@@ -806,6 +806,18 @@ At runtime, `infer-nexus` should:
 - pass model memory/context constraints (`max_model_len`, `gpu_memory_utilization`) through backend runtime specs
 - allow explicitly configured upstream proxy models to bypass local artifact checks
 
+### KubeRay ingress shape
+
+KubeRay uses the same CPU-only `InferNexusGatewayIngress` Serve application as
+the Compose topology. The stable `infer-nexus-gateway` NodePort Service routes
+only to the Ray head's HeadOnly Serve HTTP proxy on port 8000; it must not
+expose Ray Client, GCS, dashboard, or metrics ports. There is no standalone
+Uvicorn Gateway Deployment in this shape. The one-shot deployer submits all
+pre-registered model applications before the Gateway application, so catalog
+changes require an intentional resubmission. A controller that was started
+with a disabled proxy requires a controlled Serve/RayCluster reset before the
+HeadOnly proxy can take effect.
+
 Example model declaration:
 
 ```yaml

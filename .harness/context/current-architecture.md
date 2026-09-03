@@ -69,6 +69,12 @@ resources derived from `ASCEND_RT_VISIBLE_DEVICES`. Platform-specific
 accelerator details stay in image, Compose, environment, and settings files
 rather than request-path code.
 
+The KubeRay shape uses the same in-Ray Gateway application. Its stable
+`infer-nexus-gateway` NodePort Service selects the Ray head Serve HTTP proxy on
+port 8000; it does not create a Uvicorn Deployment or a Ray Client connection.
+`deploy/kuberay/serve-deployer.job.yaml` is one-shot and submits all
+catalog-derived model applications before the Gateway application.
+
 ## Current Control Boundaries
 
 - `infer-nexus` owns public HTTP ingress, model lookup, request validation, admission checks, proxying, and app-level metrics.

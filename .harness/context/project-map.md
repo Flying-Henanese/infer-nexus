@@ -13,6 +13,11 @@ Use this file to choose the first source files to inspect. It is a navigation ma
 - `Dockerfile`: root CUDA-oriented container runtime image definition.
 - `docker-compose.yml`: root CUDA containerized runtime topology.
 - `ascend_deploy/`: Ascend-specific image and Compose topology.
+- `deploy/kuberay/`: KubeRay deployment assets. `raycluster.recovery.yaml`
+  defines the cluster, `serve-deployer.job.yaml` is the one-shot catalog
+  deployer, and `serve-gateway.service.yaml` provides the stable NodePort to
+  the Ray head's Serve HTTP proxy. There is no KubeRay Uvicorn Gateway
+  Deployment.
 - `pyproject.ascend.toml`: application dependency set used when building the Ascend image without replacing its vendor runtime stack.
 - `.harness/`: Codex collaboration context, rules, and checklists.
 

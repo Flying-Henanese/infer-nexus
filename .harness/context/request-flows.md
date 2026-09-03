@@ -43,6 +43,21 @@ Use this file to orient yourself before tracing request behavior. Verify details
 5. The script waits for model applications, then submits the one Gateway application with route prefix `/`.
 6. Gateway ingress later reaches these apps through cached deployment handles.
 
+## KubeRay Serve Runtime Startup
+
+1. `serve-deployer.job.yaml` runs `scripts/run_serve_runtime.py` once against
+   the ready RayCluster with
+   `--proxy-location HeadOnly` and the KubeRay settings file.
+2. The deployer initializes the Serve controller and HeadOnly HTTP proxy, then
+   submits and waits for all pre-registered local model
+   applications, then submits and waits for `infer-nexus-gateway` at `/`.
+3. The stable NodePort Service forwards port 30800 only to the head proxy's
+   port 8000. The Gateway resolves model handles inside the Serve data plane.
+
+The existing Serve controller must be reset before a `Disabled` proxy setup can
+be replaced by `HeadOnly`; re-running only the deployer cannot change that
+cluster-wide controller setting.
+
 ## `/v1/models`
 
 1. `api/openai_routes.py:list_models()` receives the request.

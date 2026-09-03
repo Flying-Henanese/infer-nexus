@@ -102,9 +102,7 @@ def test_run_serve_runtime_main_deploys_per_model_apps(monkeypatch, prepared_mod
         captured['registry_size'] = len(registry.list_models())
         captured['inference_device_type'] = self.deployment_factory.inference_device_type
         return {
-            'qwen3-32b-instruct': {'app': 'qwen'},
-            'bge-large-zh-v1_5': {'app': 'embed'},
-            'bge-reranker-v2-m3': {'app': 'rerank'},
+            'Qwen3.5-9B': {'app': 'qwen'},
         }
 
     monkeypatch.setattr(
@@ -116,9 +114,7 @@ def test_run_serve_runtime_main_deploys_per_model_apps(monkeypatch, prepared_mod
         run_serve_runtime.ServeApplicationBuilder,
         'build_specs',
         lambda self, registry: [
-            types.SimpleNamespace(model_name='qwen3-32b-instruct'),
-            types.SimpleNamespace(model_name='bge-large-zh-v1_5'),
-            types.SimpleNamespace(model_name='bge-reranker-v2-m3'),
+            types.SimpleNamespace(model_name='Qwen3.5-9B'),
         ],
     )
     monkeypatch.setattr(
@@ -147,9 +143,7 @@ def test_run_serve_runtime_main_deploys_per_model_apps(monkeypatch, prepared_mod
     class FakeServeStatus:
         def __init__(self) -> None:
             self.applications = {
-                'infer-nexus-model-qwen3-32b-instruct': FakeApplicationStatus(),
-                'infer-nexus-model-bge-large-zh-v1_5': FakeApplicationStatus(),
-                'infer-nexus-model-bge-reranker-v2-m3': FakeApplicationStatus(),
+                'infer-nexus-model-Qwen3.5-9B': FakeApplicationStatus(),
                 'infer-nexus-gateway': FakeApplicationStatus(),
             }
 
@@ -176,13 +170,11 @@ def test_run_serve_runtime_main_deploys_per_model_apps(monkeypatch, prepared_mod
     assert captured['proxy_location'] == 'HeadOnly'
     assert captured['http_options'] == {'host': '0.0.0.0', 'port': 8000}
     assert captured['runtime_env']['working_dir'] == '.'
-    assert captured['registry_size'] == 5
+    assert captured['registry_size'] == 1
     assert captured['inference_device_type'] == 'npu'
     assert [item['name'] for item in captured_runs] == [
-        'infer-nexus-model-qwen3-32b-instruct',
-        'infer-nexus-model-bge-large-zh-v1_5',
-        'infer-nexus-model-bge-reranker-v2-m3',
+        'infer-nexus-model-Qwen3.5-9B',
         'infer-nexus-gateway',
     ]
-    assert [item['route_prefix'] for item in captured_runs] == [None, None, None, '/']
+    assert [item['route_prefix'] for item in captured_runs] == [None, '/']
     assert all(item['blocking'] is False for item in captured_runs)

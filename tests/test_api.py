@@ -402,19 +402,21 @@ def test_chat_completions_returns_429_when_admission_rejects(prepared_model_stor
 
 def test_chat_completions_returns_429_when_gateway_admission_rejects(
     prepared_model_store: Path,
+    monkeypatch,
 ) -> None:
     """Gateway-local runtime admission rejects should map to rate limiting."""
     app = create_app()
     payload = {
-        'model': 'qwen3-chat',
+        'model': 'qwen3.5-9b',
         'messages': [{'role': 'user', 'content': 'hello'}],
     }
 
     with TestClient(app) as client:
-        async def reject_gateway_overload(*, target, request):
+        async def reject_gateway_overload(_executor, *, target, request):
             raise AdmissionRejectedError('gateway overloaded', code='gateway_overloaded')
 
-        client.app.state.runtime_dispatcher.executor.execute_chat = reject_gateway_overload
+        client.app.state.model_store.require_model_path = lambda _model: None
+        monkeypatch.setattr(RuntimeExecutor, 'execute_chat', reject_gateway_overload)
         response = client.post('/v1/chat/completions', json=payload)
 
     assert response.status_code == 429
@@ -442,19 +444,21 @@ def test_chat_completions_returns_501_when_serve_handle_is_unavailable(
 
 def test_chat_completions_maps_proxy_upstream_timeout_to_504(
     prepared_model_store: Path,
+    monkeypatch,
 ) -> None:
     """Gateway-stage upstream timeouts should use a stable 504 error response."""
     app = create_app()
     payload = {
-        'model': 'qwen3-chat',
+        'model': 'qwen3.5-9b',
         'messages': [{'role': 'user', 'content': 'hello'}],
     }
 
     with TestClient(app) as client:
-        async def raise_upstream_timeout(*, target, request):
+        async def raise_upstream_timeout(_executor, *, target, request):
             raise RuntimeNotConnectedError('upstream timed out', code='upstream_timeout')
 
-        client.app.state.runtime_dispatcher.executor.execute_chat = raise_upstream_timeout
+        client.app.state.model_store.require_model_path = lambda _model: None
+        monkeypatch.setattr(RuntimeExecutor, 'execute_chat', raise_upstream_timeout)
         response = client.post('/v1/chat/completions', json=payload)
 
     assert response.status_code == 504
@@ -464,21 +468,23 @@ def test_chat_completions_maps_proxy_upstream_timeout_to_504(
 
 def test_chat_completions_returns_500_when_serve_execution_fails(
     prepared_model_store: Path,
+    monkeypatch,
 ) -> None:
     """serve 远端执行失败时 chat 接口应返回 500 而不是 501。"""
     app = create_app()
     payload = {
-        'model': 'qwen3-chat',
+        'model': 'qwen3.5-9b',
         'messages': [{'role': 'user', 'content': 'hello'}],
     }
 
     with TestClient(app) as client:
-        async def raise_runtime_execution_error(*, target, request):
+        async def raise_runtime_execution_error(_executor, *, target, request):
             raise RuntimeExecutionError(
                 f"Serve execution failed for deployment '{target.deployment_name}' in app '{target.app_name}'."
             )
 
-        client.app.state.runtime_dispatcher.executor.execute_chat = raise_runtime_execution_error
+        client.app.state.model_store.require_model_path = lambda _model: None
+        monkeypatch.setattr(RuntimeExecutor, 'execute_chat', raise_runtime_execution_error)
         response = client.post('/v1/chat/completions', json=payload)
 
     assert response.status_code == 500

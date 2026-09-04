@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from time import perf_counter
 
 import httpx
 import pytest
@@ -151,6 +152,7 @@ def test_chat_stream_response_preserves_vllm_reasoning_deltas() -> None:
                 },
             ],
         },
+        stream_start_time=perf_counter(),
     )
 
     async def collect() -> bytes:
@@ -189,6 +191,7 @@ def test_chat_stream_response_forwards_raw_sse_bytes_unchanged() -> None:
         request,
         target,
         {'stream_chunks': [raw]},
+        stream_start_time=perf_counter(),
     )
 
     async def collect() -> bytes:
@@ -243,7 +246,12 @@ def test_chat_stream_response_maps_standard_delta_events_to_openai_sse() -> None
             'finish_reason': 'stop',
         }
 
-    response = executor._build_chat_stream_response(request, target, chunks())
+    response = executor._build_chat_stream_response(
+        request,
+        target,
+        chunks(),
+        stream_start_time=perf_counter(),
+    )
 
     async def collect() -> list[dict | str]:
         payloads = []

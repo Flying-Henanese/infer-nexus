@@ -11,6 +11,7 @@ from starlette.responses import StreamingResponse
 from infer_nexus.catalog.models import ModelCatalogFile, ModelConfig
 from infer_nexus.catalog.loader import load_model_catalog
 from infer_nexus.catalog.registry import ModelRegistry
+from infer_nexus.core.config import Settings
 from infer_nexus.core.enums import BackendType, TaskType
 from infer_nexus.core.errors import AdmissionRejectedError, RuntimeNotConnectedError
 from infer_nexus.core.schemas import ChatCompletionsRequest, EmbeddingRequest, RerankRequest
@@ -525,6 +526,42 @@ def test_dispatch_chat_uses_serve_handle_in_serve_mode() -> None:
     assert 'model-qwen3-32b-instruct' in str(response.choices[0].message.content)
 
 
+def test_dispatcher_reuses_precomputed_catalog_target() -> None:
+    """Request routing never derives Ray application names from client input."""
+    registry, _, dispatcher = make_dispatcher()
+    model = registry.get('qwen3.5-27b')
+
+    first = dispatcher.resolve_target(model)
+    second = dispatcher.resolve_target(model)
+
+    assert first is second
+    assert first.app_name == 'infer-nexus-model-Qwen3.5-27B'
+    assert first.deployment_name == 'model-Qwen3.5-27B'
+
+
+def test_dispatcher_uses_the_deployed_gateway_target_snapshot() -> None:
+    """A restarted ingress cannot reconstruct a different Serve address from mutable config."""
+    registry, store, _ = make_dispatcher()
+    builder = ServeApplicationBuilder(model_store=store)
+    snapshot = builder.build_gateway_spec(registry, settings=Settings()).model_targets
+    model = registry.list_models()[0]
+    snapshot[model.name] = {
+        "application_name": "locked-model-application",
+        "deployment_name": "locked-model-deployment",
+    }
+    dispatcher = RuntimeDispatcher(
+        registry=registry,
+        serve_builder=builder,
+        executor=RuntimeExecutor(),
+        model_targets=snapshot,
+    )
+
+    target = dispatcher.resolve_target(model)
+
+    assert target.app_name == "locked-model-application"
+    assert target.deployment_name == "locked-model-deployment"
+
+
 def test_dispatch_chat_uses_keyword_request_payload_when_invoking_serve_handle() -> None:
     """Serve chat dispatch should send request payload as an explicit keyword argument."""
     resolver = ServeDeploymentHandleResolver(serve=FakeKeywordOnlyServe())
@@ -592,6 +629,59 @@ def test_dispatch_chat_stream_uses_serve_streaming_handle_without_rewriting_requ
     assert b'chat.completion.chunk' in body
     assert b'"content": "hello"' in body
     assert body.endswith(b'data: [DONE]\n\n')
+
+
+def test_streaming_handle_capability_failure_never_falls_back_to_unary_handle() -> None:
+    """A Ray Client-style stream capability error must fail before invoking the model method."""
+
+    class StreamMethod:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def remote(self, *, request_payload: dict) -> dict:
+            self.calls += 1
+            return {"status": "ok", "payload": request_payload}
+
+    class UnsupportedStreamHandle:
+        def __init__(self) -> None:
+            self.chat_completion_stream = StreamMethod()
+
+        def options(self, *, stream: bool) -> "UnsupportedStreamHandle":
+            assert stream is True
+            raise RuntimeError("stream=True is not supported over Ray Client")
+
+    class UnsupportedStreamServe:
+        def __init__(self) -> None:
+            self.handle = UnsupportedStreamHandle()
+
+        def get_deployment_handle(self, deployment_name: str, app_name: str) -> UnsupportedStreamHandle:
+            return self.handle
+
+    serve = UnsupportedStreamServe()
+    executor = RuntimeExecutor(
+        mode='serve',
+        handle_resolver=ServeDeploymentHandleResolver(serve=serve),
+    )
+    target = RuntimeTarget(
+        model_name='registered-model',
+        model_alias='registered-model',
+        backend=BackendType.VLLM,
+        app_name='infer-nexus-model-registered-model',
+        deployment_name='model-registered-model',
+        runtime_context={'served_model_name': 'registered-model'},
+    )
+
+    with pytest.raises(RuntimeNotConnectedError) as exc_info:
+        asyncio.run(
+            executor._invoke_handle_stream(
+                target=target,
+                method_name='chat_completion_stream',
+                payload={'stream': True},
+            )
+        )
+
+    assert exc_info.value.code == 'streaming_unavailable'
+    assert serve.handle.chat_completion_stream.calls == 0
 
 
 def test_dispatch_embedding_uses_serve_handle_in_serve_mode() -> None:

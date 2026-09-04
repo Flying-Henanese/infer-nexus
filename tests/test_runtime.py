@@ -9,6 +9,7 @@ import pytest
 from infer_nexus.catalog.loader import load_model_catalog
 from infer_nexus.catalog.models import ModelCatalogFile, ModelConfig
 from infer_nexus.catalog.registry import ModelRegistry
+from infer_nexus.core.config import Settings
 from infer_nexus.backends.vllm import DynamicVLLMOpenAIChatServingAdapter
 from infer_nexus.backends.vllm import DynamicVLLMOpenAIEmbeddingServingAdapter
 from infer_nexus.backends.vllm import OpenAIServingEngineClientCompatProxy
@@ -60,6 +61,21 @@ class FakeServe:
             return FakeBoundDeployment(kwargs, replica_cls)
 
         return wrapper
+
+
+class FakeGatewayIngressServe(FakeServe):
+    """Fake Serve surface that records the ASGI application wrapped by ingress."""
+
+    def __init__(self) -> None:
+        self.ingress_app = None
+
+    def ingress(self, app):
+        self.ingress_app = app
+
+        def wrap(replica_cls):
+            return replica_cls
+
+        return wrap
 
 
 class FakeOpenAIChatServingAdapter:
@@ -340,6 +356,40 @@ def test_build_serve_bindings_from_fake_serve(
     assert qwen_binding['args'][0]['runtime_spec']['model_path'].endswith(
         '/models/Qwen/Qwen3-32B-Instruct'
     )
+
+
+def test_build_gateway_binding_uses_a_unique_bounded_cpu_ingress(
+    registry: ModelRegistry,
+    model_store: LocalModelStore,
+) -> None:
+    """The public Gateway is the only bounded Serve HTTP deployment."""
+    settings = Settings()
+    settings.service.name = 'infer-nexus'
+    settings.runtime.gateway_ingress.application_name = 'infer-nexus-gateway'
+    settings.runtime.gateway_ingress.num_replicas = 2
+    settings.runtime.gateway_ingress.num_cpus = 0.5
+    settings.runtime.gateway_ingress.max_ongoing_requests = 12
+    settings.runtime.gateway_ingress.max_queued_requests = 24
+    serve = FakeGatewayIngressServe()
+    builder = ServeApplicationBuilder(model_store=model_store, service_name=settings.service.name)
+
+    spec = builder.build_gateway_spec(registry, settings=settings)
+    binding = builder.build_gateway_binding(registry, settings=settings, serve=serve)
+
+    assert spec.application_name == 'infer-nexus-gateway'
+    assert spec.route_prefix == '/'
+    assert spec.model_targets['qwen3.5-27b'] == {
+        'application_name': 'infer-nexus-model-Qwen3.5-27B',
+        'deployment_name': 'model-Qwen3.5-27B',
+    }
+    assert binding['deployment_kwargs'] == {
+        'name': 'gateway',
+        'num_replicas': 2,
+        'max_ongoing_requests': 12,
+        'max_queued_requests': 24,
+        'ray_actor_options': {'num_cpus': 0.5},
+    }
+    assert serve.ingress_app is not None
 
 
 def test_build_serve_bindings_include_request_router_config_for_local_chat_model() -> None:

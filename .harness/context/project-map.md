@@ -19,7 +19,7 @@ Use this file to choose the first source files to inspect. It is a navigation ma
 ## Application Package
 
 - `src/infer_nexus/main.py`
-  - FastAPI app factory and lifespan wiring.
+  - Reusable FastAPI app factory and host-specific lifespan wiring.
   - Loads settings, catalog, model store, admission, Serve builder, runtime executor, worker admission, and dispatcher into `app.state`.
 
 - `src/infer_nexus/api/`
@@ -44,6 +44,7 @@ Use this file to choose the first source files to inspect. It is a navigation ma
   - `serve_app.py`: builds Ray Serve application bindings and runtime context.
   - `deployments.py`: maps model configs to Ray Serve deployment specs.
   - `handles.py`: caches Ray Serve deployment handles.
+  - `gateway_ingress.py`: CPU-only Serve ASGI ingress binding and static public route configuration.
   - `worker_client.py`: runtime-worker client scaffolding, not an active isolation path.
 
 - `src/infer_nexus/backends/`
@@ -86,27 +87,31 @@ Use this file to choose the first source files to inspect. It is a navigation ma
   - Default service, catalog path, scheduler, runtime mode, gateway guard, model store, and cluster settings.
 
 - `config/settings.compose.yaml`
-  - Root Compose settings entrypoint used by `serve-deployer` and `gateway`.
+  - Root Compose settings entrypoint passed to `serve-deployer` and Gateway ingress replicas.
 
 - `config/settings.ascend-compose.yaml`
   - Ascend Compose settings entrypoint; requests custom Ray `NPU` resources.
 
 - `config/models.yaml`
   - Active model catalog.
-  - Current enabled entries are local `backend: vllm` models unless changed in this file.
+  - The current validation catalog enables only the local Qwen3.5-9B
+    `backend: vllm` model; the remaining catalog entries are commented out.
   - Ray Serve request-router options, including cache-affinity router class settings, belong under each model's `deployment_config.request_router_config`.
 
 ## Container Runtimes
 
 - `docker-compose.yml`
-  - Defines `ray-head`, `ray-worker`, one-shot `serve-deployer`, and long-running `gateway`.
+  - Defines `ray-head`, `ray-worker`, and one-shot `serve-deployer`; `ray-head:8000` exposes the Serve Gateway ingress.
   - Compose owns container lifecycle; Ray Serve owns deployment and replica lifecycle after apps are submitted.
 
 - `Dockerfile`
   - Builds the root CUDA-oriented shared runtime image.
 
 - `ascend_deploy/docker-compose.yml`
-  - Defines the same four service roles for Ascend and registers custom Ray `NPU` resources from `ASCEND_RT_VISIBLE_DEVICES`.
+  - Defines the same three Compose services as CUDA: `ray-head`, `ray-worker`,
+    and one-shot `serve-deployer`.
+  - Registers custom Ray `NPU` resources from `ASCEND_RT_VISIBLE_DEVICES`; the
+    public Gateway remains a CPU-only Serve deployment behind `ray-head:8000`.
 
 - `ascend_deploy/dockerfile`
   - Builds on an Ascend runtime image and installs application dependencies without intentionally replacing the image-provided torch/vLLM/vLLM-Ascend stack.
@@ -114,7 +119,7 @@ Use this file to choose the first source files to inspect. It is a navigation ma
 ## Scripts
 
 - `scripts/run_gateway.py`
-  - Starts the FastAPI gateway.
+  - Starts the FastAPI app only for local/stub debugging.
 
 - `scripts/run_serve_runtime.py`
   - Builds and submits Ray Serve applications for configured local `backend: vllm` models.
@@ -129,7 +134,7 @@ Use this file to choose the first source files to inspect. It is a navigation ma
   - Local Ascend bootstrap that registers custom Ray `NPU` resources.
 
 - `scripts/stop_minimal.sh`
-  - Stops local gateway/runtime/Ray processes tracked by the minimal startup scripts.
+  - Stops local runtime/Ray processes tracked by the minimal startup scripts.
 
 - `scripts/monitoring/inspect_ray_serve_vllm_metrics.py`
   - Inspects Ray Serve and vLLM metric visibility from Prometheus or raw metrics endpoints.
@@ -147,6 +152,7 @@ Use this file to choose the first source files to inspect. It is a navigation ma
 - `tests/test_model_store.py`: local model artifact resolution.
 - `tests/test_config.py`: settings loading and environment override behavior.
 - `tests/test_scripts.py`: gateway and Serve launcher behavior.
+- `tests/test_gateway_ingress.py`: reusable ASGI Gateway ingress component behavior.
 - `tests/test_benchmark_*.py`: benchmark runner, report, metrics, and workloads.
 - Smoke scripts under `tests/` require local model/runtime context and are not generic unit tests.
 - See `.harness/checklists/verification.md` for the current full-suite baseline before interpreting failures.

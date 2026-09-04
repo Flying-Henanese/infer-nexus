@@ -5,12 +5,18 @@ from typing import Any
 
 from infer_nexus.backends.vllm import VLLMBackend
 from infer_nexus.catalog.registry import ModelRegistry
+from infer_nexus.core.config import Settings
 from infer_nexus.core.enums import BackendType
 from infer_nexus.model_store import LocalModelStore
 from infer_nexus.runtime.deployments import (
     DeploymentFactory,
     DeploymentSpec,
     ModelRuntimeReplica,
+)
+from infer_nexus.runtime.gateway_ingress import (
+    GatewayIngressSpec,
+    build_gateway_ingress_binding,
+    build_gateway_ingress_spec,
 )
 
 class ServeApplicationBuilder:
@@ -58,6 +64,44 @@ class ServeApplicationBuilder:
     def build_application_name(self, model_name: str) -> str:
         """执行运行时相关逻辑。"""
         return f"{self.service_name}-model-{model_name}"
+
+    def build_gateway_spec(
+        self,
+        registry: ModelRegistry,
+        *,
+        settings: Settings,
+    ) -> GatewayIngressSpec:
+        """Build the public ingress from the pre-registered model catalog only."""
+        model_targets: dict[str, dict[str, str]] = {}
+        for model in registry.list_models():
+            if model.backend != BackendType.VLLM:
+                continue
+            target = {
+                "application_name": self.build_application_name(model.name),
+                "deployment_name": self.deployment_factory.build_deployment_name(model),
+            }
+            for public_name in (model.name, model.alias, model.served_model_name):
+                if public_name:
+                    model_targets[public_name] = target
+        return build_gateway_ingress_spec(
+            settings=settings,
+            service_name=self.service_name,
+            model_targets=model_targets,
+        )
+
+    def build_gateway_binding(
+        self,
+        registry: ModelRegistry,
+        *,
+        settings: Settings,
+        serve: Any | None = None,
+    ) -> Any:
+        """Create the one CPU-only public Serve gateway binding."""
+        return build_gateway_ingress_binding(
+            serve=serve or self.require_ray_serve(),
+            settings=settings,
+            spec=self.build_gateway_spec(registry, settings=settings),
+        )
 
     def require_ray_serve(self) -> Any:
         """执行运行时相关逻辑。"""

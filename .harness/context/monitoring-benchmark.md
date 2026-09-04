@@ -34,7 +34,9 @@ Important metric groups:
 
 Current monitoring direction:
 
-- Scrape infer-nexus gateway metrics directly from the gateway.
+- Scrape infer-nexus gateway metrics through the public Serve HTTP proxy on
+  `ray-head:8000/metrics`; there is no standalone gateway container in Compose
+  mode.
 - Scrape Ray Serve metrics from Ray's dynamic metrics targets.
 - Do not make the gateway re-export Ray or vLLM metrics as the first step.
 - Embedded vLLM internal metrics have not been observed through the current Ray metrics source.
@@ -46,10 +48,11 @@ The benchmark runner foundation lives under `src/infer_nexus/benchmark/` with CL
 Current validation boundary:
 
 - Unit and compile validation are available locally.
-- Live gateway/vLLM validation requires a real runtime environment.
+- CUDA Compose has received real A100 HTTP/SSE validation from the host through
+  `127.0.0.1:8000` (mapped to `ray-head:8000`). Ascend still requires the
+  equivalent real NPU runtime validation.
 
 ## Current Non-Goals
 
 - Do not implement vLLM native metrics adapter unless explicitly requested.
 - Do not move benchmark suites to a top-level `benchmarks/` directory unless the suite grows enough to justify it.
-

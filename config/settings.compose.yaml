@@ -27,6 +27,14 @@ runtime:
   backend: vllm
   execution_mode: serve
   backend_init_mode: real
+  gateway_ingress:
+    enabled: true
+    application_name: infer-nexus-gateway
+    route_prefix: /
+    num_replicas: 1
+    num_cpus: 0.5
+    max_ongoing_requests: 16
+    max_queued_requests: 32
   gateway_worker_max_inflight: 0
   gateway_worker_retry_after_seconds: 1
   serve_request_timeout_seconds: 120

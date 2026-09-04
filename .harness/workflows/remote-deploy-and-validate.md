@@ -42,21 +42,29 @@ without explicit approval.
 
 ## 3. Recreate The Compose Deployment
 
-From the remote repository root, rebuild the runtime image and recreate the
-Compose services so the deployed processes use the pulled revision:
+From the remote repository root, recreate the Compose services so their mounted
+source and configuration use the pulled revision:
 
 ```bash
-docker compose up -d --build --force-recreate
+docker compose up -d --no-build --force-recreate
 docker compose ps --all
 ```
 
+The checked-in Compose files mount source, scripts, and configuration. Reuse
+the existing image with `--no-build` when only those files changed. Use
+`docker compose up -d --build --force-recreate` only when Dockerfile/base-image
+inputs or packaged runtime dependencies changed.
+
 `serve-deployer` is a one-shot deployment job and normally exits with status
-`0`; `ray-head`, `ray-worker`, and `gateway` are the long-running services.
+`0`. `ray-head` and `ray-worker` are the only long-running Compose containers;
+the public Gateway is a CPU-only Ray Serve deployment reached through the
+HeadOnly Serve HTTP proxy on `ray-head`.
 
 ## 4. Verify Runtime Health
 
-Wait for `gateway` and `ray-head` to become healthy, then run read-only API
-checks from the server:
+Wait for `ray-head` and `ray-worker` to become healthy and for
+`serve-deployer` to exit `0`. Then run read-only API checks from the server;
+these are external requests from the host into the Compose deployment:
 
 ```bash
 docker compose ps --all
@@ -65,8 +73,9 @@ curl --fail --silent --show-error http://127.0.0.1:8000/readyz
 curl --fail --silent --show-error http://127.0.0.1:8000/v1/models
 ```
 
-For inference-path changes, also run a minimal request against an enabled model
-alias, following `docs/DEPLOYMENT_CHECKLIST.md`.
+For inference-path changes, run a minimal request against an enabled model
+alias. The active validation catalog exposes `qwen3.5-9b`; do not copy the
+disabled `qwen3.5-27b` example from `docs/DEPLOYMENT_CHECKLIST.md`.
 
 ## 5. Report Completion
 

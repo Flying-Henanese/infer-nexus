@@ -22,128 +22,131 @@ models:
   #     openai_serving:
   #       enabled: true
 
-  - name: Qwen3.5-27B
-    alias: qwen3.5-27b
-    task: chat
-    backend: vllm
-    compat_mode: vllm_native
-    model_path: /app/models/Qwen/Qwen3.5-27B
-    dtype: auto
-    tensor_parallel_size: 1
-    max_model_len: 30000
-    cpu_per_replica: 8
-    gpu_per_replica: 1
-    gpu_memory_utilization: 0.95
-    min_replicas: 1
-    max_replicas: 1
-    deployment_config:
-      serve_deployment_kwargs:
-        max_queued_requests: 16
-        max_ongoing_requests: 2
-      # request_router_config:
-      #  request_router_class: ray.serve.llm.request_router.PrefixCacheAffinityRouter
-      #  request_router_kwargs:
-      #    imbalanced_threshold: 16
-    vllm:
-      engine_kwargs:
-        enable_auto_tool_choice: true
-        tool_call_parser: hermes
-        # 这里是ascend平台的numa绑定配置，vllm在ascend平台上运行时需要开启 
-        # enable_cpu_binding: true
-        # 这里是vllm的trust_remote_code配置，开启后可以加载模型自定义的代码
-        # numa_bind: true
-      request_defaults:
-        tool_choice: auto
-        parallel_tool_calls: true
-        chat_template_kwargs:
-          enable_thinking: false
-      request_policy:
-        allow_tools: true
-        allow_reasoning: true
-      openai_serving:
-        enabled: true
-    labels:
-      - internal
-      - llm
-      
-  - name: MinerU2.5-Pro-2604-1.2B
-    alias: mineru
-    task: chat
-    backend: vllm
-    compat_mode: vllm_native
-    model_path: /app/models/opendatalab/MinerU2.5-Pro-2604-1.2B
-    dtype: auto
-    tensor_parallel_size: 1
-    max_model_len: 8192
-    cpu_per_replica: 4
-    gpu_per_replica: 0.4
-    gpu_memory_utilization: 0.4
-    min_replicas: 1
-    max_replicas: 2
-    capabilities:
-      - vision
-    engine_kwargs:
-      # 这里是ascend平台的numa绑定配置，vllm在ascend平台上运行时需要开启 
-      # enable_cpu_binding: true
-      # 这里是vllm的trust_remote_code配置，开启后可以加载模型自定义的代码
-      # numa_bind: true
-      trust_remote_code: true
-      limit_mm_per_prompt:
-        image: 10
-    labels:
-      - multimodal
-      - ocr
-      - llm
-    vllm:
-      openai_serving:
-        enabled: true
+  # The A100 Compose verification deliberately deploys only Qwen3.5-9B.
+  # Re-enable these entries after their model paths and the shared GPU pool are
+  # validated for multi-model deployment.
+  # - name: Qwen3.5-27B
+  #   alias: qwen3.5-27b
+  #   task: chat
+  #   backend: vllm
+  #   compat_mode: vllm_native
+  #   model_path: /app/models/Qwen/Qwen3.5-27B
+  #   dtype: auto
+  #   tensor_parallel_size: 1
+  #   max_model_len: 30000
+  #   cpu_per_replica: 8
+  #   gpu_per_replica: 1
+  #   gpu_memory_utilization: 0.95
+  #   min_replicas: 1
+  #   max_replicas: 1
+  #   deployment_config:
+  #     serve_deployment_kwargs:
+  #       max_queued_requests: 16
+  #       max_ongoing_requests: 2
+  #     # request_router_config:
+  #     #  request_router_class: ray.serve.llm.request_router.PrefixCacheAffinityRouter
+  #     #  request_router_kwargs:
+  #     #    imbalanced_threshold: 16
+  #   vllm:
+  #     engine_kwargs:
+  #       enable_auto_tool_choice: true
+  #       tool_call_parser: hermes
+  #       # 这里是ascend平台的numa绑定配置，vllm在ascend平台上运行时需要开启
+  #       # enable_cpu_binding: true
+  #       # 这里是vllm的trust_remote_code配置，开启后可以加载模型自定义的代码
+  #       # numa_bind: true
+  #     request_defaults:
+  #       tool_choice: auto
+  #       parallel_tool_calls: true
+  #       chat_template_kwargs:
+  #         enable_thinking: false
+  #     request_policy:
+  #       allow_tools: true
+  #       allow_reasoning: true
+  #     openai_serving:
+  #       enabled: true
+  #   labels:
+  #     - internal
+  #     - llm
 
-  - name: qwen3-embedding-8b
-    alias: qwen3-embedding-8b
-    task: embedding
-    backend: vllm
-    compat_mode: vllm_native
-    model_path: /app/models/Qwen/Qwen3-Embedding-8B
-    dtype: bfloat16
-    tensor_parallel_size: 1
-    max_model_len: 8192
-    cpu_per_replica: 2
-    gpu_per_replica: 0.3
-    gpu_memory_utilization: 0.3
-    min_replicas: 1
-    max_replicas: 1
-    vllm:
-      openai_serving:
-        enabled: true
-    labels:
-      - internal
-      - embedding
+  # - name: MinerU2.5-Pro-2604-1.2B
+  #   alias: mineru
+  #   task: chat
+  #   backend: vllm
+  #   compat_mode: vllm_native
+  #   model_path: /app/models/opendatalab/MinerU2.5-Pro-2604-1.2B
+  #   dtype: auto
+  #   tensor_parallel_size: 1
+  #   max_model_len: 8192
+  #   cpu_per_replica: 4
+  #   gpu_per_replica: 0.4
+  #   gpu_memory_utilization: 0.4
+  #   min_replicas: 1
+  #   max_replicas: 2
+  #   capabilities:
+  #     - vision
+  #   engine_kwargs:
+  #     # 这里是ascend平台的numa绑定配置，vllm在ascend平台上运行时需要开启
+  #     # enable_cpu_binding: true
+  #     # 这里是vllm的trust_remote_code配置，开启后可以加载模型自定义的代码
+  #     # numa_bind: true
+  #     trust_remote_code: true
+  #     limit_mm_per_prompt:
+  #       image: 10
+  #   labels:
+  #     - multimodal
+  #     - ocr
+  #     - llm
+  #   vllm:
+  #     openai_serving:
+  #       enabled: true
 
-  - name: bge-reranker-large
-    alias: bge-reranker
-    task: rerank
-    backend: vllm
-    model_path: /app/models/BAAI/bge-reranker-large
-    dtype: float16
-    tensor_parallel_size: 1
-    max_model_len: 512
-    cpu_per_replica: 4
-    gpu_per_replica: 0.2
-    gpu_memory_utilization: 0.2
-    min_replicas: 1
-    max_replicas: 1
-    engine_kwargs:
-      trust_remote_code: true
-    labels:
-      - internal
-      - rerank
+  # - name: qwen3-embedding-8b
+  #   alias: qwen3-embedding-8b
+  #   task: embedding
+  #   backend: vllm
+  #   compat_mode: vllm_native
+  #   model_path: /app/models/Qwen/Qwen3-Embedding-8B
+  #   dtype: bfloat16
+  #   tensor_parallel_size: 1
+  #   max_model_len: 8192
+  #   cpu_per_replica: 2
+  #   gpu_per_replica: 0.3
+  #   gpu_memory_utilization: 0.3
+  #   min_replicas: 1
+  #   max_replicas: 1
+  #   vllm:
+  #     openai_serving:
+  #       enabled: true
+  #   labels:
+  #     - internal
+  #     - embedding
+
+  # - name: bge-reranker-large
+  #   alias: bge-reranker
+  #   task: rerank
+  #   backend: vllm
+  #   model_path: /app/models/BAAI/bge-reranker-large
+  #   dtype: float16
+  #   tensor_parallel_size: 1
+  #   max_model_len: 512
+  #   cpu_per_replica: 4
+  #   gpu_per_replica: 0.2
+  #   gpu_memory_utilization: 0.2
+  #   min_replicas: 1
+  #   max_replicas: 1
+  #   engine_kwargs:
+  #     trust_remote_code: true
+  #   labels:
+  #     - internal
+  #     - rerank
 
   - name: Qwen3.5-9B
     alias: qwen3.5-9b
     task: chat
     backend: vllm
     compat_mode: vllm_native
-    model_path: /app/models/Qwen/Qwen3.5-9B
+    model_path: Qwen/Qwen3.5-9B
     dtype: auto
     tensor_parallel_size: 1
     max_model_len: 12000

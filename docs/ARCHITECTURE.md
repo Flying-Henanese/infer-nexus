@@ -42,6 +42,10 @@ Implemented:
   `local_best_effort`.
 - Gateway-local runtime guards, bounded queues, stream timeouts, circuit breaker
   accounting, and related metrics.
+- A CPU-only `InferNexusGatewayIngress` Ray Serve application provides the
+  production HTTP/SSE entrypoint. It reuses the FastAPI routes and resolves
+  per-model handles from inside the Serve data plane; standalone Uvicorn remains
+  a local debugging/stub entrypoint only.
 - Prometheus gateway metrics endpoint and core request, stream, runtime-guard,
   worker-admission, and Serve-handle metrics.
 
@@ -93,7 +97,8 @@ Not implemented:
 
 ```text
 Client
-  -> infer-nexus API Gateway
+  -> Ray Serve HTTP proxy
+  -> infer-nexus Gateway Ingress
       -> OpenAI-Compatible API Layer
       -> Native Platform API Layer
       -> Auth / Admission / Routing
@@ -346,13 +351,13 @@ The current root `dockerfile` and `docker-compose.yml` describe the default
 containerized runtime path:
 - `dockerfile` builds a shared runtime image from configurable base image args,
   with CUDA base images as the checked-in defaults.
-- `docker-compose.yml` defines `ray-head`, `ray-worker`, one-shot
-  `serve-deployer`, and long-running `gateway` services.
+- `docker-compose.yml` defines `ray-head`, `ray-worker`, and one-shot
+  `serve-deployer` services. The Ray head exposes the Serve HTTP proxy on 8000.
 - `config/settings.compose.yaml` is the Compose settings entrypoint.
 - `ray-worker` derives the Ray accelerator budget from `CUDA_VISIBLE_DEVICES`
   and starts Ray with the matching `--num-gpus` value.
-- `serve-deployer` and `gateway` run with `--num-gpus=0`; they connect to the
-  Ray cluster and do not own accelerator scheduling.
+- `serve-deployer` runs with `--num-gpus=0`; Gateway ingress replicas request
+  CPU only and do not own accelerator scheduling.
 - The runtime image carries the Python environment, while source files,
   configuration, docs, and model storage are mounted into the containers.
 
@@ -556,9 +561,9 @@ Returns a more static or planning-oriented view of cluster resources and configu
 Liveness probe for the API process.
 
 #### `GET /readyz`
-Readiness probe endpoint exists in the current implementation, but it is still a
-placeholder and currently returns the same success response as `healthz`.
-Dependency-aware readiness checks remain `待实现`.
+For a Serve-mode Gateway ingress, returns 503 unless every configured local
+model Serve application is running and its deployment is healthy. Stub/local
+debug mode remains ready when its FastAPI process is available.
 
 ## 7. Request Lifecycle
 
@@ -768,17 +773,17 @@ Current implementation note:
 
 Platform-specific runtime dependencies are intentionally packaged outside the
 application control flow. The current root container path uses a shared runtime
-image for `gateway`, `ray-head`, `ray-worker`, and `serve-deployer`, with service
+image for `ray-head`, `ray-worker`, and `serve-deployer`, with service
 roles selected by Compose commands and settings.
 
 Current root files:
 - `dockerfile` builds from configurable builder/runtime base images; the checked-in
   defaults are CUDA base images and the image contains the Python environment
   under `/app/.venv`
-- `docker-compose.yml` starts `ray-head`, `ray-worker`, one-shot
-  `serve-deployer`, and long-running `gateway`
-- `config/settings.compose.yaml` is the Compose settings file used by both
-  `serve-deployer` and `gateway`
+- `docker-compose.yml` starts `ray-head`, `ray-worker`, and one-shot
+  `serve-deployer`; `ray-head:8000` is the public Serve proxy
+- `config/settings.compose.yaml` is passed to `serve-deployer` and injected
+  into Gateway ingress replicas through Ray's runtime environment
 - `docker-compose.yml` mounts model storage and the working tree content needed
   by the runtime containers; the image itself keeps dependencies, not a baked
   copy of the application source
@@ -992,6 +997,19 @@ Current implementation status:
 - `infer_nexus_serve_handle_latency_seconds`
 - `infer_nexus_serve_handle_timeouts_total`
 - `infer_nexus_serve_circuit_state`
+
+### Backpressure ownership
+
+- The Gateway ingress deployment has finite `max_ongoing_requests` and
+  `max_queued_requests`. In Ray 2.55, a request rejected at this outer Serve
+  queue never enters FastAPI: the Serve HTTP proxy returns HTTP 503. Monitor
+  this outer pressure with Ray's `serve_deployment_queued_queries` metric for
+  deployment `gateway` and proxy 503 access logs.
+- `WorkerAdmissionMiddleware` records process-local rejection separately in
+  `infer_nexus_gateway_worker_rejections_total`.
+- Per-model runtime guards record their own bounded-queue rejections in
+  `infer_nexus_runtime_guard_rejections_total`. These layers are intentionally
+  not collapsed into generic timeouts.
 
 ### Future platform metrics
 - per-model status and degraded state

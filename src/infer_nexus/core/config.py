@@ -46,6 +46,18 @@ class SchedulerSettings(BaseModel):
     p95_latency_threshold_ms: int = 10000
 
 
+class GatewayIngressSettings(BaseModel):
+    """Bounded CPU-only Ray Serve settings for the public gateway ingress."""
+
+    enabled: bool = True
+    application_name: str | None = None
+    route_prefix: str = "/"
+    num_replicas: int = Field(default=1, ge=1)
+    num_cpus: float = Field(default=0.5, gt=0)
+    max_ongoing_requests: int = Field(default=16, ge=1)
+    max_queued_requests: int = Field(default=32, ge=1)
+
+
 class RuntimeSettings(BaseModel):
     """运行时后端和执行链路模式配置。"""
 
@@ -71,6 +83,7 @@ class RuntimeSettings(BaseModel):
     runtime_worker_enabled: bool = False
     runtime_worker_request_timeout_seconds: int | float = Field(default=60, gt=0)
     runtime_worker_start_timeout_seconds: int | float = Field(default=15, gt=0)
+    gateway_ingress: GatewayIngressSettings = Field(default_factory=GatewayIngressSettings)
 
 
 class ModelStoreSettings(BaseModel):

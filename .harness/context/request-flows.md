@@ -4,7 +4,7 @@ Use this file to orient yourself before tracing request behavior. Verify details
 
 ## App Startup
 
-1. `scripts/run_gateway.py` starts the FastAPI app from `src/infer_nexus/main.py` only for local/stub debugging. In Serve mode, `InferNexusGatewayIngress` owns the same FastAPI app inside a Serve replica.
+1. `scripts/run_gateway.py` can start the FastAPI app from `src/infer_nexus/main.py` for local or standalone Ray-connected runs. It is not part of the current Compose entrypoint: in Compose Serve mode, `InferNexusGatewayIngress` owns the same FastAPI app inside a Serve replica.
 2. `lifespan()` loads the selected settings file: `config/settings.yaml` by default, `config/settings.compose.yaml` in the root CUDA Compose flow, or `config/settings.ascend-compose.yaml` in the Ascend Compose flow.
 3. `load_model_catalog(settings.catalog.models_path)` loads `config/models.yaml`.
 4. `ModelRegistry` indexes model names, aliases, and served model names.

@@ -105,8 +105,11 @@ settings files rather than request-path code.
   to `config/settings.yaml`, so callers must pass
   `--settings config/settings.ascend-compose.yaml` for an Ascend launch.
 - The active Qwen3.5-9B catalog entry uses a relative path that resolves below
-  the Compose `/models` mount. The commented historical entries retain
-  `/app/models/...` paths and must be corrected before being re-enabled.
+  the Compose `/models` mount. Commented historical entries intentionally
+  retain environment-specific absolute paths (for example `/app/models/...`
+  and `/nas_data/...`). Before re-enabling one, verify that its path matches
+  the selected runtime's model-store root and mounts; do not assume every
+  environment should use the Compose `/models` path.
 - Ascend starts the worker with
   `RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1` by default for runtime
   compatibility. A real Ascend run must prove that Ray actor allocation and

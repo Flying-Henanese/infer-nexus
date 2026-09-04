@@ -52,7 +52,7 @@ The active catalog currently contains only the local `Qwen3.5-9B` `backend: vllm
 - Default `config/settings.yaml` resolves relative model paths under the repository-local `models/` directory.
 - Both Compose variants mount the model store at `/models` and set `model_store.root_dir: /models`.
 - The active Qwen3.5-9B entry uses the relative `Qwen/Qwen3.5-9B` path. Its Compose model-store root is `/models`, matching the host-mounted model directory.
-- `LocalModelStore` preserves absolute paths instead of resolving them under `root_dir`; the commented-out entries retain historical `/app/models/...` paths and must be corrected before re-enabling them.
+- `LocalModelStore` preserves absolute paths instead of resolving them under `root_dir`. Commented-out entries intentionally retain environment-specific absolute paths, including `/app/models/...` and `/nas_data/...`; before enabling an entry, verify that its path matches the selected runtime's model-store root and mounts.
 - Use paths relative to the configured model-store root, or absolute paths that match the selected runtime mount.
 
 ## Current Non-Goals

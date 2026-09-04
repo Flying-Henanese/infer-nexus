@@ -31,15 +31,14 @@ If `uv run --frozen` is blocked by local environment state, report that clearly 
 
 ## Current Repository Test Baseline
 
-As observed on 2026-09-03, `uv run pytest -q` completes but is not green:
-109 tests pass, 53 fail, and 2 are skipped.
+As observed on 2026-09-04, `uv run --frozen pytest -q` completes but is not green:
+115 tests pass, 47 fail, and 2 are skipped.
 
 Known contributors:
 
 - shared fixtures and many API/dispatcher/runtime/script tests still expect the
   previous multi-model catalog and aliases, while `config/models.yaml` now
   enables only Qwen3.5-9B for Compose validation
-- a small set of API tests attempts to replace slotted `RuntimeExecutor` instance methods and fails because those attributes are read-only
 - the installed `uv` warns that `tool.uv.extra-build-dependencies` is not recognized unless the relevant preview support/version is used
 
 For unrelated work, run the smallest relevant tests and compare any full-suite failures with this baseline. Do not describe the repository as fully green, and do not treat every known baseline failure as caused by a documentation-only change.

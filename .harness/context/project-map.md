@@ -27,6 +27,10 @@ Use this file to choose the first source files to inspect. It is a navigation ma
   - Reusable FastAPI app factory and host-specific lifespan wiring.
   - Loads settings, catalog, model store, admission, Serve builder, runtime executor, worker admission, and dispatcher into `app.state`.
 
+- `src/infer_nexus/gateway_runtime.py`
+  - Shared gateway dependency assembly for the local FastAPI app and the Ray Serve ingress replica.
+  - Builds the runtime dependency graph without creating a Ray Client connection.
+
 - `src/infer_nexus/api/`
   - HTTP surface.
   - `openai_routes.py`: `/v1/models`, `/v1/chat/completions`, `/v1/embeddings`, `/v1/rerank`, and `/rerank`.
@@ -97,10 +101,16 @@ Use this file to choose the first source files to inspect. It is a navigation ma
 - `config/settings.ascend-compose.yaml`
   - Ascend Compose settings entrypoint; requests custom Ray `NPU` resources.
 
+- `config/settings.k8s.yaml`
+  - KubeRay Serve-native Gateway ingress settings; currently selects the bounded smoke catalog.
+
 - `config/models.yaml`
-  - Active model catalog.
+  - Full model catalog.
   - Current enabled entries are local `backend: vllm` models unless changed in this file.
   - Ray Serve request-router options, including cache-affinity router class settings, belong under each model's `deployment_config.request_router_config`.
+
+- `config/models.k8s-smoke.yaml`
+  - One-model catalog selected by `config/settings.k8s.yaml` for the bounded KubeRay rollout.
 
 ## Container Runtimes
 
@@ -112,7 +122,8 @@ Use this file to choose the first source files to inspect. It is a navigation ma
   - Builds the root CUDA-oriented shared runtime image.
 
 - `ascend_deploy/docker-compose.yml`
-  - Defines the same four service roles for Ascend and registers custom Ray `NPU` resources from `ASCEND_RT_VISIBLE_DEVICES`.
+  - Defines `ray-head`, `ray-worker`, and one-shot `serve-deployer`; Ray Serve hosts the Gateway ingress.
+  - Registers custom Ray `NPU` resources from `ASCEND_RT_VISIBLE_DEVICES`.
 
 - `ascend_deploy/dockerfile`
   - Builds on an Ascend runtime image and installs application dependencies without intentionally replacing the image-provided torch/vLLM/vLLM-Ascend stack.
@@ -154,6 +165,8 @@ Use this file to choose the first source files to inspect. It is a navigation ma
 - `tests/test_config.py`: settings loading and environment override behavior.
 - `tests/test_scripts.py`: gateway and Serve launcher behavior.
 - `tests/test_gateway_ingress.py`: reusable ASGI Gateway ingress component behavior.
+- `tests/test_kuberay_manifests.py`: KubeRay ingress settings, NodePort, and HeadOnly proxy invariants.
+- `tests/test_serve_gateway_poc.py`: opt-in real-Ray Serve ingress and cross-application streaming acceptance POC.
 - `tests/test_benchmark_*.py`: benchmark runner, report, metrics, and workloads.
 - Smoke scripts under `tests/` require local model/runtime context and are not generic unit tests.
 - See `.harness/checklists/verification.md` for the current full-suite baseline before interpreting failures.

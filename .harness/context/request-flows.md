@@ -5,8 +5,11 @@ Use this file to orient yourself before tracing request behavior. Verify details
 ## App Startup
 
 1. `scripts/run_gateway.py` starts the FastAPI app from `src/infer_nexus/main.py` only for local/stub debugging. In Serve mode, `InferNexusGatewayIngress` owns the same FastAPI app inside a Serve replica.
-2. `lifespan()` loads the selected settings file: `config/settings.yaml` by default, `config/settings.compose.yaml` in the root CUDA Compose flow, or `config/settings.ascend-compose.yaml` in the Ascend Compose flow.
-3. `load_model_catalog(settings.catalog.models_path)` loads `config/models.yaml`.
+2. `lifespan()` loads the selected settings file: `config/settings.yaml` by default, `config/settings.compose.yaml` in the root CUDA Compose flow, `config/settings.ascend-compose.yaml` in the Ascend Compose flow, or `config/settings.k8s.yaml` for the KubeRay smoke rollout.
+3. `load_model_catalog(settings.catalog.models_path)` loads the catalog selected
+   by the active settings file: `config/models.yaml` for the default and
+   Compose flows, or `config/models.k8s-smoke.yaml` for the current KubeRay
+   rollout.
 4. `ModelRegistry` indexes model names, aliases, and served model names.
 5. `LocalModelStore`, `ServeApplicationBuilder`, `RuntimeExecutor`, `WorkerAdmissionController`, and `RuntimeDispatcher` are created.
 6. These objects are attached to `app.state`.
@@ -28,11 +31,12 @@ Use this file to orient yourself before tracing request behavior. Verify details
 4. `serve-deployer` deploys the CPU-only `infer-nexus-gateway` application after all model applications are healthy.
 5. `ray-head:8000` exposes the Serve HTTP proxy; Gateway ingress reaches local models through cached Ray Serve deployment handles.
 
-## Local Script Startup Caveat
+## Local Script Startup
 
 - `scripts/start_minimal.sh` is CUDA-oriented and registers GPU resources.
 - `scripts/start_minimal_ascend.sh` registers custom NPU resources.
-- The checked-in default settings/device pairing is not self-consistent for both scripts. See the canonical gap description in `.harness/context/current-architecture.md`.
+- Select settings, model paths, and accelerator visibility for the target
+  environment; these deployment values are not request-path behavior.
 
 ## Serve Runtime Startup
 
@@ -46,11 +50,13 @@ Use this file to orient yourself before tracing request behavior. Verify details
 ## KubeRay Serve Runtime Startup
 
 1. `serve-deployer.job.yaml` runs `scripts/run_serve_runtime.py` once against
-   the ready RayCluster with
-   `--proxy-location HeadOnly` and the KubeRay settings file.
+   the ready RayCluster with `config/settings.k8s.yaml` and
+   `--proxy-location HeadOnly`.
 2. The deployer initializes the Serve controller and HeadOnly HTTP proxy, then
    submits and waits for all pre-registered local model
-   applications, then submits and waits for `infer-nexus-gateway` at `/`.
+   applications from the selected catalog, then submits and waits for
+   `infer-nexus-gateway` at `/`. The current KubeRay settings select the
+   one-model `config/models.k8s-smoke.yaml` catalog.
 3. The stable NodePort Service forwards port 30800 only to the head proxy's
    port 8000. The Gateway resolves model handles inside the Serve data plane.
 

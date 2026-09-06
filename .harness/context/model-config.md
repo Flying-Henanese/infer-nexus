@@ -8,7 +8,8 @@ Use this file before editing `config/models.yaml`.
 - Loader: `src/infer_nexus/catalog/loader.py`
 - Registry: `src/infer_nexus/catalog/registry.py`
 - Manual: `docs/MODELS_YAML_CONFIGURATION_MANUAL.md`
-- Active catalog: `config/models.yaml`
+- Full catalog: `config/models.yaml`
+- Bounded KubeRay smoke catalog: `config/models.k8s-smoke.yaml`
 
 ## Current Behavior
 
@@ -18,10 +19,11 @@ Use this file before editing `config/models.yaml`.
 - Local models use `backend: vllm`.
 - Proxy models use `backend: vllm_openai_proxy` and require `proxy_config`.
 - Top-level `engine_kwargs` is still accepted for compatibility. Model validation merges it with `vllm.engine_kwargs`, with values under `vllm.engine_kwargs` taking precedence.
+- The default and Compose settings select the five-model `config/models.yaml` catalog. `config/settings.k8s.yaml` deliberately selects the one-model smoke catalog for the current KubeRay rollout.
 
 ## Enabled Model Pattern
 
-Current enabled models are five local `backend: vllm` entries. Do not assume that proxy models are active just because proxy support exists in code. Tests consume the active catalog directly; check `.harness/checklists/verification.md` for the current catalog-coupled test baseline.
+`config/models.yaml` contains five local `backend: vllm` entries. Do not assume that proxy models are active just because proxy support exists in code. The current KubeRay settings instead select one warm `qwen3.5-9b` model. Tests consume the selected catalog directly; check `.harness/checklists/verification.md` for the current catalog-coupled test baseline.
 
 ## Placement Rules
 
@@ -33,13 +35,10 @@ Current enabled models are five local `backend: vllm` entries. Do not assume tha
 - `deployment_config.request_router_config` holds Ray Serve request-router options. Cache affinity is configured here, for example `request_router_class: ray.serve.llm.request_router.PrefixCacheAffinityRouter`.
 - `proxy_config` is only for `backend: vllm_openai_proxy`.
 
-## Current Path Mismatch
+## Deployment Paths
 
-- Default `config/settings.yaml` resolves relative model paths under the repository-local `models/` directory.
-- Both Compose variants mount the model store at `/models` and set `model_store.root_dir: /models`.
-- Enabled entries currently use absolute `/app/models/...` values.
-- `LocalModelStore` preserves absolute paths instead of resolving them under `root_dir`, so those entries point at neither configured storage location.
-- Use paths relative to the configured model-store root, or absolute paths that match the selected runtime mount. This file records the mismatch but does not change `config/models.yaml`.
+- Model paths and `model_store.root_dir` are deployment-environment configuration, not gateway behavior.
+- Use the selected settings file and its matching runtime mounts when validating artifact availability. Do not infer one universal host or container path from another environment's configuration.
 
 ## Current Non-Goals
 

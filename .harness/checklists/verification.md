@@ -31,7 +31,7 @@ If `uv run --frozen` is blocked by local environment state, report that clearly 
 
 ## Current Repository Test Baseline
 
-As observed on 2026-08-12, `uv run --frozen pytest -q` completes but is not green: 101 tests pass and 52 fail.
+As observed on 2026-09-06, `uv run --frozen pytest -q` completes but is not green: 114 tests pass, 51 fail, and 2 are skipped.
 
 Known contributors:
 
@@ -51,6 +51,7 @@ Check the relevant unit tests around:
 - `tests/test_runtime.py`
 - `tests/test_proxy_streaming.py`
 - `tests/test_gateway_ingress.py`
+- `tests/test_kuberay_manifests.py`
 - `tests/test_serve_gateway_poc.py` with `INFER_NEXUS_RUN_RAY_INTEGRATION=1` on the pinned Ray runtime
 - In Serve mode, verify `/readyz` returns 503 while a configured model
   application is unavailable, then 200 only after every model app is healthy.

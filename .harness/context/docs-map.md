@@ -33,13 +33,17 @@ against source before changing code.
 - `docs/DEPLOYMENT_CHECKLIST.md`
   - Current deployment bring-up checklist for Ray Serve validation.
 
+- `docs/KUBERAY_SERVE_NATIVE_GATEWAY_INGRESS.md`
+  - Current KubeRay Serve-native ingress topology and controlled-rollout runbook.
+  - Use for the NodePort Service, the one-shot RayJob, the HeadOnly proxy invariant, and the one-model smoke catalog.
+
 - `docs/DOCKER_COMPOSE_RUNTIME_SPLIT_PLAN.md`
   - Current reference for the root Compose container lifecycle split.
   - Use for `gateway`, `ray-head`, `ray-worker`, `serve-deployer`, `Dockerfile`, `docker-compose.yml`, and `config/settings.compose.yaml` questions.
 
 - `docs/ASCEND_DEPLOYMENT_CONFIGURATION.md`
   - Current deployment reference for `ascend_deploy/`, `pyproject.ascend.toml`, and `config/settings.ascend-compose.yaml`.
-  - It correctly documents `/models` as the Compose model-store mount; the enabled catalog currently still contains conflicting absolute `/app/models/...` paths.
+  - It documents the `/models` Compose model-store mount. Model paths remain selected per deployment environment and matching settings file.
 
 ## Current But Narrow
 
@@ -75,5 +79,7 @@ They are useful for future planning, but current source code does not implement 
 
 - `docs/DEBUG_REPORT_2026-05-20.md`
 - `docs/qwen3_reranker_vllm_notes.md`
+- `docs/KUBERAY_CLUSTER_SNAPSHOT_2026-08-28.md`
+  - Historical cluster snapshot. Its standalone Uvicorn Gateway description is superseded by `docs/KUBERAY_SERVE_NATIVE_GATEWAY_INGRESS.md`; do not use it as current topology guidance.
 
 Use these for historical troubleshooting context, not as general architecture source of truth.

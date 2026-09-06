@@ -35,8 +35,8 @@ Proxy models use `backend: vllm_openai_proxy` and are forwarded to an upstream O
 
 ## Startup And State
 
-- `src/infer_nexus/main.py` loads the selected settings file: `config/settings.yaml` by default, `config/settings.compose.yaml` in the root CUDA Compose flow, or `config/settings.ascend-compose.yaml` in the Ascend Compose flow.
-- The catalog is loaded from one configured YAML file, currently `config/models.yaml`.
+- `src/infer_nexus/main.py` loads the selected settings file: `config/settings.yaml` by default, `config/settings.compose.yaml` in the root CUDA Compose flow, `config/settings.ascend-compose.yaml` in the Ascend Compose flow, or `config/settings.k8s.yaml` for the KubeRay smoke rollout.
+- The catalog is loaded from one configured YAML file. The default and Compose flows select `config/models.yaml`; the current KubeRay rollout selects `config/models.k8s-smoke.yaml`.
 - `ModelRegistry`, `LocalModelStore`, `ServeApplicationBuilder`, `RuntimeExecutor`, `WorkerAdmissionController`, and `RuntimeDispatcher` are attached to `app.state`.
 - Platform APIs are currently read-only catalog/status/load/capacity views.
 - `control/reconciler.py` exists only as a skeleton.
@@ -73,7 +73,9 @@ The KubeRay shape uses the same in-Ray Gateway application. Its stable
 `infer-nexus-gateway` NodePort Service selects the Ray head Serve HTTP proxy on
 port 8000; it does not create a Uvicorn Deployment or a Ray Client connection.
 `deploy/kuberay/serve-deployer.job.yaml` is one-shot and submits all
-catalog-derived model applications before the Gateway application.
+catalog-derived model applications before the Gateway application. The current
+KubeRay settings select the one-model `config/models.k8s-smoke.yaml` catalog;
+the five-model catalog requires a separate capacity-planned rollout.
 
 ## Current Control Boundaries
 
@@ -93,8 +95,6 @@ catalog-derived model applications before the Gateway application.
 
 ## Known Checked-in Integration Gaps
 
-- `config/settings.yaml` currently selects `inference_device_type: npu`, while `scripts/start_minimal.sh` registers only GPU resources and also defaults to that settings file. Use the platform-specific settings/startup pairing deliberately; the defaults are not currently self-consistent.
-- Enabled entries in `config/models.yaml` currently use absolute `/app/models/...` paths. Absolute paths bypass `model_store.root_dir`, so they match neither the default local `models/` root nor the `/models` mount used by both Compose variants.
 - `AdmissionController.check_model_request()` is a no-op integration hook. Active protection currently comes from task/model validation, artifact checks, process-local worker admission, and `RuntimeExecutor` guards; readiness- and cluster-capacity-aware admission are not implemented.
 - The full unit suite is not green against the current catalog. Many API, dispatcher, runtime, and script tests still expect the previous three-model fixture and old aliases. See `.harness/checklists/verification.md` before interpreting full-suite failures.
 

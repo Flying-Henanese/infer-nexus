@@ -51,12 +51,15 @@ docker compose ps --all
 ```
 
 `serve-deployer` is a one-shot deployment job and normally exits with status
-`0`; `ray-head`, `ray-worker`, and `gateway` are the long-running services.
+`0`; `ray-head` and `ray-worker` are the long-running Compose services. The
+public Gateway is a Ray Serve application behind the head's HTTP proxy, not a
+separate Compose service.
 
 ## 4. Verify Runtime Health
 
-Wait for `gateway` and `ray-head` to become healthy, then run read-only API
-checks from the server:
+Wait for `ray-head` and `ray-worker` to become healthy and for `serve-deployer`
+to exit successfully, then run read-only API checks against the head's Serve
+HTTP proxy from the server:
 
 ```bash
 docker compose ps --all

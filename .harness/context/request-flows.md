@@ -4,7 +4,12 @@ Use this file to orient yourself before tracing request behavior. Verify details
 
 ## App Startup
 
-1. `scripts/run_gateway.py` starts the FastAPI app from `src/infer_nexus/main.py` only for local/stub debugging. In Serve mode, `InferNexusGatewayIngress` owns the same FastAPI app inside a Serve replica.
+1. `scripts/run_gateway.py` starts the FastAPI app from `src/infer_nexus/main.py`
+   as a standalone local-debug entrypoint. The checked-in
+   `config/settings.yaml` selects `execution_mode: serve` and
+   `backend_init_mode: real`; stub behavior requires an explicit settings
+   override. In the production Serve path, `InferNexusGatewayIngress` owns the
+   same FastAPI app inside a Serve replica.
 2. `lifespan()` loads the selected settings file: `config/settings.yaml` by default, `config/settings.compose.yaml` in the root CUDA Compose flow, `config/settings.ascend-compose.yaml` in the Ascend Compose flow, or `config/settings.k8s.yaml` for the KubeRay smoke rollout.
 3. `load_model_catalog(settings.catalog.models_path)` loads the catalog selected
    by the active settings file: `config/models.yaml` for the default and
@@ -34,7 +39,10 @@ Use this file to orient yourself before tracing request behavior. Verify details
 ## Local Script Startup
 
 - `scripts/start_minimal.sh` is CUDA-oriented and registers GPU resources.
-- `scripts/start_minimal_ascend.sh` registers custom NPU resources.
+- `scripts/start_minimal_ascend.sh` registers custom NPU resources, but its
+  checked-in default is still `config/settings.yaml`, which declares CUDA.
+  Pass `--settings config/settings.ascend-compose.yaml` (or another deliberate
+  NPU settings file) until that script default is corrected.
 - Select settings, model paths, and accelerator visibility for the target
   environment; these deployment values are not request-path behavior.
 
@@ -148,9 +156,13 @@ cluster-wide controller setting.
 ## `/healthz` And `/readyz`
 
 1. `/healthz` returns a basic process-liveness `HealthResponse`.
-2. In stub/local-debug mode, `/readyz` returns the same successful response.
-3. In Serve mode, `/readyz` asks the replica's cached handle resolver for
-   `serve.status()` and returns 503 unless every configured local model
-   application is running and its deployment is healthy.
+2. In a standalone `scripts/run_gateway.py` process, `/readyz` returns the same
+   successful response even when its settings select `execution_mode: serve`,
+   because that app is not constructed with a deployed model-target table.
+3. In the Serve-native Gateway ingress, `/readyz` asks the replica's cached
+   handle resolver for `serve.status()` and returns 503 when a configured local
+   model application is missing or reports a non-running application or
+   deployment status. The current helper does not reject a `RUNNING`
+   application whose deployment-status mapping is empty.
 4. The public Gateway's finite Serve queue rejects before FastAPI with HTTP
    503; scrape Ray's `serve_deployment_queued_queries` for that outer pressure.

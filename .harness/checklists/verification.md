@@ -31,12 +31,15 @@ If `uv run --frozen` is blocked by local environment state, report that clearly 
 
 ## Current Repository Test Baseline
 
-As observed on 2026-09-06, `uv run --frozen pytest -q` completes but is not green: 114 tests pass, 51 fail, and 2 are skipped.
+As observed on 2026-09-12, `uv run --frozen pytest -q` completes but is not green: 114 tests pass, 51 fail, and 2 are skipped.
 
 Known contributors:
 
 - shared fixtures and many API/dispatcher/runtime/script tests still expect the previous three-model catalog and aliases, while `config/models.yaml` currently has five enabled models
 - a small set of API tests attempts to replace slotted `RuntimeExecutor` instance methods and fails because those attributes are read-only
+- `tests/test_dispatcher.py::test_gateway_runtime_metrics_render_after_serve_call`
+  assumes a fixed Prometheus label-rendering order (`model`, then `method`),
+  while the installed client renders the same labels in a different order
 - the installed `uv` warns that `tool.uv.extra-build-dependencies` is not recognized unless the relevant preview support/version is used
 
 For unrelated work, run the smallest relevant tests and compare any full-suite failures with this baseline. Do not describe the repository as fully green, and do not treat every known baseline failure as caused by a documentation-only change.
@@ -53,8 +56,11 @@ Check the relevant unit tests around:
 - `tests/test_gateway_ingress.py`
 - `tests/test_kuberay_manifests.py`
 - `tests/test_serve_gateway_poc.py` with `INFER_NEXUS_RUN_RAY_INTEGRATION=1` on the pinned Ray runtime
-- In Serve mode, verify `/readyz` returns 503 while a configured model
-  application is unavailable, then 200 only after every model app is healthy.
+- For the Serve-native Gateway ingress, verify `/readyz` returns 503 when a
+  configured model application is missing or reports a non-running application
+  or deployment status. The current helper accepts a `RUNNING` application with
+  an empty deployment-status mapping; do not claim that case proves deployment
+  readiness until the implementation is tightened.
 - For gateway queue saturation, confirm the Serve proxy returns HTTP 503 and
   inspect `serve_deployment_queued_queries`; this rejection happens before
   FastAPI metrics or worker admission.

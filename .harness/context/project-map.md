@@ -131,7 +131,9 @@ Use this file to choose the first source files to inspect. It is a navigation ma
 ## Scripts
 
 - `scripts/run_gateway.py`
-  - Starts the FastAPI app only for local/stub debugging.
+  - Starts the standalone FastAPI app for local debugging.
+  - The checked-in default settings use real Serve execution; stub behavior
+    requires an explicit settings override.
 
 - `scripts/run_serve_runtime.py`
   - Builds and submits Ray Serve applications for configured local `backend: vllm` models.
@@ -144,6 +146,8 @@ Use this file to choose the first source files to inspect. It is a navigation ma
 
 - `scripts/start_minimal_ascend.sh`
   - Local Ascend bootstrap that registers custom Ray `NPU` resources.
+  - Its current default settings path declares CUDA, so callers must explicitly
+    select an NPU settings file.
 
 - `scripts/stop_minimal.sh`
   - Stops local runtime/Ray processes tracked by the minimal startup scripts.

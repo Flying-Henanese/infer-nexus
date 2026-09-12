@@ -37,10 +37,6 @@ against source before changing code.
   - Current KubeRay Serve-native ingress topology and controlled-rollout runbook.
   - Use for the NodePort Service, the one-shot RayJob, the HeadOnly proxy invariant, and the one-model smoke catalog.
 
-- `docs/DOCKER_COMPOSE_RUNTIME_SPLIT_PLAN.md`
-  - Current reference for the root Compose container lifecycle split.
-  - Use for `gateway`, `ray-head`, `ray-worker`, `serve-deployer`, `Dockerfile`, `docker-compose.yml`, and `config/settings.compose.yaml` questions.
-
 - `docs/ASCEND_DEPLOYMENT_CONFIGURATION.md`
   - Current deployment reference for `ascend_deploy/`, `pyproject.ascend.toml`, and `config/settings.ascend-compose.yaml`.
   - It documents the `/models` Compose model-store mount. Model paths remain selected per deployment environment and matching settings file.
@@ -74,6 +70,16 @@ Do not treat these as current implementation:
 - `docs/VLLM_NATIVE_METRICS_DESIGN.md`
 
 They are useful for future planning, but current source code does not implement their main target capabilities.
+
+## Superseded Implementation Plans
+
+- `docs/DOCKER_COMPOSE_RUNTIME_SPLIT_PLAN.md`
+  - Historical plan for a four-role Compose topology with a standalone Uvicorn
+    Gateway and `proxy_location: Disabled`.
+  - It is superseded by the checked-in three-service Compose topology and the
+    Serve-native Gateway ingress. For current root Compose behavior, use
+    `.harness/context/current-architecture.md`, `docker-compose.yml`, `README.md`,
+    and `docs/DEPLOYMENT_CHECKLIST.md`.
 
 ## Debug Records
 

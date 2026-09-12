@@ -87,7 +87,11 @@ the five-model catalog requires a separate capacity-planned rollout.
 
 ## Implemented Runtime Protections
 
-- Process-local gateway worker admission is wired through `WorkerAdmissionMiddleware`.
+- Process-local gateway worker admission is wired through
+  `WorkerAdmissionMiddleware`, but every checked-in settings file currently sets
+  `gateway_worker_max_inflight: 0`. The middleware therefore tracks inflight
+  requests but does not reject overload unless the selected settings use a
+  positive limit.
 - Runtime executor has per-model guards, bounded queue settings, handle timeouts, stream idle/lifetime timeouts, and optional circuit breaker settings.
 - Serve deployment handles are cached by `(app_name, deployment_name)`.
 - Streaming handles must support `options(stream=True)`; unavailable capability
@@ -95,7 +99,20 @@ the five-model catalog requires a separate capacity-planned rollout.
 
 ## Known Checked-in Integration Gaps
 
-- `AdmissionController.check_model_request()` is a no-op integration hook. Active protection currently comes from task/model validation, artifact checks, process-local worker admission, and `RuntimeExecutor` guards; readiness- and cluster-capacity-aware admission are not implemented.
+- `AdmissionController.check_model_request()` is a no-op integration hook.
+  Active protection in the checked-in configuration comes from task/model
+  validation, artifact checks, the finite outer Serve Gateway queue, and
+  `RuntimeExecutor` guards. Process-local worker rejection is available but
+  disabled by the checked-in `gateway_worker_max_inflight: 0` values;
+  readiness- and cluster-capacity-aware admission are not implemented.
+- `scripts/start_minimal_ascend.sh` registers custom Ray `NPU` resources but
+  defaults to `config/settings.yaml`, whose `cluster.inference_device_type` is
+  `cuda`. Callers must explicitly select an NPU settings file, such as
+  `config/settings.ascend-compose.yaml`, until the script default is corrected.
+- Deep readiness is attached only to the Serve-native Gateway ingress. A
+  standalone `scripts/run_gateway.py` process does not install the checker even
+  if `execution_mode: serve`; additionally, the current status helper accepts a
+  `RUNNING` application whose deployment-status mapping is empty.
 - The full unit suite is not green against the current catalog. Many API, dispatcher, runtime, and script tests still expect the previous three-model fixture and old aliases. See `.harness/checklists/verification.md` before interpreting full-suite failures.
 
 ## Out Of Current Scope

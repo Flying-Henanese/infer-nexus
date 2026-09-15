@@ -386,27 +386,25 @@ rg 'incident-2026-09-15-42' .infer-nexus/logs .infer-nexus/ray/session_latest/lo
 ### Docker Compose
 
 CUDA and Ascend Compose export every service's logs into the repository-root
-`logs/` directory. The platform is the first level (`cuda` or `ascend`), the
-next level is the Compose service, and the final level separates the container
-command log from Ray's session files:
+`logs/` directory. The first level is the Compose service; the final level
+separates the container command log from Ray's session files:
 
 ```text
-logs/<platform>/<service>/container.log
-logs/<platform>/<service>/ray/session_latest/logs/
+logs/<service>/container.log
+logs/<service>/ray/session_latest/logs/
 ```
 
 The one-shot `log-init` service creates the directories and grants the
 non-root runtime user write access before `ray-head`, `ray-worker`, or
-`serve-deployer` starts. Inspect CUDA service logs directly from the host with:
+`serve-deployer` starts. Inspect service logs directly from the host with:
 
 ```bash
-tail -F logs/cuda/ray-head/container.log
-find logs/cuda/ray-worker/ray/session_latest/logs -maxdepth 2 -type f -print
-rg 'incident-2026-09-15-42' logs/cuda
+tail -F logs/ray-head/container.log
+find logs/ray-worker/ray/session_latest/logs -maxdepth 2 -type f -print
+rg 'incident-2026-09-15-42' logs
 ```
 
-For Ascend, substitute `logs/ascend` and use
-`docker compose -f ascend_deploy/docker-compose.yml ...` for any Compose
+Use `docker compose -f ascend_deploy/docker-compose.yml ...` for Ascend Compose
 commands. `container.log` combines the service command's stdout and stderr and
 is append-only on the host. Docker's `json-file` rotation remains a fallback
 for early container failures, while Ray component files use 50 MiB rotation

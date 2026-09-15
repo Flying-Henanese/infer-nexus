@@ -133,10 +133,9 @@ settings files rather than request-path code.
 - Local Ray files live under `.infer-nexus/ray/session_latest/logs/`, apart from
   CLI/bootstrap output at `.infer-nexus/logs/ray_bootstrap.log` and
   `.infer-nexus/logs/serve_runtime.log`. Compose exports runtime files to
-  `logs/cuda/<service>/` or `logs/ascend/<service>/`: `container.log` contains
-  service-command stdout/stderr and `ray/` is the service's `/tmp/ray` root.
-  A one-shot `log-init` service creates these host paths before non-root
-  runtime services start.
+  `logs/<service>/`: `container.log` contains service-command stdout/stderr
+  and `ray/` is the service's `/tmp/ray` root. A one-shot `log-init` service
+  creates these host paths before non-root runtime services start.
 
 ## Known Checked-in Integration Gaps
 

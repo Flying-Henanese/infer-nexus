@@ -12,8 +12,8 @@ import yaml
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 LOGGED_SERVICES = ("ray-head", "ray-worker", "serve-deployer")
 COMPOSE_PROFILES = (
-    ("docker-compose.yml", "cuda", "./logs/cuda"),
-    ("ascend_deploy/docker-compose.yml", "ascend", "../logs/ascend"),
+    ("docker-compose.yml", "./logs", "sh"),
+    ("ascend_deploy/docker-compose.yml", "../logs", "bash"),
 )
 
 
@@ -26,11 +26,11 @@ def _volume_sources(service: dict[str, object], container_target: str) -> list[s
     return sources
 
 
-@pytest.mark.parametrize(("relative_path", "platform", "log_root"), COMPOSE_PROFILES)
+@pytest.mark.parametrize(("relative_path", "log_root", "nested_shell"), COMPOSE_PROFILES)
 def test_compose_exports_each_service_log_tree_to_the_host(
     relative_path: str,
-    platform: str,
     log_root: str,
+    nested_shell: str,
 ) -> None:
     """Every long-lived runtime service has an isolated, host-visible log tree."""
     with (REPOSITORY_ROOT / relative_path).open(encoding="utf-8") as compose_file:
@@ -38,13 +38,13 @@ def test_compose_exports_each_service_log_tree_to_the_host(
 
     log_initializer = compose["services"]["log-init"]
     initializer_command = " ".join(log_initializer["command"])
-    initializer_directory = f"/logs/{platform}/log-init"
+    initializer_directory = "/logs/log-init"
     initializer_redirect = f"exec >>{initializer_directory}/container.log"
     assert initializer_directory in initializer_command
     assert initializer_command.index(initializer_directory) < initializer_command.index(
         initializer_redirect
     ) < initializer_command.index("for service in ray-head ray-worker serve-deployer")
-    assert _volume_sources(log_initializer, "/logs") == [log_root.rsplit("/", 1)[0]]
+    assert _volume_sources(log_initializer, "/logs") == [log_root]
 
     for service_name in LOGGED_SERVICES:
         service = compose["services"][service_name]
@@ -64,7 +64,6 @@ def test_compose_exports_each_service_log_tree_to_the_host(
         if service_name == "ray-head":
             continue
 
-        nested_shell = "bash" if platform == "ascend" else "sh"
         marker = f" -- {nested_shell} -ec '"
         nested_command = service["command"][-1]
         nested_start = nested_command.index(marker) + len(marker)

@@ -65,8 +65,8 @@ Implemented:
   request lifecycle middleware and return it in `X-Request-ID`.
 - Local scripts expose Ray session logs under `.infer-nexus/ray/`; Compose
   exports the head, worker, and deployer session directories to
-  `logs/<platform>/<service>/ray/` and each service command's output to its
-  sibling `container.log`.
+  `logs/<service>/ray/` and each service command's output to its sibling
+  `container.log`.
 
 Skeleton or partial:
 - `AdmissionController` exists as a gateway integration point, but capacity- and
@@ -1101,13 +1101,13 @@ Current implementation status:
   Ray component and worker logs are under
   `.infer-nexus/ray/session_latest/logs/`; for an externally managed Ray
   session, the startup script may report `/tmp/ray/session_latest/logs/`.
-- Compose exports runtime logs to the repository-root `logs/` tree. CUDA uses
-  `logs/cuda/` and Ascend uses `logs/ascend/`; beneath that, each service owns
-  `container.log` for its command stdout/stderr and `ray/` for its `/tmp/ray`
-  session files. A one-shot root-only `log-init` service prepares these host
-  directories before non-root runtime services start. Ray's component rotation
-  remains 50 MiB with three backups. `container.log` is append-only on the host
-  and should use a host `logrotate` policy where retention is required.
+- Compose exports runtime logs to the repository-root `logs/` tree. Each
+  service owns `logs/<service>/container.log` for its command stdout/stderr and
+  `logs/<service>/ray/` for its `/tmp/ray` session files. A one-shot root-only
+  `log-init` service prepares these host directories before non-root runtime
+  services start. Ray's component rotation remains 50 MiB with three backups.
+  `container.log` is append-only on the host and should use a host `logrotate`
+  policy where retention is required.
 
 ## 14. Error Model
 

@@ -88,8 +88,7 @@ Only report the change as deployed after recording:
 - the result of any change-specific smoke test
 
 If validation fails, collect only relevant read-only logs such as
-`tail -n 200 logs/cuda/<service>/container.log` and files below
-`logs/cuda/<service>/ray/session_latest/logs/` (use `logs/ascend` for the
-Ascend profile). Docker Compose logs remain a fallback for failures before the
-host log wrapper starts. Do not make destructive recovery changes without user
-approval.
+`tail -n 200 logs/<service>/container.log` and files below
+`logs/<service>/ray/session_latest/logs/`. Docker Compose logs remain a fallback
+for failures before the host log wrapper starts. Do not make destructive
+recovery changes without user approval.

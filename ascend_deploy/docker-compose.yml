@@ -26,13 +26,13 @@ services:
       - bash
       - -ec
       - >
-        install -d -m 0755 /logs/ascend/log-init;
-        exec >>/logs/ascend/log-init/container.log 2>&1;
+        install -d -m 0755 /logs/log-init;
+        exec >>/logs/log-init/container.log 2>&1;
         for service in ray-head ray-worker serve-deployer; do
-          install -d -m 0755 -o "$${APP_UID}" -g "$${APP_GID}" "/logs/ascend/$${service}";
-          install -d -m 0755 -o "$${APP_UID}" -g "$${APP_GID}" "/logs/ascend/$${service}/ray";
+          install -d -m 0755 -o "$${APP_UID}" -g "$${APP_GID}" "/logs/$${service}";
+          install -d -m 0755 -o "$${APP_UID}" -g "$${APP_GID}" "/logs/$${service}/ray";
         done;
-        echo "Prepared host-visible Ascend log directories."
+        echo "Prepared host-visible Compose log directories."
     volumes:
       - ../logs:/logs
     restart: "no"
@@ -71,8 +71,8 @@ services:
       - ../README.md:/app/README.md:ro
       - ../config:/app/config:ro
       - ${MODEL_STORE_HOST_PATH:-../models}:/models
-      - ../logs/ascend/ray-head:/var/log/infer-nexus
-      - ../logs/ascend/ray-head/ray:/tmp/ray
+      - ../logs/ray-head:/var/log/infer-nexus
+      - ../logs/ray-head/ray:/tmp/ray
     healthcheck:
       test: ["CMD-SHELL", "ray status --address=127.0.0.1:6379 >/dev/null 2>&1"]
       interval: 10s
@@ -138,8 +138,8 @@ services:
       - ../README.md:/app/README.md:ro
       - ../config:/app/config:ro
       - ${MODEL_STORE_HOST_PATH:-../models}:/models
-      - ../logs/ascend/ray-worker:/var/log/infer-nexus
-      - ../logs/ascend/ray-worker/ray:/tmp/ray
+      - ../logs/ray-worker:/var/log/infer-nexus
+      - ../logs/ray-worker/ray:/tmp/ray
       - /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro
       - /usr/local/dcmi:/usr/local/dcmi:ro
       - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro
@@ -192,6 +192,6 @@ services:
       - ../README.md:/app/README.md:ro
       - ../config:/app/config:ro
       - ${MODEL_STORE_HOST_PATH:-../models}:/models
-      - ../logs/ascend/serve-deployer:/var/log/infer-nexus
-      - ../logs/ascend/serve-deployer/ray:/tmp/ray
+      - ../logs/serve-deployer:/var/log/infer-nexus
+      - ../logs/serve-deployer/ray:/tmp/ray
     restart: "no"

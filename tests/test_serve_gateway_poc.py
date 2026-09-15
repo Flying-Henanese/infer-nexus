@@ -40,6 +40,7 @@ def _ray_log_contains(
     log_paths: list[Path],
     request_id: str,
     *,
+    event: str | None = None,
     route: str | None = None,
 ) -> bool:
     for path in log_paths:
@@ -54,8 +55,21 @@ def _ray_log_contains(
                 continue
             if not isinstance(record, dict) or record.get("request_id") != request_id:
                 continue
-            if route is None or record.get("route") == route:
+            if event is not None and record.get("event") != event:
+                continue
+            if route is not None and record.get("route") != route:
+                continue
+            return True
+    return False
+
+
+def _ray_log_text_contains(log_paths: list[Path], request_id: str) -> bool:
+    for path in log_paths:
+        try:
+            if request_id in path.read_text(encoding="utf-8", errors="replace"):
                 return True
+        except OSError:
+            continue
     return False
 
 
@@ -373,12 +387,14 @@ def test_real_gateway_ingress_reuses_fastapi_without_ray_client(tmp_path: Path) 
         ray.shutdown()
 
     assert streamed_request_id is not None
-    serve_log_dir = ray_temp_dir / "session_latest" / "logs" / "serve"
-    assert _ray_log_contains(
+    ray_log_dir = ray_temp_dir / "session_latest" / "logs"
+    serve_log_dir = ray_log_dir / "serve"
+    assert _ray_log_text_contains(
         list(serve_log_dir.glob("proxy_*.log")), streamed_request_id
     ), "Ray Serve proxy log should carry the response's canonical request ID"
     assert _ray_log_contains(
-        list(serve_log_dir.glob(f"replica_{spec.application_name}_gateway_*.log")),
+        list(ray_log_dir.glob("worker-*.out")),
         streamed_request_id,
+        event="request.completed",
         route="/v1/chat/completions",
     ), "Gateway application log should carry the same canonical request ID"

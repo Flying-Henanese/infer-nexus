@@ -388,6 +388,11 @@ def test_build_gateway_binding_uses_a_unique_bounded_cpu_ingress(
         'max_ongoing_requests': 12,
         'max_queued_requests': 24,
         'ray_actor_options': {'num_cpus': 0.5},
+        'logging_config': {
+            'encoding': 'TEXT',
+            'log_level': 'INFO',
+            'enable_access_log': False,
+        },
     }
     assert serve.ingress_app is not None
 

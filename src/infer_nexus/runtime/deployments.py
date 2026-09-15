@@ -2,13 +2,28 @@
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+import os
+from time import perf_counter
 from typing import Any, Literal
 
 from infer_nexus.backends.base import InferenceBackend
 from infer_nexus.backends.vllm import VLLMBackend
-from infer_nexus.core.schemas import ChatCompletionsRequest, EmbeddingRequest, RerankRequest
 from infer_nexus.catalog.models import ModelConfig
-from infer_nexus.core.errors import BackendConfigurationError, BackendRequestValidationError, RuntimeExecutionError
+from infer_nexus.core.config import LoggingSettings
+from infer_nexus.core.errors import (
+    BackendConfigurationError,
+    BackendRequestValidationError,
+    RuntimeExecutionError,
+)
+from infer_nexus.core.request_context import RequestContext
+from infer_nexus.core.schemas import ChatCompletionsRequest, EmbeddingRequest, RerankRequest
+from infer_nexus.observability.logging import bind_log_context, configure_logging, get_logger
+from infer_nexus.observability.ray_logging import (
+    configure_ray_logging_environment,
+    configure_vllm_logging,
+    serve_logging_config,
+    serve_replica_identity,
+)
 
 @dataclass(slots=True)
 class DeploymentSpec:
@@ -37,12 +52,58 @@ class ModelRuntimeReplica:
     ) -> None:
         """创建模型副本、构造后端适配器，并在副本启动时完成后端初始化。"""
         self.runtime_context = runtime_context
-        self.backend = backend or self._build_backend(runtime_context["runtime_spec"]["backend"])
-        self.backend.validate_runtime_spec(
-            self.runtime_context["runtime_spec"],
-            self.runtime_context,
+        self.logging_settings = LoggingSettings.model_validate(
+            runtime_context.get("logging_settings") or {}
         )
-        self.backend.startup()
+        configure_ray_logging_environment(self.logging_settings)
+        configure_vllm_logging(self.logging_settings)
+        identity = serve_replica_identity(runtime_context)
+        configure_logging(
+            self.logging_settings,
+            {
+                "service": "infer-nexus",
+                "service_version": "0.1.0",
+                "environment": os.getenv("INFER_NEXUS_ENVIRONMENT", "development"),
+                "process_role": "model_replica",
+                "pid": os.getpid(),
+                "model": runtime_context.get("model_name"),
+                **identity,
+            },
+        )
+        self.logger = get_logger(__name__)
+        startup_started = perf_counter()
+        self.logger.info(
+            "model.replica.initializing",
+            model=runtime_context.get("model_name"),
+            deployment=identity.get("deployment"),
+            serve_app=identity.get("serve_app"),
+            replica_id=identity.get("replica_id"),
+        )
+        try:
+            self.backend = backend or self._build_backend(runtime_context["runtime_spec"]["backend"])
+            self.backend.validate_runtime_spec(
+                self.runtime_context["runtime_spec"],
+                self.runtime_context,
+            )
+            self.backend.startup()
+        except Exception:
+            self.logger.exception(
+                "model.replica.failed",
+                model=runtime_context.get("model_name"),
+                deployment=identity.get("deployment"),
+                serve_app=identity.get("serve_app"),
+                replica_id=identity.get("replica_id"),
+                error_code="backend_startup_failed",
+            )
+            raise
+        self.logger.info(
+            "model.replica.ready",
+            model=runtime_context.get("model_name"),
+            deployment=identity.get("deployment"),
+            serve_app=identity.get("serve_app"),
+            replica_id=identity.get("replica_id"),
+            duration_ms=round((perf_counter() - startup_started) * 1000, 3),
+        )
 
     def _build_backend(self, backend_name: str) -> InferenceBackend:
         """根据 runtime_spec 中声明的后端名称选择对应的推理后端适配器。"""
@@ -62,51 +123,71 @@ class ModelRuntimeReplica:
             raise TypeError("request_payload is required")
         return resolved_payload
 
+    def _bind_request_context(self, request_context: RequestContext | dict[str, Any] | None):
+        """Bind validated request metadata plus this replica's stable identity."""
+        if isinstance(request_context, dict):
+            context = RequestContext(**request_context)
+        elif isinstance(request_context, RequestContext):
+            context = request_context
+        else:
+            context = None
+        fields = context.to_log_fields() if context is not None else {}
+        fields.setdefault("model", self.runtime_context.get("model_alias") or self.runtime_context.get("model_name"))
+        fields.setdefault("serve_app", self.runtime_context.get("app_name"))
+        fields.setdefault("deployment", self.runtime_context.get("deployment_name"))
+        fields.setdefault("backend", self.runtime_context.get("runtime_spec", {}).get("backend"))
+        fields.setdefault("compat_mode", self.runtime_context.get("compat_mode"))
+        return bind_log_context(**{key: value for key, value in fields.items() if value is not None})
+
     async def chat_completion(
         self,
         request_payload: dict[str, Any] | None = None,
         *,
         payload: dict[str, Any] | None = None,
+        request_context: RequestContext | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """校验 chat completion 请求并交给后端执行，统一包装运行时错误。"""
-        request = ChatCompletionsRequest.model_validate(
-            self._resolve_request_payload(request_payload, payload=payload)
-        )
-        try:
-            response = await self.backend.chat_completion(
-                self.runtime_context["runtime_spec"],
-                request,
-                self.runtime_context,
+        with self._bind_request_context(request_context):
+            request = ChatCompletionsRequest.model_validate(
+                self._resolve_request_payload(request_payload, payload=payload)
             )
-        except BackendRequestValidationError as exc:
-            raise RuntimeExecutionError(str(exc), code=exc.code) from exc
-        except BackendConfigurationError as exc:
-            raise RuntimeExecutionError(str(exc), code="backend_misconfigured") from exc
-        if self._is_openai_chat_response(response):
-            return response
-        return {"status": "ok", **response}
+            try:
+                response = await self.backend.chat_completion(
+                    self.runtime_context["runtime_spec"],
+                    request,
+                    self.runtime_context,
+                )
+            except BackendRequestValidationError as exc:
+                raise RuntimeExecutionError(str(exc), code=exc.code) from exc
+            except BackendConfigurationError as exc:
+                raise RuntimeExecutionError(str(exc), code="backend_misconfigured") from exc
+            if self._is_openai_chat_response(response):
+                return response
+            return {"status": "ok", **response}
 
     async def chat_completion_stream(
         self,
         request_payload: dict[str, Any] | None = None,
         *,
         payload: dict[str, Any] | None = None,
+        request_context: RequestContext | dict[str, Any] | None = None,
     ) -> AsyncIterator[dict[str, Any] | bytes | str]:
         """校验流式 chat completion 请求，并逐块转发后端生成的响应片段。"""
-        request = ChatCompletionsRequest.model_validate(
-            self._resolve_request_payload(request_payload, payload=payload)
-        )
-        try:
-            async for chunk in self.backend.chat_completion_stream(
-                self.runtime_context["runtime_spec"],
-                request,
-                self.runtime_context,
-            ):
-                yield chunk
-        except BackendRequestValidationError as exc:
-            raise RuntimeExecutionError(str(exc), code=exc.code) from exc
-        except BackendConfigurationError as exc:
-            raise RuntimeExecutionError(str(exc), code="backend_misconfigured") from exc
+        with self._bind_request_context(request_context):
+            request = ChatCompletionsRequest.model_validate(
+                self._resolve_request_payload(request_payload, payload=payload)
+            )
+            try:
+                async for chunk in self.backend.chat_completion_stream(
+                    self.runtime_context["runtime_spec"],
+                    request,
+                    self.runtime_context,
+                ):
+                    yield chunk
+            except BackendRequestValidationError as exc:
+                raise RuntimeExecutionError(str(exc), code=exc.code) from exc
+            except BackendConfigurationError as exc:
+                raise RuntimeExecutionError(str(exc), code="backend_misconfigured") from exc
 
     def _is_openai_chat_response(self, payload: dict[str, Any]) -> bool:
         """判断后端返回值是否已经是完整 OpenAI chat 响应，可直接透传。"""
@@ -117,44 +198,48 @@ class ModelRuntimeReplica:
         request_payload: dict[str, Any] | None = None,
         *,
         payload: dict[str, Any] | None = None,
+        request_context: RequestContext | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """校验 embedding 请求并交给后端执行，返回统一成功载荷。"""
-        request = EmbeddingRequest.model_validate(
-            self._resolve_request_payload(request_payload, payload=payload)
-        )
-        try:
-            response = await self.backend.embedding(
-                self.runtime_context["runtime_spec"],
-                request,
-                self.runtime_context,
+        with self._bind_request_context(request_context):
+            request = EmbeddingRequest.model_validate(
+                self._resolve_request_payload(request_payload, payload=payload)
             )
-        except BackendRequestValidationError as exc:
-            raise RuntimeExecutionError(str(exc), code=exc.code) from exc
-        except BackendConfigurationError as exc:
-            raise RuntimeExecutionError(str(exc), code="backend_misconfigured") from exc
-        return {"status": "ok", **response}
+            try:
+                response = await self.backend.embedding(
+                    self.runtime_context["runtime_spec"],
+                    request,
+                    self.runtime_context,
+                )
+            except BackendRequestValidationError as exc:
+                raise RuntimeExecutionError(str(exc), code=exc.code) from exc
+            except BackendConfigurationError as exc:
+                raise RuntimeExecutionError(str(exc), code="backend_misconfigured") from exc
+            return {"status": "ok", **response}
 
     async def rerank(
         self,
         request_payload: dict[str, Any] | None = None,
         *,
         payload: dict[str, Any] | None = None,
+        request_context: RequestContext | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """校验 rerank 请求并交给后端执行，返回统一成功载荷。"""
-        request = RerankRequest.model_validate(
-            self._resolve_request_payload(request_payload, payload=payload)
-        )
-        try:
-            response = await self.backend.rerank(
-                self.runtime_context["runtime_spec"],
-                request,
-                self.runtime_context,
+        with self._bind_request_context(request_context):
+            request = RerankRequest.model_validate(
+                self._resolve_request_payload(request_payload, payload=payload)
             )
-        except BackendRequestValidationError as exc:
-            raise RuntimeExecutionError(str(exc), code=exc.code) from exc
-        except BackendConfigurationError as exc:
-            raise RuntimeExecutionError(str(exc), code="backend_misconfigured") from exc
-        return {"status": "ok", **response}
+            try:
+                response = await self.backend.rerank(
+                    self.runtime_context["runtime_spec"],
+                    request,
+                    self.runtime_context,
+                )
+            except BackendRequestValidationError as exc:
+                raise RuntimeExecutionError(str(exc), code=exc.code) from exc
+            except BackendConfigurationError as exc:
+                raise RuntimeExecutionError(str(exc), code="backend_misconfigured") from exc
+            return {"status": "ok", **response}
 
     async def __call__(self, request: Any) -> dict[str, Any]:
         """提供占位 HTTP 入口，实际推理由具名任务方法处理。"""
@@ -194,9 +279,14 @@ class RuntimeApplicationRoot:
 class DeploymentFactory:
     """把模型目录配置转换成 Ray Serve 可消费的部署声明。"""
 
-    def __init__(self, inference_device_type: Literal["cuda", "npu"] = "cuda") -> None:
+    def __init__(
+        self,
+        inference_device_type: Literal["cuda", "npu"] = "cuda",
+        logging_settings: LoggingSettings | None = None,
+    ) -> None:
         """记录推理设备类型，用于后续生成 CUDA 或 NPU 的 Ray 资源配置。"""
         self.inference_device_type = inference_device_type
+        self.logging_settings = logging_settings or LoggingSettings()
 
     def build_deployment_name(self, model: ModelConfig) -> str:
         """为模型生成稳定部署名，保证 Serve 句柄查找和计划输出一致。"""
@@ -256,6 +346,10 @@ class DeploymentFactory:
             "autoscaling_config": dict(spec.autoscaling_config),
         }
         kwargs.update(spec.serve_deployment_kwargs)
+        kwargs.setdefault(
+            "logging_config",
+            serve_logging_config(self.logging_settings, enable_access_log=False),
+        )
         request_router_config = self.build_request_router_config(spec.request_router_config)
         if request_router_config is not None:
             kwargs["request_router_config"] = request_router_config

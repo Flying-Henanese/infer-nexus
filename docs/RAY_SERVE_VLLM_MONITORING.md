@@ -330,3 +330,124 @@ Ray Serve is visible but embedded vLLM internals are not. A focused custom
 metric layer should record model, deployment, replica, status, replica latency,
 stream TTFT, and stream chunk intervals. It should not try to emulate vLLM KV
 cache or scheduler metrics.
+
+## Structured Application Logs And Request IDs
+
+Application logs complement these metrics; they explain individual request and
+runtime events but do not replace aggregate counters, histograms, or Ray queue
+signals. Request IDs are intentionally not Prometheus labels.
+
+The checked-in profiles select human-readable console output in
+`config/settings.yaml` and JSONL in the CUDA and Ascend Compose settings. The
+Application records carry `event`, `request_id` when present, `model`, `task`,
+`backend`, Serve app/deployment,
+`outcome`, `status_code`, `duration_ms`, and stable `error_code` fields. Known
+sensitive fields are redacted. Prompt and message bodies, embeddings, rerank
+documents, credentials, and per-token/per-chunk records are excluded.
+
+The Gateway selects an inbound validated `X-Request-ID`, falls back to the Ray
+Serve request ID when available, then generates a UUID. Every response includes
+`X-Request-ID`; streaming responses temporarily also include
+`X-Infer-Nexus-Request-ID` for compatibility. That ID travels beside internal
+Serve handle payloads and is bound by the model replica. Proxy upstream calls
+include it when the model's `headers_policy.pass_request_id` is enabled.
+
+Each HTTP request has one Gateway terminal event: `request.completed` or
+`request.failed`. A streamed request also has one stream sub-lifecycle event:
+`stream.completed`, `stream.failed`, or `stream.cancelled`. Stream failures own
+their traceback; the request terminal event does not duplicate it. The
+admission middleware owns `admission.rejected`, and model replicas own
+`model.replica.initializing`, `model.replica.ready`, and
+`model.replica.failed`. Runtime handle failures emit `runtime.call.failed`;
+proxy upstream failures emit `proxy.request.failed` with safe host/status fields.
+The request terminal event includes `upstream_status` when a proxy returns an
+HTTP error. Successful `/healthz`, `/readyz`, and `/metrics` events are
+suppressed; ordinary successful request events follow `success_sample_rate`.
+
+## Log File Discovery
+
+### Local bootstrap scripts
+
+- `.infer-nexus/logs/ray_bootstrap.log` contains Ray CLI startup output.
+- `.infer-nexus/logs/serve_runtime.log` contains the one-shot Serve deployer's
+  output.
+- Actual Ray session files are under
+  `.infer-nexus/ray/session_latest/logs/`. When attached to an external Ray
+  cluster, the startup script may instead report
+  `/tmp/ray/session_latest/logs/`.
+- Ray component files are configured for 50 MiB rotation with three backups.
+
+The local profile uses console records, so search directly:
+
+```bash
+rg 'incident-2026-09-15-42' .infer-nexus/logs .infer-nexus/ray/session_latest/logs
+```
+
+### Docker Compose
+
+CUDA and Ascend Compose give each Ray process a separate named volume mounted
+at `/tmp/ray`: `ray-head-temp`, `ray-worker-temp`, and `ray-deployer-temp`.
+Inspect each service's current session files with:
+
+```bash
+docker compose exec ray-head sh -lc \
+  'find /tmp/ray/session_latest/logs -maxdepth 2 -type f -print'
+docker compose exec ray-worker sh -lc \
+  'find /tmp/ray/session_latest/logs -maxdepth 2 -type f -print'
+docker compose run --rm --no-deps --entrypoint sh serve-deployer -lc \
+  'find /tmp/ray/session_latest/logs -maxdepth 2 -type f -print'
+docker compose logs --tail=200 ray-head ray-worker serve-deployer
+```
+
+The named volumes keep nodes separate and survive container recreation unless
+removed. Container stdout/stderr is separate and uses Docker's `json-file`
+rotation at 10 MiB × five files per service; Ray component files use 50 MiB ×
+three backups. The Compose configuration does not export these files to a
+central store.
+
+For JSONL application records copied from a process log, filter using the
+stable fields:
+
+```bash
+jq -c 'select(.request_id == "incident-2026-09-15-42")' gateway.jsonl
+jq -c 'select(.event == "admission.rejected")' gateway.jsonl
+jq -c 'select(.event == "model.replica.failed")' ray-worker.jsonl
+```
+
+Ray and vLLM framework records may use different JSON schemas. Do not assume
+every third-party line has infer-nexus's `event` or request fields.
+
+### Ray and Serve access logging
+
+The Serve deployer configures Ray Core and Serve logging for the selected
+console/JSON format, and sets vLLM to propagate records through the
+process-owned application handler. The public Serve proxy's access logging is
+controlled by `observability.logging.access_log`. Duplicate access logs on the
+Gateway and model replica deployments are disabled. In deployed settings,
+`uvicorn.access` is WARNING; in the local profile it is INFO. `RAY_BACKEND_LOG_JSON`
+is enabled, with Ray rotation set to 50 MiB and three backups. vLLM's level
+comes from `observability.logging.level`; request or prompt logging is not
+enabled.
+
+## Request-Centric Incident Checks
+
+Start with a request's ID, then inspect the Gateway terminal record and, for
+streams, the related stream terminal event. Query `outcome`, `status_code`,
+`duration_ms`, `error_code`, `model`, `task`, and `deployment`; do not inspect
+request content.
+
+| Symptom | Log/metric signal | Interpretation |
+|---|---|---|
+| Process-local Gateway overload | `admission.rejected` with the same request ID; `infer_nexus_gateway_worker_rejections_total` | Worker admission rejected before route execution. Inspect `reason` and `retry_after_seconds`. |
+| Serve ingress queue overload | Ray proxy access logs and `serve_deployment_queued_queries` | The request was rejected before FastAPI, so it may have no Gateway request event or generated Gateway ID. |
+| Runtime timeout | Request terminal event with `outcome="timeout"`; matching Serve handle and deployment metrics | Inspect `error_code`, status, handle timeout counters, and model replica logs. |
+| Proxy upstream error | `proxy.request.failed` with `upstream_host`, `upstream_status`, and safe error code | Correlate `request_id` with the Gateway terminal event and its `upstream_status`; do not log the full URL or payload. |
+| Model startup failure | `model.replica.failed` with `backend_startup_failed` | Startup is not attached to an HTTP request; inspect the same replica's Ray logs. |
+| Stream backend failure | `stream.failed`, then the request terminal event with the same ID | The stream event owns the traceback; the request event provides final HTTP outcome. |
+| Client disconnect | `stream.cancelled`, then request outcome `cancelled` | The client ended the stream; investigate client/network behavior and do not expect a backend traceback. |
+
+When debugging ingress queue pressure, use Ray Serve's dynamic metrics target
+and `serve_deployment_queued_queries`; this outer rejection does not pass through
+the application middleware. For end-to-end health, correlate the same
+request ID across gateway and model replica records and use the existing
+`/metrics` endpoint for aggregate request/stream metrics.

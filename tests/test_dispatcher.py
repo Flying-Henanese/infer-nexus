@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 from time import perf_counter
 
 import httpx
@@ -9,12 +10,18 @@ import pytest
 from starlette.responses import Response
 from starlette.responses import StreamingResponse
 
+from infer_nexus.api.request_logging_middleware import _finalize
 from infer_nexus.catalog.models import ModelCatalogFile, ModelConfig
 from infer_nexus.catalog.loader import load_model_catalog
 from infer_nexus.catalog.registry import ModelRegistry
-from infer_nexus.core.config import Settings
+from infer_nexus.core.config import LoggingSettings, Settings
 from infer_nexus.core.enums import BackendType, TaskType
 from infer_nexus.core.errors import AdmissionRejectedError, RuntimeNotConnectedError
+from infer_nexus.core.request_context import (
+    RequestContext,
+    RequestLifecycleState,
+    bind_request_state,
+)
 from infer_nexus.core.schemas import ChatCompletionsRequest, EmbeddingRequest, RerankRequest
 from infer_nexus.model_store import LocalModelStore
 from infer_nexus.observability.metrics import render_prometheus_metrics
@@ -587,6 +594,66 @@ def test_dispatch_chat_uses_keyword_request_payload_when_invoking_serve_handle()
     assert 'serve chat response from deployment' in str(response.choices[0].message.content)
 
 
+def test_dispatch_chat_propagates_gateway_request_context_to_serve_handle() -> None:
+    """Serve calls receive allowlisted request metadata beside the OpenAI payload."""
+    captured: dict[str, object] = {}
+
+    class CapturingMethod:
+        async def remote(self, *, request_payload, request_context):
+            captured["request_payload"] = request_payload
+            captured["request_context"] = request_context
+            return {
+                "status": "ok",
+                "model": "qwen3-chat",
+                "content": "ok",
+            }
+
+    class CapturingServe:
+        def get_deployment_handle(self, deployment_name, app_name):
+            return type(
+                "Handle",
+                (),
+                {"chat_completion": CapturingMethod()},
+            )()
+
+    executor = RuntimeExecutor(
+        mode="serve",
+        handle_resolver=ServeDeploymentHandleResolver(serve=CapturingServe()),
+    )
+    registry, _, dispatcher = make_dispatcher(executor)
+    chat_model = next(
+        model.alias or model.name
+        for model in registry.list_models()
+        if model.task is TaskType.CHAT
+    )
+    target = dispatcher.resolve_target(registry.get(chat_model))
+    request = ChatCompletionsRequest(
+        model=chat_model,
+        messages=[{"role": "user", "content": "hello"}],
+    )
+    lifecycle = RequestLifecycleState(
+        context=RequestContext(
+            request_id="req-cross-process-123",
+            method="POST",
+            route="/v1/chat/completions",
+            task="chat",
+        )
+    )
+
+    with bind_request_state(lifecycle):
+        response = asyncio.run(dispatcher.dispatch_chat(registry.get(chat_model), request))
+
+    assert response.object == "chat.completion"
+    assert captured["request_payload"]["model"] == chat_model
+    propagated = captured["request_context"]
+    assert isinstance(propagated, RequestContext)
+    assert propagated.request_id == "req-cross-process-123"
+    assert propagated.model == chat_model
+    assert propagated.backend == "vllm"
+    assert propagated.serve_app == target.app_name
+    assert propagated.deployment == target.deployment_name
+
+
 def test_dispatch_chat_passthrough_openai_payload_without_collapsing_choices() -> None:
     """完整 OpenAI chat payload 应原样透传，避免 choices 或 usage 扩展字段被裁剪。"""
     resolver = ServeDeploymentHandleResolver(serve=FakeOpenAIChatServe())
@@ -637,6 +704,167 @@ def test_dispatch_chat_stream_uses_serve_streaming_handle_without_rewriting_requ
     assert b'chat.completion.chunk' in body
     assert b'"content": "hello"' in body
     assert body.endswith(b'data: [DONE]\n\n')
+
+
+def test_first_stream_chunk_failure_is_logged_before_response_creation(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Failures discovered while priming are logged before SSE headers are sent."""
+    executor = RuntimeExecutor()
+    lifecycle = RequestLifecycleState(
+        context=RequestContext(
+            request_id="req-early-stream-failure",
+            route="/v1/chat/completions",
+            stream=True,
+        )
+    )
+
+    async def failing_chunks():
+        raise RuntimeError("upstream detail must stay out of structured fields")
+        yield {}
+
+    async def prime() -> None:
+        with bind_request_state(lifecycle):
+            await executor._prime_stream_chunks(
+                failing_chunks(),
+                model_label="qwen3-chat",
+                stream_start_time=perf_counter(),
+            )
+
+    with caplog.at_level(logging.ERROR, logger="infer_nexus"):
+        with pytest.raises(RuntimeError, match="upstream detail") as exc_info:
+            asyncio.run(prime())
+        lifecycle.exception = exc_info.value
+        _finalize(lifecycle, LoggingSettings(slow_request_ms=10**9))
+
+    events = [
+        record
+        for record in caplog.records
+        if getattr(record, "structured_event", None)
+        in {"stream.failed", "request.failed"}
+    ]
+    stream_failures = [
+        record for record in events if record.structured_event == "stream.failed"
+    ]
+    request_failures = [
+        record for record in events if record.structured_event == "request.failed"
+    ]
+    assert len(stream_failures) == 1
+    assert stream_failures[0].structured_fields["error_code"] == "stream_failed"
+    assert stream_failures[0].exc_info is not None
+    assert len(request_failures) == 1
+    assert request_failures[0].exc_info is None
+    assert lifecycle.stream_terminal_logged is True
+    assert lifecycle.error_code == "stream_failed"
+
+
+@pytest.mark.parametrize(
+    ("terminal_error", "expected_event", "expected_outcome"),
+    [
+        (RuntimeError("stream interrupted"), "stream.failed", "error"),
+        (asyncio.CancelledError(), "stream.cancelled", "cancelled"),
+    ],
+)
+def test_stream_terminal_error_is_logged_once(
+    caplog: pytest.LogCaptureFixture,
+    terminal_error: BaseException,
+    expected_event: str,
+    expected_outcome: str,
+) -> None:
+    """A failure or cancellation after SSE starts has one stream terminal event."""
+    executor = RuntimeExecutor()
+    lifecycle = RequestLifecycleState(
+        context=RequestContext(
+            request_id="req-stream-terminal",
+            route="/v1/chat/completions",
+            stream=True,
+        )
+    )
+
+    async def chunks():
+        yield b"data: first\n\n"
+        raise terminal_error
+
+    async def collect() -> None:
+        with bind_request_state(lifecycle):
+            async for _ in executor._observe_stream_chunks(
+                chunks(),
+                model_label="qwen3-chat",
+                stream_start_time=perf_counter(),
+            ):
+                pass
+
+    with caplog.at_level(logging.INFO, logger="infer_nexus"):
+        with pytest.raises(type(terminal_error)):
+            asyncio.run(collect())
+
+    terminal_records = [
+        record
+        for record in caplog.records
+        if getattr(record, "structured_event", None) == expected_event
+    ]
+    assert len(terminal_records) == 1
+    assert terminal_records[0].structured_fields["outcome"] == expected_outcome
+    assert (terminal_records[0].exc_info is not None) == (expected_outcome == "error")
+    assert lifecycle.stream_terminal_logged is True
+    if expected_outcome == "cancelled":
+        assert lifecycle.outcome == "cancelled"
+    else:
+        assert lifecycle.error_code == "stream_failed"
+
+
+@pytest.mark.parametrize("failure_stage", ["priming", "streaming"])
+def test_expected_stream_timeout_is_logged_without_traceback(
+    caplog: pytest.LogCaptureFixture,
+    failure_stage: str,
+) -> None:
+    """Expected timeouts keep the stream error event but omit exception stacks."""
+    executor = RuntimeExecutor()
+    lifecycle = RequestLifecycleState(
+        context=RequestContext(
+            request_id="req-stream-timeout",
+            route="/v1/chat/completions",
+            stream=True,
+        )
+    )
+
+    async def timeout_chunks():
+        if failure_stage == "streaming":
+            yield b"data: first\n\n"
+        raise RuntimeNotConnectedError("deadline exceeded", code="upstream_timeout")
+        yield {}
+
+    async def consume() -> None:
+        with bind_request_state(lifecycle):
+            chunks = timeout_chunks()
+            if failure_stage == "priming":
+                await executor._prime_stream_chunks(
+                    chunks,
+                    model_label="qwen3-chat",
+                    stream_start_time=perf_counter(),
+                )
+                return
+            async for _ in executor._observe_stream_chunks(
+                chunks,
+                model_label="qwen3-chat",
+                stream_start_time=perf_counter(),
+            ):
+                pass
+
+    with caplog.at_level(logging.ERROR, logger="infer_nexus"):
+        with pytest.raises(RuntimeNotConnectedError):
+            asyncio.run(consume())
+
+    failures = [
+        record
+        for record in caplog.records
+        if getattr(record, "structured_event", None) == "stream.failed"
+    ]
+    assert len(failures) == 1
+    assert failures[0].structured_fields["error_code"] == "upstream_timeout"
+    assert failures[0].exc_info is None
+    assert lifecycle.stream_terminal_logged is True
+    assert lifecycle.error_code == "upstream_timeout"
 
 
 def test_streaming_handle_capability_failure_never_falls_back_to_unary_handle() -> None:
@@ -858,7 +1086,9 @@ def test_dispatch_chat_rejects_when_gateway_inflight_limit_is_reached() -> None:
     asyncio.run(run_case())
 
 
-def test_dispatch_chat_opens_circuit_after_repeated_serve_timeouts() -> None:
+def test_dispatch_chat_opens_circuit_after_repeated_serve_timeouts(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Repeated Serve timeouts should open the deployment circuit breaker."""
 
     class SlowDeploymentMethod:
@@ -906,6 +1136,16 @@ def test_dispatch_chat_opens_circuit_after_repeated_serve_timeouts() -> None:
         assert circuit_info.value.code == 'runtime_circuit_open'
 
     asyncio.run(run_case())
+
+    failure_events = [
+        record
+        for record in caplog.records
+        if getattr(record, "structured_event", None) == "runtime.call.failed"
+    ]
+    assert [record.structured_fields["error_code"] for record in failure_events] == [
+        "upstream_timeout",
+        "runtime_circuit_open",
+    ]
 
 
 def test_dispatch_chat_uses_bounded_gateway_queue_before_serve_routing() -> None:

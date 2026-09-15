@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import inspect
-import logging
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
 
@@ -21,12 +20,13 @@ from infer_nexus.backends.vllm_native import (
 )
 from infer_nexus.core.errors import BackendConfigurationError
 from infer_nexus.core.schemas import ChatCompletionsRequest, EmbeddingRequest
+from infer_nexus.observability.logging import get_logger
 
 if TYPE_CHECKING:
     from infer_nexus.backends.vllm import VLLMBackend
 
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class StrictNativeVLLMExecutor:
@@ -412,15 +412,19 @@ class StrictNativeVLLMExecutor:
                 serving_render=serving_render,
             )
         except Exception as exc:
-            self.backend.openai_serving_adapter_init_error = str(exc)
-            logger.warning(
-                "Failed to initialize vLLM OpenAI serving adapter for model_path='%s' "
-                "served_model_name='%s' engine_kind='%s': %s",
-                self.backend.runtime_spec.get("model_path"),
-                self.backend.runtime_spec.get("served_model_name"),
-                self.backend.engine_kind,
-                exc,
+            self.backend.openai_serving_adapter_init_error = (
+                f"adapter initialization failed: {type(exc).__name__}"
             )
+            if not self.backend._requires_openai_serving_adapter():
+                logger.warning(
+                    "backend.adapter.fallback",
+                    model=self.backend.runtime_spec.get("model_name")
+                    or self.backend.runtime_spec.get("served_model_name"),
+                    engine_kind=self.backend.engine_kind,
+                    adapter="chat",
+                    reason="adapter_initialization_failed",
+                    error_type=type(exc).__name__,
+                )
             return None
 
         self.backend.openai_serving_adapter_init_error = None
@@ -459,15 +463,19 @@ class StrictNativeVLLMExecutor:
                 serving_models=serving_models,
             )
         except Exception as exc:
-            self.backend.openai_serving_embedding_adapter_init_error = str(exc)
-            logger.warning(
-                "Failed to initialize vLLM OpenAI embeddings serving adapter for "
-                "model_path='%s' served_model_name='%s' engine_kind='%s': %s",
-                self.backend.runtime_spec.get("model_path"),
-                self.backend.runtime_spec.get("served_model_name"),
-                self.backend.engine_kind,
-                exc,
+            self.backend.openai_serving_embedding_adapter_init_error = (
+                f"adapter initialization failed: {type(exc).__name__}"
             )
+            if not self.backend._requires_openai_embedding_serving_adapter():
+                logger.warning(
+                    "backend.adapter.fallback",
+                    model=self.backend.runtime_spec.get("model_name")
+                    or self.backend.runtime_spec.get("served_model_name"),
+                    engine_kind=self.backend.engine_kind,
+                    adapter="embedding",
+                    reason="adapter_initialization_failed",
+                    error_type=type(exc).__name__,
+                )
             return None
 
         self.backend.openai_serving_embedding_adapter_init_error = None
@@ -590,14 +598,17 @@ class StrictNativeVLLMExecutor:
                 return await self._call_openai_serving_chat_completion(request_payload)
             except Exception as exc:
                 if vllm_native:
-                    logger.exception(
-                        "Native vLLM OpenAI serving chat invocation failed for model '%s' "
-                        "served_model_name '%s'.",
-                        runtime_context.get("model_name"),
-                        runtime_context.get("served_model_name") or runtime_spec.get("served_model_name"),
-                    )
                     raise
-                self.backend.openai_serving_adapter_init_error = str(exc)
+                logger.warning(
+                    "backend.adapter.fallback",
+                    model=runtime_context.get("model_name")
+                    or runtime_context.get("served_model_name")
+                    or runtime_spec.get("served_model_name"),
+                    engine_kind=self.backend.engine_kind,
+                    adapter="chat",
+                    reason="adapter_invocation_failed",
+                    error_type=type(exc).__name__,
+                )
                 self.backend.openai_serving_chat_adapter = None
         elif vllm_native:
             self._raise_openai_serving_unavailable()
@@ -627,14 +638,18 @@ class StrictNativeVLLMExecutor:
                 return
             except Exception as exc:
                 if vllm_native:
-                    logger.exception(
-                        "Native vLLM OpenAI serving stream invocation failed for model '%s' "
-                        "served_model_name '%s'.",
-                        runtime_context.get("model_name"),
-                        runtime_context.get("served_model_name") or runtime_spec.get("served_model_name"),
-                    )
                     raise
-                self.backend.openai_serving_adapter_init_error = str(exc)
+                logger.warning(
+                    "backend.adapter.fallback",
+                    model=runtime_context.get("model_name")
+                    or runtime_context.get("served_model_name")
+                    or runtime_spec.get("served_model_name"),
+                    engine_kind=self.backend.engine_kind,
+                    adapter="chat",
+                    reason="adapter_invocation_failed",
+                    error_type=type(exc).__name__,
+                    stream=True,
+                )
                 self.backend.openai_serving_chat_adapter = None
         elif vllm_native:
             self._raise_openai_serving_unavailable()

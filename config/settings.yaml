@@ -86,3 +86,17 @@ model_store:
   root_dir: models
   # use mirror endpoint to prevent blocking in mainland China
   huggingface_endpoint: https://hf-mirror.com
+
+observability:
+  logging:
+    format: console
+    level: INFO
+    success_sample_rate: 1.0
+    slow_request_ms: 10000
+    include_traceback: true
+    access_log: true
+    named_levels:
+      ray: INFO
+      ray.serve: INFO
+      uvicorn.access: INFO
+      vllm: INFO

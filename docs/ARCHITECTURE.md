@@ -48,6 +48,16 @@ Implemented:
   a local debugging/stub entrypoint only.
 - Prometheus gateway metrics endpoint and core request, stream, runtime-guard,
   worker-admission, and Serve-handle metrics.
+- Structured application logging is configured per process role. Local settings
+  use readable console output; deployed JSON settings use one-record-per-line
+  JSON. Both Compose profiles select JSON. Ray Core/Serve and vLLM have private
+  adapters to align their logging with the selected profile.
+- An outer ASGI request lifecycle middleware validates or creates one request
+  ID, returns it in `X-Request-ID`, and keeps request context through streamed
+  response completion. The ID is passed to local model Serve replicas and to
+  proxy upstreams when the model's header policy enables request-ID forwarding.
+- Local scripts expose Ray session logs under `.infer-nexus/ray/`; Compose
+  gives the head, worker, and deployer separate named `/tmp/ray` volumes.
 
 Skeleton or partial:
 - `AdmissionController` exists as a gateway integration point, but capacity- and
@@ -1028,17 +1038,60 @@ Current implementation status:
 - proxy upstream latency and error breakdown (`待实现`)
 - proxy stream lifecycle visibility (`待实现`)
 
-### Logging recommendations
-Structured logs should include:
-- request id (`待实现`)
-- model name
-- task type
-- admission decision (`待实现`)
-- deployment name
-- proxy upstream host (`待实现`)
-- proxy upstream model name (`待实现`)
-- latency summary (`待实现`)
-- failure reason when applicable
+### Application logs and request correlation
+
+- `config/settings.yaml` selects the human-readable `console` profile for local
+  development. The CUDA and Ascend Compose settings select `json`, producing
+  one JSON object per line.
+- Application records include UTC timestamp, level, stable `event`, logger,
+  service/build/environment/process identity, and `source`. Request events add
+  allowlisted fields such as `request_id`, route template, model, task, backend,
+  Serve app/deployment, outcome, status, duration, and stable error code. The
+  formatter redacts known sensitive field names and serializes exceptions
+  inside a single record.
+- Request IDs are selected in this order: validated inbound `X-Request-ID`,
+  Ray Serve's request ID when available, then a generated UUID. Every response
+  receives `X-Request-ID`; streaming responses also carry the compatibility
+  header `X-Infer-Nexus-Request-ID`. The same allowlisted context is sent beside
+  internal Serve handle payloads and bound in model replicas. Proxy upstream
+  requests receive `X-Request-ID` when `headers_policy.pass_request_id` is
+  enabled (it defaults to true).
+- The Gateway lifecycle owns one terminal `request.completed` or
+  `request.failed` event per HTTP request. A streamed request also has one
+  stream sub-lifecycle event (`stream.completed`, `stream.failed`, or
+  `stream.cancelled`). The stream event records stream-specific metrics; the
+  request event records the final HTTP lifecycle. Expected validation,
+  rejection, and timeout errors are represented by stable outcome/error fields
+  without a traceback. An unexpected failure carries one authoritative
+  traceback; a stream failure's request terminal record does not repeat it.
+  Successful health, readiness, and metrics requests are omitted from
+  application INFO logs. Ordinary successful request events are sampled by
+  `success_sample_rate`; errors, rejections, and slow requests are retained.
+- Admission owners emit `admission.rejected`; model replicas emit
+  `model.replica.initializing`, `model.replica.ready`, and
+  `model.replica.failed`; process bootstrap emits `app.starting`, `app.ready`,
+  and `app.shutdown`. Do not log prompts, message bodies, embeddings, rerank
+  documents, tokens, credentials, or per-chunk stream data.
+- `serve.start()` receives a Ray logging config, and Gateway/model Serve
+  deployments receive deployment-level configs. The public Serve proxy keeps
+  its edge access log controlled by `observability.logging.access_log`, while
+  duplicate Gateway/model replica access logs are disabled. `uvicorn.access`
+  is set to WARNING in deployed settings and INFO in local settings. vLLM is
+  configured before engine creation to propagate records through the
+  process-owned handler; third-party record schemas are not guaranteed to
+  match application event fields.
+- Local bootstrap output is split between
+  `.infer-nexus/logs/ray_bootstrap.log` (Ray CLI output) and
+  `.infer-nexus/logs/serve_runtime.log` (one-shot deployment driver). Actual
+  Ray component and worker logs are under
+  `.infer-nexus/ray/session_latest/logs/`; for an externally managed Ray
+  session, the startup script may report `/tmp/ray/session_latest/logs/`.
+- Compose stores Ray session files in separate named volumes
+  `ray-head-temp`, `ray-worker-temp`, and `ray-deployer-temp`, mounted at
+  `/tmp/ray` in the corresponding service. Docker's `json-file` driver separately
+  rotates each service's stdout/stderr at 10 MiB with five files. Ray's own
+  component rotation is configured at 50 MiB with three backups. These local
+  volumes are not a central log store.
 
 ## 14. Error Model
 
@@ -1062,7 +1115,8 @@ Phase 1 does not require complex tenant isolation, but basic access control is s
 
 Minimum recommendations:
 - API key authentication (`待实现`)
-- request identity in logs and metrics (`待实现`)
+- request identity in logs and response headers is implemented; request IDs are
+  intentionally not Prometheus labels
 - strict upstream host allowlist for proxy models (`待实现`)
 - explicit `Authorization` forwarding policy for proxy models (`待实现`)
 - max request body size enforcement (`待实现`)

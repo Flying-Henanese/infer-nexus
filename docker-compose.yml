@@ -1,3 +1,9 @@
+x-container-log-rotation: &container-log-rotation
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   ray-head:
     image: infer-nexus:runtime
@@ -11,6 +17,7 @@ services:
         PYTHON_VERSION: ${PYTHON_VERSION:-3.11}
         APP_UID: ${APP_UID:-10001}
         APP_GID: ${APP_GID:-10001}
+    logging: *container-log-rotation
     command:
       - sh
       - -lc
@@ -20,10 +27,16 @@ services:
         --port=6379
         --dashboard-host=0.0.0.0
         --disable-usage-stats
+        --temp-dir=/tmp/ray
         --block
     ports:
       - "8265:8265"
       - "8000:8000"
+    environment: &ray-logging-environment
+      RAY_LOGGING_CONFIG_ENCODING: JSON
+      RAY_BACKEND_LOG_JSON: "1"
+      RAY_ROTATION_MAX_BYTES: "52428800"
+      RAY_ROTATION_BACKUP_COUNT: "3"
     volumes:
       - ./src:/app/src:ro
       - ./scripts:/app/scripts:ro
@@ -31,7 +44,7 @@ services:
       - ./README.md:/app/README.md:ro
       - ./config:/app/config:ro
       - ${MODEL_STORE_HOST_PATH:-./models}:/models
-      - ./.infer-nexus/logs:/app/.infer-nexus/logs
+      - ray-head-temp:/tmp/ray
     healthcheck:
       test: ["CMD-SHELL", "ray status --address=127.0.0.1:6379 >/dev/null 2>&1"]
       interval: 10s
@@ -43,6 +56,7 @@ services:
   ray-worker:
     image: infer-nexus:runtime
     user: infer-nexus
+    logging: *container-log-rotation
     deploy:
       resources:
         reservations:
@@ -73,10 +87,15 @@ services:
         ray start --address="$${RAY_ADDRESS}"
         --node-ip-address=$$(hostname -i)
         --disable-usage-stats
+        --temp-dir=/tmp/ray
         $$RESOURCE_ARGS
         --block
     environment:
       CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:?CUDA_VISIBLE_DEVICES must define the infer-nexus GPU pool}
+      RAY_LOGGING_CONFIG_ENCODING: JSON
+      RAY_BACKEND_LOG_JSON: "1"
+      RAY_ROTATION_MAX_BYTES: "52428800"
+      RAY_ROTATION_BACKUP_COUNT: "3"
     volumes:
       - ./src:/app/src:ro
       - ./scripts:/app/scripts:ro
@@ -84,7 +103,7 @@ services:
       - ./README.md:/app/README.md:ro
       - ./config:/app/config:ro
       - ${MODEL_STORE_HOST_PATH:-./models}:/models
-      - ./.infer-nexus/logs:/app/.infer-nexus/logs
+      - ray-worker-temp:/tmp/ray
     healthcheck:
       test: ["CMD-SHELL", "RAY_HEAD_IP=$$(python -c \"import socket; print(socket.gethostbyname('ray-head'))\"); ray status --address=$${RAY_HEAD_IP}:6379 >/dev/null 2>&1"]
       interval: 10s
@@ -96,6 +115,8 @@ services:
   serve-deployer:
     image: infer-nexus:runtime
     user: infer-nexus
+    logging: *container-log-rotation
+    environment: *ray-logging-environment
     depends_on:
       ray-head:
         condition: service_healthy
@@ -111,6 +132,7 @@ services:
         RAY_ADDRESS="$${INFER_NEXUS_RAY_ADDRESS:-$${RAY_HEAD_IP}:6379}";
         ray start --address="$${RAY_ADDRESS}"
         --node-ip-address=$$(hostname -i)
+        --temp-dir=/tmp/ray
         --num-cpus=0
         --num-gpus=0
         --disable-usage-stats;
@@ -126,5 +148,10 @@ services:
       - ./README.md:/app/README.md:ro
       - ./config:/app/config:ro
       - ${MODEL_STORE_HOST_PATH:-./models}:/models
-      - ./.infer-nexus/logs:/app/.infer-nexus/logs
+      - ray-deployer-temp:/tmp/ray
     restart: "no"
+
+volumes:
+  ray-head-temp:
+  ray-worker-temp:
+  ray-deployer-temp:

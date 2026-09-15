@@ -223,7 +223,7 @@ class GatewayMetrics:
         status: str,
         latency_seconds: float,
     ) -> None:
-        """记录请求数量和网关延迟。"""
+        """记录请求数量和网关延迟；status 使用有限的生命周期结果集合。"""
         self.requests_total.labels(
             model=model,
             task=task,

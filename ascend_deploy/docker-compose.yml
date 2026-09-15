@@ -1,3 +1,9 @@
+x-container-log-rotation: &container-log-rotation
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 x-infer-nexus-image: &infer-nexus-image
   image: infer:v5
   build:
@@ -8,19 +14,11 @@ x-infer-nexus-image: &infer-nexus-image
       APP_UID: ${APP_UID:-10001}
       APP_GID: ${APP_GID:-10001}
 
-x-app-volumes: &app-volumes
-  - ../src:/app/src:ro
-  - ../scripts:/app/scripts:ro
-  - ../docs:/app/docs:ro
-  - ../README.md:/app/README.md:ro
-  - ../config:/app/config:ro
-  - ${MODEL_STORE_HOST_PATH:-../models}:/models
-  - ../.infer-nexus/logs:/app/.infer-nexus/logs
-
 services:
   ray-head:
     <<: *infer-nexus-image
     user: infer-nexus
+    logging: *container-log-rotation
     command:
       - bash
       - -lc
@@ -30,11 +28,24 @@ services:
         --port=6379
         --dashboard-host=0.0.0.0
         --disable-usage-stats
+        --temp-dir=/tmp/ray
         --block
     ports:
       - "8265:8265"
       - "8000:8000"
-    volumes: *app-volumes
+    environment: &ray-logging-environment
+      RAY_LOGGING_CONFIG_ENCODING: JSON
+      RAY_BACKEND_LOG_JSON: "1"
+      RAY_ROTATION_MAX_BYTES: "52428800"
+      RAY_ROTATION_BACKUP_COUNT: "3"
+    volumes:
+      - ../src:/app/src:ro
+      - ../scripts:/app/scripts:ro
+      - ../docs:/app/docs:ro
+      - ../README.md:/app/README.md:ro
+      - ../config:/app/config:ro
+      - ${MODEL_STORE_HOST_PATH:-../models}:/models
+      - ray-head-temp:/tmp/ray
     healthcheck:
       test: ["CMD-SHELL", "ray status --address=127.0.0.1:6379 >/dev/null 2>&1"]
       interval: 10s
@@ -46,6 +57,7 @@ services:
   ray-worker:
     <<: *infer-nexus-image
     user: infer-nexus
+    logging: *container-log-rotation
     # 用户添加到设备组
     group_add:
        - "${ASCEND_DEVICE_GID:-1003}"
@@ -74,11 +86,16 @@ services:
         ray start --address="$${RAY_ADDRESS}"
         --node-ip-address=$$(hostname -i)
         --disable-usage-stats
+        --temp-dir=/tmp/ray
         $$RESOURCE_ARGS
         --block
     environment:
       ASCEND_RT_VISIBLE_DEVICES: ${ASCEND_RT_VISIBLE_DEVICES:?ASCEND_RT_VISIBLE_DEVICES must define the infer-nexus NPU pool}
       RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES: ${RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES:-1}
+      RAY_LOGGING_CONFIG_ENCODING: JSON
+      RAY_BACKEND_LOG_JSON: "1"
+      RAY_ROTATION_MAX_BYTES: "52428800"
+      RAY_ROTATION_BACKUP_COUNT: "3"
     devices:
       - /dev/davinci_manager
       - /dev/devmm_svm
@@ -90,7 +107,7 @@ services:
       - ../README.md:/app/README.md:ro
       - ../config:/app/config:ro
       - ${MODEL_STORE_HOST_PATH:-../models}:/models
-      - ../.infer-nexus/logs:/app/.infer-nexus/logs
+      - ray-worker-temp:/tmp/ray
       - /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro
       - /usr/local/dcmi:/usr/local/dcmi:ro
       - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro
@@ -107,6 +124,8 @@ services:
   serve-deployer:
     <<: *infer-nexus-image
     user: infer-nexus
+    logging: *container-log-rotation
+    environment: *ray-logging-environment
     depends_on:
       ray-head:
         condition: service_healthy
@@ -122,6 +141,7 @@ services:
         RAY_ADDRESS="$${INFER_NEXUS_RAY_ADDRESS:-$${RAY_HEAD_IP}:6379}";
         ray start --address="$${RAY_ADDRESS}"
         --node-ip-address=$$(hostname -i)
+        --temp-dir=/tmp/ray
         --num-cpus=0
         --disable-usage-stats;
         python scripts/run_serve_runtime.py
@@ -129,5 +149,17 @@ services:
         --ray-address "$${RAY_ADDRESS}"
         --proxy-location HeadOnly
         --ready-timeout-seconds ${SERVE_READY_TIMEOUT_SECONDS:-900}
-    volumes: *app-volumes
+    volumes:
+      - ../src:/app/src:ro
+      - ../scripts:/app/scripts:ro
+      - ../docs:/app/docs:ro
+      - ../README.md:/app/README.md:ro
+      - ../config:/app/config:ro
+      - ${MODEL_STORE_HOST_PATH:-../models}:/models
+      - ray-deployer-temp:/tmp/ray
     restart: "no"
+
+volumes:
+  ray-head-temp:
+  ray-worker-temp:
+  ray-deployer-temp:

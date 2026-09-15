@@ -7,10 +7,12 @@ from typing import Final
 
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from infer_nexus.api.request_logging_middleware import mark_request_error
 from infer_nexus.control.worker_admission import (
     WorkerAdmissionController,
     WorkerOverloadedError,
 )
+from infer_nexus.observability.logging import get_logger
 
 
 PROTECTED_INFERENCE_PATHS: Final[frozenset[str]] = frozenset(
@@ -28,6 +30,7 @@ class WorkerAdmissionMiddleware:
 
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
+        self.logger = get_logger(__name__)
 
     @staticmethod
     def _controller(scope: Scope) -> WorkerAdmissionController:
@@ -62,6 +65,12 @@ class WorkerAdmissionMiddleware:
         try:
             await controller.acquire()
         except WorkerOverloadedError:
+            mark_request_error("gateway_worker_overloaded")
+            self.logger.warning(
+                "admission.rejected",
+                reason="gateway_worker_overloaded",
+                retry_after_seconds=controller.retry_after_seconds,
+            )
             await self._send_overloaded(
                 send,
                 retry_after_seconds=controller.retry_after_seconds,

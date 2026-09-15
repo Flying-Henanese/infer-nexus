@@ -13,7 +13,8 @@ set -euo pipefail
 # Keeping these steps in one place makes local bring-up reproducible and also
 # gives us a single log/pid directory to inspect when something fails.
 #
-# Logs:   .infer-nexus/logs/{ray,serve_runtime}.log
+# Logs:   .infer-nexus/logs/{ray_bootstrap,serve_runtime}.log
+# Ray:    .infer-nexus/ray/session_latest/logs/
 # PIDs:   .infer-nexus/pids/{serve_runtime}.pid
 # Status: .infer-nexus/STATUS
 
@@ -26,6 +27,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STATE_DIR="${ROOT_DIR}/.infer-nexus"
 LOG_DIR="${STATE_DIR}/logs"
 PID_DIR="${STATE_DIR}/pids"
+RAY_TEMP_DIR="${STATE_DIR}/ray"
 
 # This file records whether the current script invocation started Ray itself.
 # That makes it easier for downstream tooling to understand who owns the head.
@@ -99,7 +101,7 @@ done
 
 # Create the local state directories up front so later commands can write logs,
 # pid files, and status markers without extra checks.
-mkdir -p "${LOG_DIR}" "${PID_DIR}"
+mkdir -p "${LOG_DIR}" "${PID_DIR}" "${RAY_TEMP_DIR}"
 
 # Clear the Ray ownership marker from previous runs. It will be recreated if
 # this invocation launches Ray itself.
@@ -107,6 +109,19 @@ rm -f "${RAY_STATE_FILE}"
 
 # Switch to repo root so all subsequent relative paths match the project layout.
 cd "${ROOT_DIR}"
+
+# Bound Ray's rotating component logs and keep C++ system records structured.
+RAY_LOGGING_CONFIG_ENCODING_DEFAULT=TEXT
+RAY_BACKEND_LOG_JSON_DEFAULT=0
+if [[ "${SETTINGS}" == *settings.compose.yaml ]] || [[ "${SETTINGS}" == *settings.ascend-compose.yaml ]]; then
+  RAY_LOGGING_CONFIG_ENCODING_DEFAULT=JSON
+  RAY_BACKEND_LOG_JSON_DEFAULT=1
+fi
+RAY_LOGGING_CONFIG_ENCODING="${RAY_LOGGING_CONFIG_ENCODING:-${RAY_LOGGING_CONFIG_ENCODING_DEFAULT}}"
+RAY_BACKEND_LOG_JSON="${RAY_BACKEND_LOG_JSON:-${RAY_BACKEND_LOG_JSON_DEFAULT}}"
+export RAY_LOGGING_CONFIG_ENCODING RAY_BACKEND_LOG_JSON
+export RAY_ROTATION_MAX_BYTES="${RAY_ROTATION_MAX_BYTES:-52428800}"
+export RAY_ROTATION_BACKUP_COUNT="${RAY_ROTATION_BACKUP_COUNT:-3}"
 
 # If the caller supplied a GPU allowlist, export it before starting any process.
 # This keeps the Ray head and Serve runtime aligned on the same device set.
@@ -193,13 +208,14 @@ EOF
 
   # Build the `ray start` argument list incrementally so we only pass flags
   # that are relevant for this invocation.
-  local args=(start --head --disable-usage-stats)
+  local args=(start --head --disable-usage-stats --temp-dir "${RAY_TEMP_DIR}")
   args+=(--num-gpus "${NUM_GPUS}")
 
-  # Ray prints useful diagnostics during startup; capture them in the Ray log.
+  # This captures CLI startup output only. Ray's process logs live under the
+  # session directory rooted at RAY_TEMP_DIR.
   # Note: Ray daemonizes, so the command itself returns quickly after spawn.
-  (exec "${RAY_BIN}" "${args[@]}" >"${LOG_DIR}/ray.log" 2>&1) || {
-    echo "Failed to start Ray head. See ${LOG_DIR}/ray.log" >&2
+  (exec "${RAY_BIN}" "${args[@]}" >"${LOG_DIR}/ray_bootstrap.log" 2>&1) || {
+    echo "Failed to start Ray head. See ${LOG_DIR}/ray_bootstrap.log" >&2
     exit 1
   }
 
@@ -217,7 +233,7 @@ EOF
     sleep 0.25
   done
 
-  echo "Ray did not become ready in time. See ${LOG_DIR}/ray.log" >&2
+  echo "Ray did not become ready in time. See ${LOG_DIR}/ray_bootstrap.log" >&2
   exit 1
 }
 
@@ -257,6 +273,22 @@ wait_for_pid_exit() {
 write_status() {
   local msg="$1"
   printf '%s\n' "${msg}" >"${STATE_DIR}/STATUS"
+}
+
+print_ray_session_log_path() {
+  local temp_root
+  for temp_root in "${RAY_TEMP_DIR}" "${RAY_TMPDIR:-}"; do
+    [[ -n "${temp_root}" ]] || continue
+    if [[ -d "${temp_root}/session_latest/logs" ]]; then
+      echo "Ray session logs: ${temp_root}/session_latest/logs"
+      return 0
+    fi
+  done
+  if [[ "${RAY_ADDRESS}" == "auto" && -d "/tmp/ray/session_latest/logs" ]]; then
+    echo "Ray session logs: /tmp/ray/session_latest/logs"
+    return 0
+  fi
+  echo "Ray session logs: no local session found (Ray may be externally managed)"
 }
 
 # Ensure the Ray head exists before launching anything that depends on it.
@@ -321,6 +353,7 @@ write_status "started"
 
 echo "Started."
 echo "Logs: ${LOG_DIR}"
+print_ray_session_log_path
 echo "PIDs: ${PID_DIR}"
 echo "Public API: Ray Serve Gateway ingress (HeadOnly proxy)"
 echo "Try:"

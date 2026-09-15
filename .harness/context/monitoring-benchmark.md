@@ -41,6 +41,26 @@ Current monitoring direction:
 - Do not make the gateway re-export Ray or vLLM metrics as the first step.
 - Embedded vLLM internal metrics have not been observed through the current Ray metrics source.
 
+## Structured Logs And Request IDs
+
+- Application logs use readable console output in the local profile and JSONL
+  in CUDA/Ascend Compose settings. Ray Core/Serve logging is configured in the
+  selected format, and vLLM records propagate through the application handler.
+- Request ID resolution is inbound validated `X-Request-ID`, then Ray Serve's
+  request ID when available, then a generated UUID. The response always carries
+  `X-Request-ID`; streaming responses also carry the legacy
+  `X-Infer-Nexus-Request-ID`. The same ID follows internal Serve handle calls
+  and model replica context; proxy propagation follows the model header policy.
+- One Gateway request terminal event (`request.completed` or
+  `request.failed`) is emitted per HTTP request. Streams also produce one
+  `stream.*` terminal event. Admission rejection and model/process lifecycle
+  events are emitted by the component that owns those state transitions.
+- Local bootstrap logs are under `.infer-nexus/logs/`; actual Ray session logs
+  are under `.infer-nexus/ray/session_latest/logs/` (or the printed external
+  `/tmp/ray/session_latest/logs/` path). Compose stores distinct node/deployer
+  session directories in `ray-head-temp`, `ray-worker-temp`, and
+  `ray-deployer-temp` named volumes. Docker stdout/stderr is rotated separately
+  at 10 MiB × 5 files; Ray component files use 50 MiB × 3 backups.
 ## Benchmark Runner
 
 The benchmark runner foundation lives under `src/infer_nexus/benchmark/` with CLI wrapper `scripts/run_benchmark.py`.

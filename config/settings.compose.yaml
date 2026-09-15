@@ -56,3 +56,17 @@ runtime:
 model_store:
   root_dir: /models
   huggingface_endpoint: https://hf-mirror.com
+
+observability:
+  logging:
+    format: json
+    level: INFO
+    success_sample_rate: 1.0
+    slow_request_ms: 10000
+    include_traceback: true
+    access_log: true
+    named_levels:
+      ray: INFO
+      ray.serve: INFO
+      uvicorn.access: WARNING
+      vllm: INFO

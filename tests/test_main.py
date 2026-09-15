@@ -1,5 +1,6 @@
 """主应用生命周期测试。"""
 
+import json
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -20,7 +21,7 @@ def test_app_lifespan_uses_stub_executor_by_default(
     settings.runtime.gateway_worker_retry_after_seconds = 3
 
     monkeypatch.setattr('infer_nexus.main.load_settings', lambda _path: settings)
-    monkeypatch.setattr('infer_nexus.main.configure_logging', lambda _level: None)
+    monkeypatch.setattr('infer_nexus.gateway_runtime.configure_logging', lambda *_args: None)
 
     app = create_app()
     with TestClient(app) as client:
@@ -29,6 +30,99 @@ def test_app_lifespan_uses_stub_executor_by_default(
         assert client.app.state.runtime_dispatcher.executor is client.app.state.runtime_executor
         assert client.app.state.worker_admission.snapshot.max_inflight == 7
         assert client.app.state.worker_admission.retry_after_seconds == 3
+
+
+def test_request_logging_returns_canonical_id_and_emits_one_terminal_event(
+    prepared_model_store: Path,
+    capsys,
+) -> None:
+    """The outer ASGI lifecycle owns request IDs and terminal application logs."""
+    settings = Settings()
+    settings.model_store.root_dir = str(prepared_model_store)
+    settings.observability.logging.format = "json"
+    app = create_app(settings=settings)
+
+    with TestClient(app) as client:
+        response = client.get("/v1/models", headers={"X-Request-ID": "req-test-123"})
+
+    assert response.status_code == 200
+    assert response.headers["X-Request-ID"] == "req-test-123"
+    records = [
+        json.loads(line)
+        for line in capsys.readouterr().out.splitlines()
+        if '"event":"request.completed"' in line
+    ]
+    assert len(records) == 1
+    assert records[0]["request_id"] == "req-test-123"
+    assert records[0]["route"] == "/v1/models"
+    assert records[0]["process_role"] == "gateway"
+
+
+def test_unhandled_error_response_still_returns_request_id(
+    prepared_model_store: Path,
+    monkeypatch,
+) -> None:
+    """The outer ASGI middleware wraps generated 500s and preserves correlation."""
+    settings = Settings()
+    settings.model_store.root_dir = str(prepared_model_store)
+    app = create_app(settings=settings)
+
+    async def fail_dispatch(*_args, **_kwargs):
+        raise RuntimeError("intentional test failure")
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        monkeypatch.setattr(client.app.state.runtime_dispatcher, "dispatch_chat", fail_dispatch)
+        monkeypatch.setattr(client.app.state.model_store, "require_model_path", lambda _model: None)
+        chat_model = next(
+            model.alias or model.name
+            for model in client.app.state.registry.list_models()
+            if model.task.value == "chat"
+        )
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"X-Request-ID": "req-failed-123"},
+            json={
+                "model": chat_model,
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+
+    assert response.status_code == 500
+    assert response.headers["X-Request-ID"] == "req-failed-123"
+
+
+def test_success_sampling_never_suppresses_request_errors(
+    prepared_model_store: Path,
+    capsys,
+) -> None:
+    """The success sample rate only filters ordinary successful requests."""
+    settings = Settings()
+    settings.model_store.root_dir = str(prepared_model_store)
+    settings.observability.logging.format = "json"
+    settings.observability.logging.success_sample_rate = 0
+    app = create_app(settings=settings)
+
+    with TestClient(app) as client:
+        success = client.get("/v1/models", headers={"X-Request-ID": "req-sampled-success"})
+        failure = client.post(
+            "/v1/chat/completions",
+            headers={"X-Request-ID": "req-unsampled-error"},
+            json={
+                "model": "unknown-model",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+
+    assert success.status_code == 200
+    assert failure.status_code == 404
+    records = [
+        json.loads(line)
+        for line in capsys.readouterr().out.splitlines()
+        if '"event":"request.completed"' in line
+    ]
+    request_ids = {record.get("request_id") for record in records}
+    assert "req-sampled-success" not in request_ids
+    assert "req-unsampled-error" in request_ids
 
 
 def test_app_lifespan_builds_serve_handle_resolver_in_serve_mode(
@@ -44,7 +138,7 @@ def test_app_lifespan_builds_serve_handle_resolver_in_serve_mode(
     settings.runtime.serve_stream_idle_timeout_seconds = 15
 
     monkeypatch.setattr('infer_nexus.main.load_settings', lambda _path: settings)
-    monkeypatch.setattr('infer_nexus.main.configure_logging', lambda _level: None)
+    monkeypatch.setattr('infer_nexus.gateway_runtime.configure_logging', lambda *_args: None)
 
     app = create_app()
     with TestClient(app) as client:
@@ -67,7 +161,7 @@ def test_app_lifespan_initializes_ray_when_serve_mode_has_ray_address(
     initialized: list[str] = []
 
     monkeypatch.setattr('infer_nexus.main.load_settings', lambda _path: settings)
-    monkeypatch.setattr('infer_nexus.main.configure_logging', lambda _level: None)
+    monkeypatch.setattr('infer_nexus.gateway_runtime.configure_logging', lambda *_args: None)
     monkeypatch.setattr('infer_nexus.main.initialize_ray_connection', initialized.append)
 
     app = create_app()
@@ -92,7 +186,7 @@ def test_prebuilt_gateway_runtime_attaches_without_ray_client_connection(
     initialized: list[str] = []
 
     monkeypatch.setattr('infer_nexus.main.initialize_ray_connection', initialized.append)
-    monkeypatch.setattr('infer_nexus.gateway_runtime.configure_logging', lambda _level: None)
+    monkeypatch.setattr('infer_nexus.gateway_runtime.configure_logging', lambda *_args: None)
 
     runtime = GatewayRuntime.create(settings)
     app = create_app(runtime=runtime, connect_ray=False)
@@ -117,7 +211,7 @@ def test_readyz_rejects_a_serve_gateway_when_a_model_application_is_unavailable(
     settings = Settings()
     settings.model_store.root_dir = str(prepared_model_store)
     settings.runtime.execution_mode = "serve"
-    monkeypatch.setattr("infer_nexus.gateway_runtime.configure_logging", lambda _level: None)
+    monkeypatch.setattr("infer_nexus.gateway_runtime.configure_logging", lambda *_args: None)
     provisional_runtime = GatewayRuntime.create(settings)
     model_targets = provisional_runtime.serve_builder.build_gateway_spec(
         provisional_runtime.registry,

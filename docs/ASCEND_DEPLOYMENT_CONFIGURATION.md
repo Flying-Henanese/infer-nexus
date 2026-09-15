@@ -346,11 +346,22 @@ docker compose -f ascend_deploy/docker-compose.yml ps
 
 ### 9.2 查看日志
 
+所有 Compose 服务的日志都会直接落在宿主机仓库根目录的 `logs/ascend/`：
+
+- `logs/ascend/<服务名>/container.log`：容器启动命令的标准输出和错误输出。
+- `logs/ascend/<服务名>/ray/session_latest/logs/`：Ray Serve、Gateway、模型副本与 vLLM 的日志。
+
+例如：
+
 ~~~bash
-docker compose -f ascend_deploy/docker-compose.yml logs -f ray-head ray-worker serve-deployer
+tail -F logs/ascend/ray-head/container.log
+find logs/ascend/ray-worker/ray/session_latest/logs -type f
+rg 'model.replica.failed' logs/ascend
 ~~~
 
-重点检查 Ray 的 NPU 资源、模型目录、vLLM 初始化和 Serve 健康状态。
+`log-init` 会在其他服务启动前自动创建这些目录并赋予容器运行用户写入权限。
+重点检查 Ray 的 NPU 资源、模型目录、vLLM 初始化和 Serve 健康状态。`container.log`
+为宿主机上的追加文件；如需限制保留量，请在宿主机配置 `logrotate`。
 
 ### 9.3 API 验证
 

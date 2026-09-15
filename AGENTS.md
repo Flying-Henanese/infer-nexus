@@ -51,6 +51,10 @@ For complex design, refactor, debugging, or review tasks, start with the relevan
 - Keep OpenAI-compatible inference APIs separate from native platform/control APIs.
 - Keep admission control explicit; do not hide readiness or overload behind generic timeouts.
 - Isolate vLLM-specific behavior behind backend/runtime adapters.
+- Keep Compose runtime logs host-visible under `logs/<platform>/<service>/`:
+  `container.log` captures the service command and `ray/` is that service's
+  `/tmp/ray` tree. Only the one-shot root `log-init` service may prepare
+  ownership; runtime services remain non-root.
 - Do not add Web UI, tenant-specific isolation, dynamic registration, cross-cluster scheduling, or multi-backend coexistence unless explicitly requested.
 
 ## Change Discipline

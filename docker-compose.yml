@@ -4,24 +4,53 @@ x-container-log-rotation: &container-log-rotation
     max-size: "10m"
     max-file: "5"
 
+x-infer-nexus-image: &infer-nexus-image
+  image: infer-nexus:runtime
+  build:
+    context: .
+    dockerfile: Dockerfile
+    args:
+      BUILDER_BASE_IMAGE: ${BUILDER_BASE_IMAGE:-nvidia/cuda:12.2.0-devel-ubuntu22.04}
+      RUNTIME_BASE_IMAGE: ${RUNTIME_BASE_IMAGE:-nvidia/cuda:12.2.0-runtime-ubuntu22.04}
+      PYTHON_VERSION: ${PYTHON_VERSION:-3.11}
+      APP_UID: ${APP_UID:-10001}
+      APP_GID: ${APP_GID:-10001}
+
 services:
-  ray-head:
-    image: infer-nexus:runtime
-    user: infer-nexus
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        BUILDER_BASE_IMAGE: ${BUILDER_BASE_IMAGE:-nvidia/cuda:12.2.0-devel-ubuntu22.04}
-        RUNTIME_BASE_IMAGE: ${RUNTIME_BASE_IMAGE:-nvidia/cuda:12.2.0-runtime-ubuntu22.04}
-        PYTHON_VERSION: ${PYTHON_VERSION:-3.11}
-        APP_UID: ${APP_UID:-10001}
-        APP_GID: ${APP_GID:-10001}
+  log-init:
+    <<: *infer-nexus-image
+    user: "0:0"
     logging: *container-log-rotation
+    environment:
+      APP_UID: ${APP_UID:-10001}
+      APP_GID: ${APP_GID:-10001}
+    command:
+      - sh
+      - -ec
+      - >
+        install -d -m 0755 /logs/cuda/log-init;
+        exec >>/logs/cuda/log-init/container.log 2>&1;
+        for service in ray-head ray-worker serve-deployer; do
+          install -d -m 0755 -o "$${APP_UID}" -g "$${APP_GID}" "/logs/cuda/$${service}";
+          install -d -m 0755 -o "$${APP_UID}" -g "$${APP_GID}" "/logs/cuda/$${service}/ray";
+        done;
+        echo "Prepared host-visible CUDA log directories."
+    volumes:
+      - ./logs:/logs
+    restart: "no"
+
+  ray-head:
+    <<: *infer-nexus-image
+    user: infer-nexus
+    logging: *container-log-rotation
+    depends_on:
+      log-init:
+        condition: service_completed_successfully
     command:
       - sh
       - -lc
       - >
+        exec sh /app/scripts/container/run_with_log.sh /var/log/infer-nexus/container.log --
         ray start --head
         --node-ip-address=$$(hostname -i)
         --port=6379
@@ -44,7 +73,8 @@ services:
       - ./README.md:/app/README.md:ro
       - ./config:/app/config:ro
       - ${MODEL_STORE_HOST_PATH:-./models}:/models
-      - ray-head-temp:/tmp/ray
+      - ./logs/cuda/ray-head:/var/log/infer-nexus
+      - ./logs/cuda/ray-head/ray:/tmp/ray
     healthcheck:
       test: ["CMD-SHELL", "ray status --address=127.0.0.1:6379 >/dev/null 2>&1"]
       interval: 10s
@@ -65,31 +95,35 @@ services:
               count: all
               capabilities: [gpu]
     depends_on:
+      log-init:
+        condition: service_completed_successfully
       ray-head:
         condition: service_healthy
     command:
       - sh
       - -lc
       - >
-        set -eu;
-        if [ -z "$${CUDA_VISIBLE_DEVICES:-}" ]; then
-          echo "CUDA_VISIBLE_DEVICES must define the infer-nexus GPU pool, for example: 0,1,2,3." >&2;
-          exit 1;
-        fi;
-        DERIVED_NUM_GPUS=$$(python -c "import os; v=os.environ.get('CUDA_VISIBLE_DEVICES',''); print(len([x for x in v.split(',') if x.strip()]))");
-        if [ "$${DERIVED_NUM_GPUS}" -le 0 ]; then
-          echo "CUDA_VISIBLE_DEVICES must contain at least one device id." >&2;
-          exit 1;
-        fi;
-        RESOURCE_ARGS="--num-gpus=$${DERIVED_NUM_GPUS}";
-        RAY_HEAD_IP=$$(python -c "import socket; print(socket.gethostbyname('ray-head'))");
-        RAY_ADDRESS="$${RAY_HEAD_IP}:6379";
-        ray start --address="$${RAY_ADDRESS}"
-        --node-ip-address=$$(hostname -i)
-        --disable-usage-stats
-        --temp-dir=/tmp/ray
-        $$RESOURCE_ARGS
-        --block
+        exec sh /app/scripts/container/run_with_log.sh /var/log/infer-nexus/container.log --
+        sh -ec '
+          if [ -z "$${CUDA_VISIBLE_DEVICES:-}" ]; then
+            echo "CUDA_VISIBLE_DEVICES must define the infer-nexus GPU pool, for example: 0,1,2,3." >&2;
+            exit 1;
+          fi;
+          DERIVED_NUM_GPUS=$$(python -c "import os; v=os.environ.get('CUDA_VISIBLE_DEVICES',''); print(len([x for x in v.split(',') if x.strip()]))");
+          if [ "$${DERIVED_NUM_GPUS}" -le 0 ]; then
+            echo "CUDA_VISIBLE_DEVICES must contain at least one device id." >&2;
+            exit 1;
+          fi;
+          RESOURCE_ARGS="--num-gpus=$${DERIVED_NUM_GPUS}";
+          RAY_HEAD_IP=$$(python -c "import socket; print(socket.gethostbyname('ray-head'))");
+          RAY_ADDRESS="$${RAY_HEAD_IP}:6379";
+          exec ray start --address="$${RAY_ADDRESS}" \
+          --node-ip-address=$$(hostname -i) \
+          --disable-usage-stats \
+          --temp-dir=/tmp/ray \
+          $$RESOURCE_ARGS \
+          --block
+        '
     environment:
       CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:?CUDA_VISIBLE_DEVICES must define the infer-nexus GPU pool}
       RAY_LOGGING_CONFIG_ENCODING: JSON
@@ -103,7 +137,8 @@ services:
       - ./README.md:/app/README.md:ro
       - ./config:/app/config:ro
       - ${MODEL_STORE_HOST_PATH:-./models}:/models
-      - ray-worker-temp:/tmp/ray
+      - ./logs/cuda/ray-worker:/var/log/infer-nexus
+      - ./logs/cuda/ray-worker/ray:/tmp/ray
     healthcheck:
       test: ["CMD-SHELL", "RAY_HEAD_IP=$$(python -c \"import socket; print(socket.gethostbyname('ray-head'))\"); ray status --address=$${RAY_HEAD_IP}:6379 >/dev/null 2>&1"]
       interval: 10s
@@ -118,6 +153,8 @@ services:
     logging: *container-log-rotation
     environment: *ray-logging-environment
     depends_on:
+      log-init:
+        condition: service_completed_successfully
       ray-head:
         condition: service_healthy
       ray-worker:
@@ -126,21 +163,23 @@ services:
       - sh
       - -lc
       - >
-        set -eu;
-        trap 'ray stop --force >/dev/null 2>&1 || true' EXIT;
-        RAY_HEAD_IP=$$(python -c "import socket; print(socket.gethostbyname('ray-head'))");
-        RAY_ADDRESS="$${INFER_NEXUS_RAY_ADDRESS:-$${RAY_HEAD_IP}:6379}";
-        ray start --address="$${RAY_ADDRESS}"
-        --node-ip-address=$$(hostname -i)
-        --temp-dir=/tmp/ray
-        --num-cpus=0
-        --num-gpus=0
-        --disable-usage-stats;
-        python scripts/run_serve_runtime.py
-        --settings config/settings.compose.yaml
-        --ray-address "$${RAY_ADDRESS}"
-        --proxy-location HeadOnly
-        --ready-timeout-seconds ${SERVE_READY_TIMEOUT_SECONDS:-900}
+        exec sh /app/scripts/container/run_with_log.sh /var/log/infer-nexus/container.log --
+        sh -ec '
+          trap "ray stop --force >/dev/null 2>&1 || true" EXIT;
+          RAY_HEAD_IP=$$(python -c "import socket; print(socket.gethostbyname('ray-head'))");
+          RAY_ADDRESS="$${INFER_NEXUS_RAY_ADDRESS:-$${RAY_HEAD_IP}:6379}";
+          ray start --address="$${RAY_ADDRESS}" \
+          --node-ip-address=$$(hostname -i) \
+          --temp-dir=/tmp/ray \
+          --num-cpus=0 \
+          --num-gpus=0 \
+          --disable-usage-stats;
+          python scripts/run_serve_runtime.py \
+          --settings config/settings.compose.yaml \
+          --ray-address "$${RAY_ADDRESS}" \
+          --proxy-location HeadOnly \
+          --ready-timeout-seconds ${SERVE_READY_TIMEOUT_SECONDS:-900}
+        '
     volumes:
       - ./src:/app/src:ro
       - ./scripts:/app/scripts:ro
@@ -148,10 +187,6 @@ services:
       - ./README.md:/app/README.md:ro
       - ./config:/app/config:ro
       - ${MODEL_STORE_HOST_PATH:-./models}:/models
-      - ray-deployer-temp:/tmp/ray
+      - ./logs/cuda/serve-deployer:/var/log/infer-nexus
+      - ./logs/cuda/serve-deployer/ray:/tmp/ray
     restart: "no"
-
-volumes:
-  ray-head-temp:
-  ray-worker-temp:
-  ray-deployer-temp:

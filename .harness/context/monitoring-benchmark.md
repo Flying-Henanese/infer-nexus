@@ -57,10 +57,11 @@ Current monitoring direction:
   events are emitted by the component that owns those state transitions.
 - Local bootstrap logs are under `.infer-nexus/logs/`; actual Ray session logs
   are under `.infer-nexus/ray/session_latest/logs/` (or the printed external
-  `/tmp/ray/session_latest/logs/` path). Compose stores distinct node/deployer
-  session directories in `ray-head-temp`, `ray-worker-temp`, and
-  `ray-deployer-temp` named volumes. Docker stdout/stderr is rotated separately
-  at 10 MiB × 5 files; Ray component files use 50 MiB × 3 backups.
+  `/tmp/ray/session_latest/logs/` path). Compose exports separate session
+  directories to `logs/cuda/<service>/ray/` or `logs/ascend/<service>/ray/`;
+  each sibling `container.log` contains that service command's stdout/stderr.
+  Ray component files use 50 MiB × 3 backups. `container.log` is append-only
+  on the host and requires a host `logrotate` policy when retention is needed.
 ## Benchmark Runner
 
 The benchmark runner foundation lives under `src/infer_nexus/benchmark/` with CLI wrapper `scripts/run_benchmark.py`.

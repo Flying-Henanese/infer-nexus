@@ -107,6 +107,41 @@ GATEWAY_WORKERS=2
 
 Containers run as the `infer-nexus` non-root user created in the image. Make sure mounted host paths such as `MODEL_STORE_HOST_PATH` are readable, and writable if runtime artifact downloads are expected, by UID/GID `10001:10001` or the overridden `APP_UID`/`APP_GID`. CUDA Compose runs require NVIDIA Container Toolkit on the host so Docker can mount the driver into `ray-worker`. `CUDA_VISIBLE_DEVICES` defines the visible accelerator pool; per-model replica resource requirements still belong in `config/models.yaml`.
 
+### Host-visible Compose logs
+
+Compose creates a host-side `logs/` tree before starting the runtime services.
+The CUDA profile uses `logs/cuda/`; the Ascend profile uses `logs/ascend/`.
+Within each platform directory, logs are separated by service and then log type:
+
+```text
+logs/
+  cuda/
+    ray-head/
+      container.log          # container command stdout and stderr
+      ray/session_latest/logs/  # Ray Serve, Gateway, replica, and vLLM files
+    ray-worker/
+      container.log
+      ray/session_latest/logs/
+    serve-deployer/
+      container.log
+      ray/session_latest/logs/
+```
+
+The one-shot `log-init` service creates these directories and grants the
+non-root container user write access, so no manual `mkdir` or `chown` is
+needed. View a service's startup output directly from the host, for example:
+
+```bash
+tail -F logs/cuda/ray-head/container.log
+find logs/cuda/ray-worker/ray/session_latest/logs -type f
+rg 'model.replica.failed' logs/cuda
+```
+
+Ray component logs retain their Ray-managed 50 MiB × three-file rotation.
+`container.log` is an append-only host file so that its full command output is
+available without Docker's private log directory; use the host's normal
+`logrotate` policy if a deployment needs a retention limit for that file.
+
 
 For development, use the root Compose file directly. It already mounts the source tree portions needed by the runtime, so source, script, docs, and config edits are visible without rebuilding the image:
 

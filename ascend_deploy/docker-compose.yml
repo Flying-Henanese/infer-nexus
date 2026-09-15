@@ -15,14 +15,40 @@ x-infer-nexus-image: &infer-nexus-image
       APP_GID: ${APP_GID:-10001}
 
 services:
+  log-init:
+    <<: *infer-nexus-image
+    user: "0:0"
+    logging: *container-log-rotation
+    environment:
+      APP_UID: ${APP_UID:-10001}
+      APP_GID: ${APP_GID:-10001}
+    command:
+      - bash
+      - -ec
+      - >
+        install -d -m 0755 /logs/ascend/log-init;
+        exec >>/logs/ascend/log-init/container.log 2>&1;
+        for service in ray-head ray-worker serve-deployer; do
+          install -d -m 0755 -o "$${APP_UID}" -g "$${APP_GID}" "/logs/ascend/$${service}";
+          install -d -m 0755 -o "$${APP_UID}" -g "$${APP_GID}" "/logs/ascend/$${service}/ray";
+        done;
+        echo "Prepared host-visible Ascend log directories."
+    volumes:
+      - ../logs:/logs
+    restart: "no"
+
   ray-head:
     <<: *infer-nexus-image
     user: infer-nexus
     logging: *container-log-rotation
+    depends_on:
+      log-init:
+        condition: service_completed_successfully
     command:
       - bash
       - -lc
       - >
+        exec sh /app/scripts/container/run_with_log.sh /var/log/infer-nexus/container.log --
         ray start --head
         --node-ip-address=$$(hostname -i)
         --port=6379
@@ -45,7 +71,8 @@ services:
       - ../README.md:/app/README.md:ro
       - ../config:/app/config:ro
       - ${MODEL_STORE_HOST_PATH:-../models}:/models
-      - ray-head-temp:/tmp/ray
+      - ../logs/ascend/ray-head:/var/log/infer-nexus
+      - ../logs/ascend/ray-head/ray:/tmp/ray
     healthcheck:
       test: ["CMD-SHELL", "ray status --address=127.0.0.1:6379 >/dev/null 2>&1"]
       interval: 10s
@@ -63,6 +90,8 @@ services:
        - "${ASCEND_DEVICE_GID:-1003}"
     privileged: true
     depends_on:
+      log-init:
+        condition: service_completed_successfully
       ray-head:
         condition: service_healthy
     command:
@@ -70,25 +99,27 @@ services:
       - bash
       - -lc
       - >
-        set -eu;
-        if [ -z "$${ASCEND_RT_VISIBLE_DEVICES:-}" ]; then
-          echo "ASCEND_RT_VISIBLE_DEVICES must define the infer-nexus NPU pool, for example: 0,1,2,3." >&2;
-          exit 1;
-        fi;
-        DERIVED_NUM_NPUS=$$(python -c "import os; v=os.environ.get('ASCEND_RT_VISIBLE_DEVICES',''); print(len([x for x in v.split(',') if x.strip()]))");
-        if [ "$${DERIVED_NUM_NPUS}" -le 0 ]; then
-          echo "ASCEND_RT_VISIBLE_DEVICES must contain at least one device id." >&2;
-          exit 1;
-        fi;
-        RESOURCE_ARGS="--resources={\"NPU\":$${DERIVED_NUM_NPUS}}";
-        RAY_HEAD_IP=$$(python -c "import socket; print(socket.gethostbyname('ray-head'))");
-        RAY_ADDRESS="$${RAY_HEAD_IP}:6379";
-        ray start --address="$${RAY_ADDRESS}"
-        --node-ip-address=$$(hostname -i)
-        --disable-usage-stats
-        --temp-dir=/tmp/ray
-        $$RESOURCE_ARGS
-        --block
+        exec sh /app/scripts/container/run_with_log.sh /var/log/infer-nexus/container.log --
+        bash -ec '
+          if [ -z "$${ASCEND_RT_VISIBLE_DEVICES:-}" ]; then
+            echo "ASCEND_RT_VISIBLE_DEVICES must define the infer-nexus NPU pool, for example: 0,1,2,3." >&2;
+            exit 1;
+          fi;
+          DERIVED_NUM_NPUS=$$(python -c "import os; v=os.environ.get('ASCEND_RT_VISIBLE_DEVICES',''); print(len([x for x in v.split(',') if x.strip()]))");
+          if [ "$${DERIVED_NUM_NPUS}" -le 0 ]; then
+            echo "ASCEND_RT_VISIBLE_DEVICES must contain at least one device id." >&2;
+            exit 1;
+          fi;
+          RESOURCE_ARGS="--resources={\"NPU\":$${DERIVED_NUM_NPUS}}";
+          RAY_HEAD_IP=$$(python -c "import socket; print(socket.gethostbyname('ray-head'))");
+          RAY_ADDRESS="$${RAY_HEAD_IP}:6379";
+          exec ray start --address="$${RAY_ADDRESS}" \
+          --node-ip-address=$$(hostname -i) \
+          --disable-usage-stats \
+          --temp-dir=/tmp/ray \
+          $$RESOURCE_ARGS \
+          --block
+        '
     environment:
       ASCEND_RT_VISIBLE_DEVICES: ${ASCEND_RT_VISIBLE_DEVICES:?ASCEND_RT_VISIBLE_DEVICES must define the infer-nexus NPU pool}
       RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES: ${RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES:-1}
@@ -107,7 +138,8 @@ services:
       - ../README.md:/app/README.md:ro
       - ../config:/app/config:ro
       - ${MODEL_STORE_HOST_PATH:-../models}:/models
-      - ray-worker-temp:/tmp/ray
+      - ../logs/ascend/ray-worker:/var/log/infer-nexus
+      - ../logs/ascend/ray-worker/ray:/tmp/ray
       - /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro
       - /usr/local/dcmi:/usr/local/dcmi:ro
       - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro
@@ -127,6 +159,8 @@ services:
     logging: *container-log-rotation
     environment: *ray-logging-environment
     depends_on:
+      log-init:
+        condition: service_completed_successfully
       ray-head:
         condition: service_healthy
       ray-worker:
@@ -135,20 +169,22 @@ services:
       - bash
       - -lc
       - >
-        set -eu;
-        trap 'ray stop --force >/dev/null 2>&1 || true' EXIT;
-        RAY_HEAD_IP=$$(python -c "import socket; print(socket.gethostbyname('ray-head'))");
-        RAY_ADDRESS="$${INFER_NEXUS_RAY_ADDRESS:-$${RAY_HEAD_IP}:6379}";
-        ray start --address="$${RAY_ADDRESS}"
-        --node-ip-address=$$(hostname -i)
-        --temp-dir=/tmp/ray
-        --num-cpus=0
-        --disable-usage-stats;
-        python scripts/run_serve_runtime.py
-        --settings config/settings.ascend-compose.yaml
-        --ray-address "$${RAY_ADDRESS}"
-        --proxy-location HeadOnly
-        --ready-timeout-seconds ${SERVE_READY_TIMEOUT_SECONDS:-900}
+        exec sh /app/scripts/container/run_with_log.sh /var/log/infer-nexus/container.log --
+        bash -ec '
+          trap "ray stop --force >/dev/null 2>&1 || true" EXIT;
+          RAY_HEAD_IP=$$(python -c "import socket; print(socket.gethostbyname('ray-head'))");
+          RAY_ADDRESS="$${INFER_NEXUS_RAY_ADDRESS:-$${RAY_HEAD_IP}:6379}";
+          ray start --address="$${RAY_ADDRESS}" \
+          --node-ip-address=$$(hostname -i) \
+          --temp-dir=/tmp/ray \
+          --num-cpus=0 \
+          --disable-usage-stats;
+          python scripts/run_serve_runtime.py \
+          --settings config/settings.ascend-compose.yaml \
+          --ray-address "$${RAY_ADDRESS}" \
+          --proxy-location HeadOnly \
+          --ready-timeout-seconds ${SERVE_READY_TIMEOUT_SECONDS:-900}
+        '
     volumes:
       - ../src:/app/src:ro
       - ../scripts:/app/scripts:ro
@@ -156,10 +192,6 @@ services:
       - ../README.md:/app/README.md:ro
       - ../config:/app/config:ro
       - ${MODEL_STORE_HOST_PATH:-../models}:/models
-      - ray-deployer-temp:/tmp/ray
+      - ../logs/ascend/serve-deployer:/var/log/infer-nexus
+      - ../logs/ascend/serve-deployer/ray:/tmp/ray
     restart: "no"
-
-volumes:
-  ray-head-temp:
-  ray-worker-temp:
-  ray-deployer-temp:

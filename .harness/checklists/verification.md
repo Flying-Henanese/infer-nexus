@@ -108,10 +108,10 @@ Live metric validation requires a running gateway/Ray Serve environment.
 - For local runs, inspect `.infer-nexus/logs/ray_bootstrap.log`,
   `.infer-nexus/logs/serve_runtime.log`, and
   `.infer-nexus/ray/session_latest/logs/`.
-- For Compose, inspect each service's `/tmp/ray/session_latest/logs/` from
-  `ray-head`, `ray-worker`, and `serve-deployer`; these paths are backed by
-  separate named volumes. Check `docker compose logs` separately because
-  container stdout/stderr rotation is distinct from Ray file rotation.
+- For Compose, inspect host paths for every service: use
+  `logs/<platform>/<service>/container.log` for command stdout/stderr and
+  `logs/<platform>/<service>/ray/session_latest/logs/` for Ray files. Confirm
+  `log-init` completed successfully before diagnosing a missing directory.
 Use `docs/RAY_SERVE_VLLM_MONITORING.md` for operator commands and example
 queries. A configuration render or unit test does not verify a live collector,
 Ray log rotation, or real inference lifecycle.

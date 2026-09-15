@@ -385,25 +385,33 @@ rg 'incident-2026-09-15-42' .infer-nexus/logs .infer-nexus/ray/session_latest/lo
 
 ### Docker Compose
 
-CUDA and Ascend Compose give each Ray process a separate named volume mounted
-at `/tmp/ray`: `ray-head-temp`, `ray-worker-temp`, and `ray-deployer-temp`.
-Inspect each service's current session files with:
+CUDA and Ascend Compose export every service's logs into the repository-root
+`logs/` directory. The platform is the first level (`cuda` or `ascend`), the
+next level is the Compose service, and the final level separates the container
+command log from Ray's session files:
 
-```bash
-docker compose exec ray-head sh -lc \
-  'find /tmp/ray/session_latest/logs -maxdepth 2 -type f -print'
-docker compose exec ray-worker sh -lc \
-  'find /tmp/ray/session_latest/logs -maxdepth 2 -type f -print'
-docker compose run --rm --no-deps --entrypoint sh serve-deployer -lc \
-  'find /tmp/ray/session_latest/logs -maxdepth 2 -type f -print'
-docker compose logs --tail=200 ray-head ray-worker serve-deployer
+```text
+logs/<platform>/<service>/container.log
+logs/<platform>/<service>/ray/session_latest/logs/
 ```
 
-The named volumes keep nodes separate and survive container recreation unless
-removed. Container stdout/stderr is separate and uses Docker's `json-file`
-rotation at 10 MiB × five files per service; Ray component files use 50 MiB ×
-three backups. The Compose configuration does not export these files to a
-central store.
+The one-shot `log-init` service creates the directories and grants the
+non-root runtime user write access before `ray-head`, `ray-worker`, or
+`serve-deployer` starts. Inspect CUDA service logs directly from the host with:
+
+```bash
+tail -F logs/cuda/ray-head/container.log
+find logs/cuda/ray-worker/ray/session_latest/logs -maxdepth 2 -type f -print
+rg 'incident-2026-09-15-42' logs/cuda
+```
+
+For Ascend, substitute `logs/ascend` and use
+`docker compose -f ascend_deploy/docker-compose.yml ...` for any Compose
+commands. `container.log` combines the service command's stdout and stderr and
+is append-only on the host. Docker's `json-file` rotation remains a fallback
+for early container failures, while Ray component files use 50 MiB rotation
+with three backups. Configure the host's `logrotate` if `container.log` needs a
+retention limit.
 
 For JSONL application records copied from a process log, filter using the
 stable fields:

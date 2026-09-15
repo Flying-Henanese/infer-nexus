@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
 import types
 
@@ -29,6 +30,7 @@ def test_run_gateway_main_uses_settings_and_cli_overrides(monkeypatch) -> None:
     settings = Settings()
     settings.service.host = '0.0.0.0'
     settings.service.port = 8000
+    settings.service.workers = 2
     captured: dict[str, object] = {}
 
     monkeypatch.setattr(run_gateway, 'parse_args', lambda: types.SimpleNamespace(
@@ -36,20 +38,23 @@ def test_run_gateway_main_uses_settings_and_cli_overrides(monkeypatch) -> None:
         host='127.0.0.1',
         port=9000,
         reload=True,
+        workers=1,
     ))
     monkeypatch.setattr(run_gateway, 'load_settings', lambda _path: settings)
     monkeypatch.setattr(
         run_gateway.uvicorn,
         'run',
-        lambda app, host, port, reload: captured.update(
+        lambda app, host, port, reload, workers: captured.update(
             {
                 'app': app,
                 'host': host,
                 'port': port,
                 'reload': reload,
+                'workers': workers,
             }
         ),
     )
+    monkeypatch.delenv('INFER_NEXUS_SETTINGS', raising=False)
 
     run_gateway.main()
 
@@ -58,22 +63,41 @@ def test_run_gateway_main_uses_settings_and_cli_overrides(monkeypatch) -> None:
         'host': '127.0.0.1',
         'port': 9000,
         'reload': True,
+        'workers': 1,
     }
+    assert os.environ['INFER_NEXUS_SETTINGS'] == 'config/settings.yaml'
+
+
+def test_describe_gateway_capacity_distinguishes_per_worker_limit() -> None:
+    assert run_gateway.describe_gateway_capacity(workers=4, per_worker_limit=8) == (
+        "Gateway shared listener: workers=4, per_worker_max_inflight=8, "
+        "theoretical_aggregate_max_inflight=32"
+    )
+    assert run_gateway.describe_gateway_capacity(workers=4, per_worker_limit=0) == (
+        "Gateway shared listener: workers=4, per_worker_max_inflight=unlimited, "
+        "theoretical_aggregate_max_inflight=unlimited"
+    )
 
 
 def test_run_serve_runtime_main_deploys_per_model_apps(monkeypatch, prepared_model_store) -> None:
     """run_serve_runtime.main 应按服务名部署 Serve 应用。"""
+    from starlette.middleware import Middleware
+
+    from infer_nexus.runtime.serve_app import ServeApplicationBuilder
+    from infer_nexus.runtime.request_id_proxy_middleware import RequestIdProxyMiddleware
+
     settings = Settings()
     settings.service.name = 'infer-nexus'
     settings.model_store.root_dir = str(prepared_model_store)
     settings.runtime.backend_init_mode = 'stub'
     settings.cluster.inference_device_type = 'npu'
+    settings.observability.logging.format = 'json'
     captured: dict[str, object] = {}
 
     monkeypatch.setattr(run_serve_runtime, 'parse_args', lambda: types.SimpleNamespace(
         settings='config/settings.yaml',
         ray_address='auto',
-        proxy_location='Disabled',
+        proxy_location='HeadOnly',
         blocking=False,
         ready_timeout_seconds=30.0,
         ready_poll_interval_seconds=0.01,
@@ -84,24 +108,33 @@ def test_run_serve_runtime_main_deploys_per_model_apps(monkeypatch, prepared_mod
         captured['registry_size'] = len(registry.list_models())
         captured['inference_device_type'] = self.deployment_factory.inference_device_type
         return {
-            'qwen3-32b-instruct': {'app': 'qwen'},
-            'bge-large-zh-v1_5': {'app': 'embed'},
-            'bge-reranker-v2-m3': {'app': 'rerank'},
+            'Qwen3.5-9B': {'app': 'qwen'},
         }
 
     monkeypatch.setattr(
-        run_serve_runtime.ServeApplicationBuilder,
+        ServeApplicationBuilder,
         'build_serve_bindings',
         fake_build_bindings,
     )
     monkeypatch.setattr(
-        run_serve_runtime.ServeApplicationBuilder,
+        ServeApplicationBuilder,
         'build_specs',
         lambda self, registry: [
-            types.SimpleNamespace(model_name='qwen3-32b-instruct'),
-            types.SimpleNamespace(model_name='bge-large-zh-v1_5'),
-            types.SimpleNamespace(model_name='bge-reranker-v2-m3'),
+            types.SimpleNamespace(model_name='Qwen3.5-9B'),
         ],
+    )
+    monkeypatch.setattr(
+        ServeApplicationBuilder,
+        'build_gateway_spec',
+        lambda self, registry, *, settings: types.SimpleNamespace(
+            application_name='infer-nexus-gateway',
+            route_prefix='/',
+        ),
+    )
+    monkeypatch.setattr(
+        ServeApplicationBuilder,
+        'build_gateway_binding',
+        lambda self, registry, *, settings, serve=None: {'app': 'gateway'},
     )
 
     class FakeDeploymentStatus:
@@ -111,27 +144,42 @@ def test_run_serve_runtime_main_deploys_per_model_apps(monkeypatch, prepared_mod
     class FakeApplicationStatus:
         def __init__(self) -> None:
             self.status = 'RUNNING'
-            self.deployments = {'model-qwen3-32b-instruct': FakeDeploymentStatus('HEALTHY')}
+            self.deployments = {'model-Qwen3.5-9B': FakeDeploymentStatus('HEALTHY')}
 
     class FakeServeStatus:
         def __init__(self) -> None:
             self.applications = {
-                'infer-nexus-model-qwen3-32b-instruct': FakeApplicationStatus(),
-                'infer-nexus-model-bge-large-zh-v1_5': FakeApplicationStatus(),
-                'infer-nexus-model-bge-reranker-v2-m3': FakeApplicationStatus(),
+                'infer-nexus-model-Qwen3.5-9B': FakeApplicationStatus(),
+                'infer-nexus-gateway': FakeApplicationStatus(),
             }
 
     captured_runs: list[dict[str, object]] = []
     fake_serve = types.SimpleNamespace(
-        start=lambda proxy_location: captured.update({'proxy_location': proxy_location}),
+        start=lambda **kwargs: captured.update(
+            {
+                'proxy_location': kwargs['proxy_location'],
+                'http_options': kwargs['http_options'],
+                'serve_logging_config': kwargs['logging_config'],
+            }
+        ),
         run=lambda app, name, route_prefix, blocking: captured_runs.append(
             {'app': app, 'name': name, 'route_prefix': route_prefix, 'blocking': blocking}
         ),
         status=lambda: FakeServeStatus(),
     )
     fake_ray = types.ModuleType('ray')
-    fake_ray.init = lambda address=None, runtime_env=None: captured.update(
-        {'ray_address': address, 'runtime_env': runtime_env}
+    class FakeRayLoggingConfig:
+        def __init__(self, *, encoding, log_level):
+            self.encoding = encoding
+            self.log_level = log_level
+
+    fake_ray.LoggingConfig = FakeRayLoggingConfig
+    fake_ray.init = lambda **kwargs: captured.update(
+        {
+            'ray_address': kwargs['address'],
+            'runtime_env': kwargs['runtime_env'],
+            'ray_logging_config': kwargs['logging_config'],
+        }
     )
     fake_ray.serve = fake_serve
     monkeypatch.setitem(__import__('sys').modules, 'ray', fake_ray)
@@ -139,14 +187,26 @@ def test_run_serve_runtime_main_deploys_per_model_apps(monkeypatch, prepared_mod
     run_serve_runtime.main()
 
     assert captured['ray_address'] == 'auto'
-    assert captured['proxy_location'] == 'Disabled'
+    assert captured['proxy_location'] == 'HeadOnly'
+    http_options = captured['http_options']
+    assert http_options['host'] == '0.0.0.0'
+    assert http_options['port'] == 8000
+    assert len(http_options['middlewares']) == 1
+    proxy_middleware = http_options['middlewares'][0]
+    assert isinstance(proxy_middleware, Middleware)
+    assert proxy_middleware.cls is RequestIdProxyMiddleware
+    assert captured['ray_logging_config'].encoding == 'JSON'
+    assert captured['serve_logging_config'] == {
+        'encoding': 'JSON',
+        'log_level': 'INFO',
+        'enable_access_log': True,
+    }
     assert captured['runtime_env']['working_dir'] == '.'
-    assert captured['registry_size'] == 3
+    assert captured['registry_size'] == 1
     assert captured['inference_device_type'] == 'npu'
     assert [item['name'] for item in captured_runs] == [
-        'infer-nexus-model-qwen3-32b-instruct',
-        'infer-nexus-model-bge-large-zh-v1_5',
-        'infer-nexus-model-bge-reranker-v2-m3',
+        'infer-nexus-model-Qwen3.5-9B',
+        'infer-nexus-gateway',
     ]
-    assert all(item['route_prefix'] is None for item in captured_runs)
+    assert [item['route_prefix'] for item in captured_runs] == [None, '/']
     assert all(item['blocking'] is False for item in captured_runs)

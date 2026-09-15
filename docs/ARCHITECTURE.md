@@ -9,7 +9,7 @@ The project uses:
 - `uv` for dependency and environment management
 - `Ray Serve` for deployment lifecycle, routing, and autoscaling support
 - `vLLM` as the local runtime backend
-- CUDA GPU and Huawei Ascend NPU as supported accelerator platforms
+- accelerator-backed local runtime through deployment-provided platform configuration
 - OpenAI-compatible upstream proxying for compatibility-sensitive models
 - OpenAI-compatible northbound APIs for client compatibility
 
@@ -28,6 +28,63 @@ Out of scope for Phase 1:
 - Multi-backend coexistence
 - Cross-cluster scheduling
 
+## Current Implementation Status
+
+This document describes both the intended architecture and the current Phase 1
+implementation. Use this status summary to avoid treating planned control-plane
+features as already active behavior.
+
+Implemented:
+- OpenAI-compatible chat, embeddings, and rerank routes.
+- Local `backend: vllm` dispatch through model-specific Ray Serve handles.
+- `vllm_openai_proxy` dispatch for chat, embeddings, and rerank.
+- `vllm_native` chat and embedding adapter paths, with local rerank remaining
+  `local_best_effort`.
+- Gateway-local runtime guards, bounded queues, stream timeouts, circuit breaker
+  accounting, and related metrics.
+- A CPU-only `InferNexusGatewayIngress` Ray Serve application provides the
+  production HTTP/SSE entrypoint. It reuses the FastAPI routes and resolves
+  per-model handles from inside the Serve data plane; standalone Uvicorn remains
+  a local debugging/stub entrypoint only.
+- Prometheus gateway metrics endpoint and core request, stream, runtime-guard,
+  worker-admission, and Serve-handle metrics.
+- Structured application logging is configured per process role. Local settings
+  use readable console output; deployed JSON settings use one-record-per-line
+  JSON. Both Compose profiles select JSON. Ray Core/Serve and vLLM have private
+  adapters to align their logging with the selected profile.
+- In Serve mode, the Ray HTTP proxy installs a request-ID normalization
+  middleware before Ray's built-in request-ID middleware. It keeps one valid
+  inbound ID or replaces a missing, invalid, or duplicated value with a UUID.
+  The outer ASGI request lifecycle then uses the same proxy-owned ID, keeps its
+  context through streamed response completion, and passes it to local model
+  Serve replicas and proxy upstreams when enabled by the model header policy.
+  This proxy-boundary integration depends on `HTTPOptions.middlewares`, so the
+  Serve extra constrains Ray to `<2.58`; Ray 2.58 removed this option. Revisit
+  the boundary adapter before raising that cap.
+- Direct Uvicorn runs validate or generate the request ID in the outer ASGI
+  request lifecycle middleware and return it in `X-Request-ID`.
+- Local scripts expose Ray session logs under `.infer-nexus/ray/`; Compose
+  exports the head, worker, and deployer session directories to
+  `logs/<service>/ray/` and each service command's output to its sibling
+  `container.log`.
+
+Skeleton or partial:
+- `AdmissionController` exists as a gateway integration point, but capacity- and
+  queue-aware admission decisions are not implemented there.
+- `Scaler` and `Reconciler` exist as scaffolding.
+- Platform load and capacity APIs are lightweight or stubbed and do not yet
+  expose full Ray Serve or accelerator state.
+- API key helper code exists, but authentication enforcement is not wired into
+  the public routes.
+
+Not implemented:
+- Dependency-aware readiness checks.
+- Dynamic model registration.
+- Full runtime-state enrichment in platform model APIs.
+- Proxy hardening such as upstream allowlist enforcement, request body size
+  limits, and full client `Authorization` forwarding policy.
+- Automatic replica scaling or deployment reconciliation loops.
+
 ## 2. Design Principles
 
 1. Pre-registered models only
@@ -44,7 +101,7 @@ Out of scope for Phase 1:
 
 4. Shared accelerator pool
    - All locally hosted model services use the same accelerator pool.
-   - CUDA GPU and Ascend NPU are selected at the platform configuration layer.
+   - Accelerator platform details are selected at the image, Compose/service, and settings layer.
    - No user-level hardware reservation or hard partitioning in Phase 1.
 
 5. Warm replicas for low-frequency large models
@@ -59,7 +116,8 @@ Out of scope for Phase 1:
 
 ```text
 Client
-  -> infer-nexus API Gateway
+  -> Ray Serve HTTP proxy
+  -> infer-nexus Gateway Ingress
       -> OpenAI-Compatible API Layer
       -> Native Platform API Layer
       -> Auth / Admission / Routing
@@ -67,7 +125,7 @@ Client
           -> Backend Dispatch per Model
               -> vllm_openai_proxy -> Upstream vLLM/OpenAI-compatible server
               -> vllm (local) -> Ray Serve Deployments -> replica-local vLLM Runtime
-                 -> CUDA GPU or Ascend NPU resource pool
+                 -> shared accelerator resource pool
           -> Load Inspector
           -> Scaling Policy
 ```
@@ -180,9 +238,12 @@ graph TD
 
 #### API Gateway
 - Exposes one HTTP entrypoint
-- Handles request authentication (`待实现`)
 - Separates OpenAI-compatible APIs from platform-native APIs
-- Applies request admission checks before dispatch
+- Has API key helper code, but route-level authentication enforcement remains
+  `待实现`
+- Applies model readiness checks and the skeleton admission hook before dispatch
+- Applies gateway-local runtime guards inside `RuntimeExecutor` for configured
+  model concurrency, queue, stream timeout, and circuit breaker limits
 
 #### Model Catalog
 - Stores pre-registered model metadata
@@ -197,9 +258,12 @@ graph TD
   - `vllm`: dispatches to matching local Ray Serve deployment
 
 #### Load Inspector and Admission Control
-- Aggregates runtime health and load indicators
-- Decides whether requests should be admitted or rejected early (`待实现`)
-- Supports cluster and model load inspection APIs (`待实现`)
+- `AdmissionController` is wired into OpenAI-compatible routes as an integration
+  point, but capacity-aware admission decisions remain `待实现`
+- Gateway-local model guards in `RuntimeExecutor` already enforce configured
+  concurrency, queue, timeout, and circuit breaker limits
+- `LoadInspector` currently returns a lightweight registered-model snapshot; full
+  cluster and model load inspection APIs remain `待实现`
 
 #### Scaling Policy Layer
 - Uses inference-related metrics such as queue length, TTFT, and latency
@@ -208,7 +272,7 @@ graph TD
 #### Ray Serve Runtime
 - Owns deployment lifecycle and replica management
 - Handles internal routing to replicas
-- Maps per-replica accelerator demand to CUDA `num_gpus` or Ray custom `NPU` resources based on platform configuration
+- Maps per-replica accelerator demand to Ray actor resource options based on platform configuration
 - Exposes runtime and deployment metrics through Prometheus-compatible endpoints
 
 #### vLLM Backend
@@ -221,10 +285,8 @@ graph TD
 - In `vllm_native` chat mode, delegates compatibility-sensitive OpenAI chat
   behavior to `src/infer_nexus/backends/vllm_native/chat.py` and passes native
   response or SSE chunks through without local delta reconstruction
-- In `vllm_native` embedding mode, uses an injected native embeddings serving
-  adapter contract and fails clearly if that adapter is unavailable; constructing
-  the real vLLM 0.18 embeddings serving object is still pending target-runtime
-  validation
+- In `vllm_native` embedding mode, uses the replica-local native embeddings
+  serving adapter path and fails clearly if that adapter is unavailable
 - In `local_best_effort` chat mode, uses replica-local `AsyncLLMEngine` where
   available, maps cumulative vLLM `RequestOutput` objects to internal
   `chat_delta` events, and lets `RuntimeExecutor` encode OpenAI-compatible SSE
@@ -233,8 +295,7 @@ graph TD
 - Keeps rerank local-best-effort only in the current implementation;
   `vllm_native` rerank is rejected because vLLM rerank serving protocols are not
   OpenAI-compatible
-- Supports the same backend abstraction on CUDA and Ascend environments; Ascend
-  deployments rely on the environment-provided `vllm-ascend` runtime stack
+- Supports the same backend abstraction across accelerator platforms; platform-specific runtime stacks are provided by the selected deployment environment
 
 #### OpenAI Proxy Backend
 - Preserves northbound SDK compatibility (`base_url + model`)
@@ -270,16 +331,16 @@ Rationale:
 For proxy-backed models, the gateway routes to one explicitly configured upstream endpoint per model. The gateway does not own an upstream replica pool in this phase.
 
 ### 4.3 Accelerator resource model
-All locally hosted models share one accelerator pool. In CUDA environments this
-pool is exposed to Ray as GPUs. In Ascend environments this pool is exposed to
-Ray as custom `NPU` resources.
+All locally hosted models share one accelerator pool. The way that pool is
+exposed to Ray is a deployment configuration concern, not a request-path or
+backend-control-flow concern.
 
 Rationale:
 - Matches the current internal environment
 - Keeps scheduling and operations simple
 - Maximizes hardware sharing in development and testing
-- Keeps model configuration portable across CUDA and Ascend by treating
-  `gpu_per_replica` as logical accelerator demand
+- Keeps model configuration portable by treating `gpu_per_replica` as logical
+  accelerator demand
 
 Constraint:
 - Resource admission must avoid accepting traffic the cluster cannot serve reasonably
@@ -291,52 +352,37 @@ The platform must distinguish between two separate concerns:
 1. Resource pool boundary
    - Defines how much accelerator capacity is assigned to the entire `infer-nexus` platform
    - This is set at the Ray node or cluster process boundary
-   - Example: make only 4 A100 GPUs or 4 Ascend NPUs visible to the Ray runtime used by `infer-nexus`
+   - Example: make only the intended subset of accelerator devices visible to the Ray runtime used by `infer-nexus`
 
 2. Deployment resource requests
    - Defines how much of that shared pool each deployment replica consumes
-   - This is expressed through Ray or Ray Serve resource requirements such as GPU count per replica or custom NPU resources
+   - This is expressed through Ray or Ray Serve resource requirements for each replica
    - This does not bind a deployment to specific device IDs ahead of time
 
 Phase 1 should implement platform-level pooling, not static per-deployment device pinning.
 
-#### Recommended CUDA pattern
-For CUDA environments, the recommended pattern is:
-- limit the GPUs visible to the Ray node that runs `infer-nexus`
-- start Ray with a matching GPU resource count
-- let Ray Serve schedule replicas inside that bounded pool
+#### Current containerized accelerator boundary
+The application architecture should remain platform-neutral. Accelerator-specific
+behavior belongs at the deployment configuration layer: the container image,
+Compose service settings, runtime environment variables, and `config/settings*.yaml`.
 
-Conceptually:
-- `CUDA_VISIBLE_DEVICES=0,1,2,3` defines the total GPU pool visible to `infer-nexus`
-- Ray then treats that pool as 4 schedulable GPU resources
-- a deployment with `num_gpus=1` consumes one unit from the pool
-- a deployment with `num_gpus=4` consumes the full pool
+The current root `dockerfile` and `docker-compose.yml` describe the default
+containerized runtime path:
+- `dockerfile` builds a shared runtime image from configurable base image args,
+  with CUDA base images as the checked-in defaults.
+- `docker-compose.yml` defines `ray-head`, `ray-worker`, and one-shot
+  `serve-deployer` services. The Ray head exposes the Serve HTTP proxy on 8000.
+- `config/settings.compose.yaml` is the Compose settings entrypoint.
+- `ray-worker` derives the Ray accelerator budget from `CUDA_VISIBLE_DEVICES`
+  and starts Ray with the matching `--num-gpus` value.
+- `serve-deployer` runs with `--num-gpus=0`; Gateway ingress replicas request
+  CPU only and do not own accelerator scheduling.
+- The runtime image carries the Python environment, while source files,
+  configuration, docs, and model storage are mounted into the containers.
 
-This means `CUDA_VISIBLE_DEVICES` is still useful, but only to define the platform resource boundary. It should not be used as a per-model or per-deployment static binding mechanism.
-
-#### Recommended Ascend pattern
-For Ascend environments, the same principle applies, with NPU-specific resource
-mapping:
-- set `cluster.inference_device_type: npu` in `config/settings.yaml`
-- define the visible NPU set through `ASCEND_RT_VISIBLE_DEVICES`
-- start Ray with a matching custom resource declaration such as
-  `--resources '{"NPU": 4}'`
-- let Ray Serve schedule replicas by consuming `resources: {"NPU": gpu_per_replica}`
-
-Current implementation details:
-- `DeploymentFactory(inference_device_type="npu")` maps the model's
-  `gpu_per_replica` value to Ray actor options `resources: {"NPU": ...}`
-  instead of CUDA `num_gpus`
-- `scripts/start_minimal_ascend.sh` performs minimal Ascend bootstrap,
-  exports `ASCEND_RT_VISIBLE_DEVICES`, sets
-  `RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1`, starts a Ray head with
-  custom `NPU` resources when needed, then deploys Serve and the gateway
-- `pyproject.ascend.toml`, `dockerfile`, and `docker-compose.yml` describe the
-  current Ascend container path, including reliance on a Huawei-provided
-  Ascend Docker image that already includes the validated CANN / `torch-npu` /
-  `vllm` / `vllm-ascend` / Ray runtime stack
-
-If additional backend-specific environment handling is required for `vllm-ascend`, that logic should remain an implementation detail of the backend integration layer rather than a manual per-deployment operational step.
+The same program logic should be usable with another accelerator platform by
+changing the image, Compose/service wiring, and settings files, not by adding
+separate request, catalog, dispatcher, or backend control flow.
 
 #### Design rule
 The architecture should follow these rules:
@@ -348,7 +394,7 @@ The architecture should follow these rules:
 This separation is necessary to preserve shared-pool scheduling and avoid falling back to manual device partitioning.
 
 #### Operational caveat observed in current implementation
-- With fractional CUDA `num_gpus` or fractional custom `NPU` resources such as `0.3` or `0.6`, Ray may co-locate multiple model replicas on one physical accelerator.
+- With fractional accelerator requests such as `0.3` or `0.6`, Ray may co-locate multiple model replicas on one physical accelerator.
 - In this mode, deployments can still fail with vLLM KV cache initialization errors even when catalog config is valid.
 - For stability-first bring-up, prefer one-replica-per-device (`gpu_per_replica=1`) before reintroducing fractional sharing.
 
@@ -361,8 +407,9 @@ Current implementation supports two backends:
 Rationale:
 - `vllm`: good fit when local runtime control and resource ownership are needed
 - `vllm_openai_proxy`: highest compatibility with official upstream server behavior
-- Ascend support is handled as a platform/runtime variant of the local `vllm`
-  backend, not as a separate northbound backend type
+- Platform-specific runtime support is handled by the selected container image,
+  Compose wiring, settings, and local `vllm` runtime stack, not as a separate
+  northbound backend type
 
 Implementation notes:
 - Keep backend abstraction thin to avoid hard-coupling gateway logic to one runtime.
@@ -389,10 +436,8 @@ Implementation notes:
   falls back to sync `LLM`. Streaming remains available as an OpenAI-compatible
   stream in that case, but it is compatibility streaming over a completed
   response rather than token-level incremental streaming.
-- Native embedding has a backend contract and payload-preservation tests, but
-  real vLLM 0.18 embeddings serving construction still needs target-environment
-  validation. Until then, production embedding models should use
-  `local_best_effort` or `vllm_openai_proxy`.
+- Native embedding uses the replica-local vLLM OpenAI serving adapter path for
+  `vllm_native` embedding models.
 - Rerank remains `local_best_effort` for local vLLM. `vllm_native` rerank is
   intentionally rejected in the first pass.
 - For compatibility-sensitive models that cannot yet use a validated native
@@ -410,14 +455,16 @@ Implementation notes:
   OpenAI-compatible requests to a Ray Serve LLM application, preserving the
   current control-plane boundary while delegating vLLM protocol fidelity to Ray
   Serve LLM.
-- The current implementation does not use `build_openai_app`. It does, however,
-  support using Ray Serve LLM's `PrefixCacheAffinityRouter` through
-  `deployment_config.request_router_config` for local vLLM chat deployments.
-  This is a deployment-router integration inside the existing custom gateway and
-  Serve deployment path, not adoption of Ray Serve LLM's stock OpenAI ingress.
-- On Ascend, the backend assumes the Huawei-provided runtime image has already
-  installed and validated CANN, `torch-npu`, `vllm`, `vllm-ascend`, and Ray.
-  The application code should avoid replacing those packages during startup.
+- The current implementation does not use `build_openai_app`. It supports cache
+  affinity by passing Ray Serve deployment router configuration from
+  `config/models.yaml`, for example
+  `deployment_config.request_router_config.request_router_class:
+  ray.serve.llm.request_router.PrefixCacheAffinityRouter`. This is a
+  deployment-router integration inside the existing custom gateway and Serve
+  deployment path, not adoption of Ray Serve LLM's stock OpenAI ingress.
+- The application code should not install, replace, or mutate low-level
+  accelerator runtime packages during startup. Those dependencies belong to the
+  selected container image and environment.
 - Header forwarding policy should remain explicit and model-scoped.
 - If `forward_authorization` is enabled for a proxy model, the gateway should forward the inbound client `Authorization` header to the configured upstream service (`待实现`).
 - If proxy auth is also configured through static or environment-derived bearer tokens, precedence rules must be defined explicitly before enabling `forward_authorization` (`待实现`).
@@ -533,9 +580,9 @@ Returns a more static or planning-oriented view of cluster resources and configu
 Liveness probe for the API process.
 
 #### `GET /readyz`
-Readiness probe endpoint exists in the current implementation, but it is still a
-placeholder and currently returns the same success response as `healthz`.
-Dependency-aware readiness checks remain `待实现`.
+For a Serve-mode Gateway ingress, returns 503 unless every configured local
+model Serve application is running and its deployment is healthy. Stub/local
+debug mode remains ready when its FastAPI process is available.
 
 ## 7. Request Lifecycle
 
@@ -544,9 +591,11 @@ Dependency-aware readiness checks remain `待实现`.
 ```text
 Client request
   -> API validation
-  -> authentication
+  -> optional auth hook (API key enforcement not wired yet)
   -> model resolution via catalog
-  -> admission control check
+  -> model artifact/readiness check
+  -> skeleton AdmissionController hook
+  -> RuntimeExecutor gateway-local guards when configured
   -> backend dispatch
       -> proxy backend: upstream OpenAI-compatible request/response passthrough
       -> local backend:
@@ -570,8 +619,9 @@ flowchart TD
   MR --> TK{Task matches?}
   TK -->|No| E1[404/400 OpenAI-style error]
   TK -->|Yes| MD[Check model artifact path]
-  MD --> AD[AdmissionController]
-  AD --> RQ[RuntimeDispatcher.resolve_target]
+  MD --> AD[AdmissionController hook]
+  AD --> GG[RuntimeExecutor gateway guards]
+  GG --> RQ[RuntimeDispatcher.resolve_target]
 
   RQ --> BT{Backend type?}
   BT -->|vllm| LX[Local Ray Serve path]
@@ -635,7 +685,8 @@ Each model entry should include at least:
   vLLM models that should use replica-local native serving semantics; legacy
   `strict_openai` is accepted only as a chat alias
 - `model_path`: Hugging Face ID or local model path for locally hosted models
-- `deployment_name`: Ray Serve deployment identifier for locally hosted models
+- deployment identifier: derived by the runtime/deployment layer for locally
+  hosted models
 - `dtype`
 - `tensor_parallel_size`
 - `max_model_len`
@@ -662,7 +713,6 @@ Recommended initial files:
 - `config/settings.yaml`
 - `config/models.yaml`
 - `pyproject.toml` for the default development/runtime dependency set
-- `pyproject.ascend.toml` for the Ascend container dependency boundary
 
 ## 9.1 Local Model Store and Offline Registration
 
@@ -731,44 +781,40 @@ Current implementation note:
 - `vllm_native` chat currently requires `vllm.openai_serving.enabled: true`
   because the replica constructs vLLM OpenAI chat serving objects inside the
   existing Ray Serve replica rather than starting a separate HTTP server
-- platform accelerator selection is configured in `config/settings.yaml` through
-  `cluster.inference_device_type`, currently `cuda` or `npu`
-- on `cuda`, Serve deployments request Ray CUDA resources through `num_gpus`
-- on `npu`, Serve deployments request Ray custom resources through
-  `resources: {"NPU": gpu_per_replica}`; the Ray cluster must be started with a
-  matching custom `NPU` resource budget
+- platform accelerator selection is configured outside request-handling code,
+  primarily through the selected container image, Compose service wiring,
+  environment variables, and `config/settings*.yaml`
+- in the current root Compose path, Serve deployments request Ray accelerator
+  resources through `num_gpus`; the Ray worker process derives the available
+  accelerator budget from `CUDA_VISIBLE_DEVICES`
 
-### 9.2 Ascend Runtime Packaging
+### 9.2 Container Runtime Packaging
 
-Ascend support is intentionally packaged as a platform-specific runtime
-environment rather than a separate application architecture. The current
-implementation uses a Huawei-provided Ascend Docker image as the runtime base;
-that image already contains the NPU runtime stack and core inference/serving
-components such as `torch-npu`, `vllm`, `vllm-ascend`, and Ray.
+Platform-specific runtime dependencies are intentionally packaged outside the
+application control flow. The current root container path uses a shared runtime
+image for `ray-head`, `ray-worker`, and `serve-deployer`, with service
+roles selected by Compose commands and settings.
 
-Current files:
-- `pyproject.ascend.toml` constrains packages that are expected to be provided
-  by the Huawei Ascend base image, including `torch-npu`, `vllm`, `vllm-ascend`,
-  and Ray
-- `dockerfile` builds from the current Huawei Ascend base image and syncs the project
-  using the Ascend pyproject
-- `docker-compose.yml` mounts Ascend device nodes, driver/tooling paths, model
-  storage, and the working tree into the container
-- `scripts/start_minimal_ascend.sh` starts the minimal Ray Serve plus gateway
-  flow on Ascend NPU
+Current root files:
+- `dockerfile` builds from configurable builder/runtime base images; the checked-in
+  defaults are CUDA base images and the image contains the Python environment
+  under `/app/.venv`
+- `docker-compose.yml` starts `ray-head`, `ray-worker`, and one-shot
+  `serve-deployer`; `ray-head:8000` is the public Serve proxy
+- `config/settings.compose.yaml` is passed to `serve-deployer` and injected
+  into Gateway ingress replicas through Ray's runtime environment
+- `docker-compose.yml` mounts model storage and the working tree content needed
+  by the runtime containers; the image itself keeps dependencies, not a baked
+  copy of the application source
 
 Operational assumptions:
-- CANN, device drivers, runtime libraries, and `npu-smi` are provided by the
-  host/container environment before `infer-nexus` starts
-- the service does not install or mutate the NPU runtime stack at application
-  startup
-- cross-platform code behavior is selected by configuration, primarily
-  `cluster.inference_device_type` in `config/settings.yaml`; model-serving code
-  should not require separate CUDA-only or Ascend-only request paths
-- `ASCEND_RT_VISIBLE_DEVICES` defines the NPU visibility boundary for the
-  platform process
-- Ray custom `NPU` resources must match the accelerator budget intended for
-  `infer-nexus`
+- the selected image and host runtime provide the accelerator driver/tooling
+  stack before `infer-nexus` starts
+- the service does not install or mutate low-level accelerator runtime packages
+  at application startup
+- platform-specific behavior should be expressed in deployment files and
+  settings, while model-serving code remains shared
+- `serve-deployer` and Ray Serve replicas must see consistent model paths
 
 ### Runtime implications
 At runtime, `infer-nexus` should:
@@ -831,8 +877,11 @@ Admission control is required even without user-level resource isolation.
 Its purpose is to reject requests early when service quality would otherwise collapse.
 
 Current implementation status:
-- admission decision logic: `待实现`
-- only the gateway integration point exists today
+- `AdmissionController` decision logic is still a skeleton.
+- OpenAI-compatible routes call the admission hook before runtime dispatch.
+- `RuntimeExecutor` already provides gateway-local per-model guards for
+  configured inflight limits, queue limits, wait timeouts, stream timeouts, and
+  optional circuit breaker behavior.
 
 ### Admission inputs
 Per-model signals:
@@ -937,21 +986,56 @@ Current implementation status:
 Ray Serve's built-in Prometheus support should be used directly for runtime metrics. `infer-nexus` should add business-level and control-plane metrics on top.
 
 Current implementation status:
-- custom metrics emission: `待实现`
-- runtime metric aggregation into platform APIs: `待实现`
-- proxy per-model request counters and status breakdowns: `待实现`
-- proxy upstream latency histograms: `待实现`
-- proxy stream lifecycle counters: `待实现`
+- Gateway request counters, latency histograms, inflight gauges, error counters,
+  stream TTFT/TPOT/completion metrics, worker-admission metrics, model guard
+  metrics, Serve handle metrics, and circuit state metrics are implemented.
+- Runtime metric aggregation into platform APIs remains `待实现`.
+- Proxy upstream-specific status breakdowns and latency histograms remain
+  `待实现`.
+- Proxy stream lifecycle visibility is partially covered by generic stream
+  metrics; upstream-specific stream metrics remain `待实现`.
 
-### Recommended custom metrics
+### Implemented gateway metrics
 - `infer_nexus_requests_total`
 - `infer_nexus_request_latency_seconds`
-- `infer_nexus_ttft_seconds`
-- `infer_nexus_model_requests_total`
-- `infer_nexus_model_inflight_requests`
-- `infer_nexus_model_queue_length`
+- `infer_nexus_inflight_requests`
+- `infer_nexus_errors_total`
 - `infer_nexus_admission_rejections_total`
-- `infer_nexus_model_status`
+- `infer_nexus_stream_ttft_seconds`
+- `infer_nexus_stream_chunk_interval_seconds`
+- `infer_nexus_stream_tpot_seconds`
+- `infer_nexus_stream_completions_total`
+- `infer_nexus_gateway_worker_inflight`
+- `infer_nexus_gateway_worker_capacity`
+- `infer_nexus_gateway_worker_rejections_total`
+- `infer_nexus_model_inflight`
+- `infer_nexus_model_queue_depth`
+- `infer_nexus_runtime_guard_rejections_total`
+- `infer_nexus_admission_wait_seconds`
+- `infer_nexus_serve_handle_calls_total`
+- `infer_nexus_serve_handle_latency_seconds`
+- `infer_nexus_serve_handle_timeouts_total`
+- `infer_nexus_serve_circuit_state`
+
+### Backpressure ownership
+
+- The Gateway ingress deployment has finite `max_ongoing_requests` and
+  `max_queued_requests`. In Ray 2.55, a request rejected at this outer Serve
+  queue never enters FastAPI: the Serve HTTP proxy returns HTTP 503. Monitor
+  this outer pressure with Ray's `serve_deployment_queued_queries` metric for
+  deployment `gateway` and proxy 503 access logs.
+- `WorkerAdmissionMiddleware` records process-local rejection separately in
+  `infer_nexus_gateway_worker_rejections_total`.
+- Per-model runtime guards record their own bounded-queue rejections in
+  `infer_nexus_runtime_guard_rejections_total`. These layers are intentionally
+  not collapsed into generic timeouts.
+
+### Future platform metrics
+- per-model status and degraded state
+- per-model scaling behavior
+- cluster accelerator allocation summary
+- proxy upstream latency and error breakdown
+- proxy upstream stream lifecycle visibility
 
 ### Monitoring views the platform should support
 - per-model request volume
@@ -963,17 +1047,67 @@ Current implementation status:
 - proxy upstream latency and error breakdown (`待实现`)
 - proxy stream lifecycle visibility (`待实现`)
 
-### Logging recommendations
-Structured logs should include:
-- request id (`待实现`)
-- model name
-- task type
-- admission decision (`待实现`)
-- deployment name
-- proxy upstream host (`待实现`)
-- proxy upstream model name (`待实现`)
-- latency summary (`待实现`)
-- failure reason when applicable
+### Application logs and request correlation
+
+- `config/settings.yaml` selects the human-readable `console` profile for local
+  development. The CUDA and Ascend Compose settings select `json`, producing
+  one JSON object per line.
+- Application records include UTC timestamp, level, stable `event`, logger,
+  service/build/environment/process identity, and `source`. Request events add
+  allowlisted fields such as `request_id`, route template, model, task, backend,
+  Serve app/deployment, outcome, status, duration, and stable error code. The
+  formatter redacts known sensitive field names and serializes exceptions
+  inside a single record.
+- In Serve mode, `RequestIdProxyMiddleware` runs before Ray's built-in
+  `RequestIdMiddleware`; it validates a single inbound `X-Request-ID` or
+  replaces a missing, invalid, or duplicated value with a UUID. Ray then owns
+  the canonical response header, so the ASGI lifecycle does not add a competing
+  `X-Request-ID`. Direct Uvicorn runs validate or generate the ID in the ASGI
+  lifecycle. Streaming responses also carry the compatibility header
+  `X-Infer-Nexus-Request-ID`. The same allowlisted context is sent beside
+  internal Serve handle payloads and bound in model replicas. Proxy upstream
+  requests receive `X-Request-ID` when `headers_policy.pass_request_id` is
+  enabled (it defaults to true). This uses Ray Serve's proxy-level
+  `HTTPOptions.middlewares`; the `serve` extra is capped below Ray 2.58, where
+  Ray removed that option. Revisit the proxy-boundary adapter before raising
+  the dependency cap.
+- The Gateway lifecycle owns one terminal `request.completed` or
+  `request.failed` event per HTTP request. A streamed request also has one
+  stream sub-lifecycle event (`stream.completed`, `stream.failed`, or
+  `stream.cancelled`). The stream event records stream-specific metrics; the
+  request event records the final HTTP lifecycle. Expected validation,
+  rejection, and timeout errors are represented by stable outcome/error fields
+  without a traceback. An unexpected failure carries one authoritative
+  traceback; a stream failure's request terminal record does not repeat it.
+  Successful health, readiness, and metrics requests are omitted from
+  application INFO logs. Ordinary successful request events are sampled by
+  `success_sample_rate`; errors, rejections, and slow requests are retained.
+- Admission owners emit `admission.rejected`; model replicas emit
+  `model.replica.initializing`, `model.replica.ready`, and
+  `model.replica.failed`; process bootstrap emits `app.starting`, `app.ready`,
+  and `app.shutdown`. Do not log prompts, message bodies, embeddings, rerank
+  documents, tokens, credentials, or per-chunk stream data.
+- `serve.start()` receives a Ray logging config, and Gateway/model Serve
+  deployments receive deployment-level configs. The public Serve proxy keeps
+  its edge access log controlled by `observability.logging.access_log`, while
+  duplicate Gateway/model replica access logs are disabled. `uvicorn.access`
+  is set to WARNING in deployed settings and INFO in local settings. vLLM is
+  configured before engine creation to propagate records through the
+  process-owned handler; third-party record schemas are not guaranteed to
+  match application event fields.
+- Local bootstrap output is split between
+  `.infer-nexus/logs/ray_bootstrap.log` (Ray CLI output) and
+  `.infer-nexus/logs/serve_runtime.log` (one-shot deployment driver). Actual
+  Ray component and worker logs are under
+  `.infer-nexus/ray/session_latest/logs/`; for an externally managed Ray
+  session, the startup script may report `/tmp/ray/session_latest/logs/`.
+- Compose exports runtime logs to the repository-root `logs/` tree. Each
+  service owns `logs/<service>/container.log` for its command stdout/stderr and
+  `logs/<service>/ray/` for its `/tmp/ray` session files. A one-shot root-only
+  `log-init` service prepares these host directories before non-root runtime
+  services start. Ray's component rotation remains 50 MiB with three backups.
+  `container.log` is append-only on the host and should use a host `logrotate`
+  policy where retention is required.
 
 ## 14. Error Model
 
@@ -997,7 +1131,8 @@ Phase 1 does not require complex tenant isolation, but basic access control is s
 
 Minimum recommendations:
 - API key authentication (`待实现`)
-- request identity in logs and metrics (`待实现`)
+- request identity in logs and response headers is implemented; request IDs are
+  intentionally not Prometheus labels
 - strict upstream host allowlist for proxy models (`待实现`)
 - explicit `Authorization` forwarding policy for proxy models (`待实现`)
 - max request body size enforcement (`待实现`)
@@ -1061,7 +1196,6 @@ config/
 docker-compose.yml
 dockerfile
 pyproject.toml
-pyproject.ascend.toml
 tests/
 scripts/
   run_gateway.py
@@ -1092,12 +1226,12 @@ Phase 1 should implement only the minimum platform needed to replace ad hoc pers
 - native load inspection APIs
 - basic admission control (`待实现`)
 - metric-driven autoscaling hooks (`待实现`)
-- Prometheus metrics integration (`待实现`)
+- Prometheus metrics integration for gateway/runtime guard paths
 - API key authentication (`待实现`)
 
 ### Nice-to-have but not required for Phase 1
-- full target-environment validation of `vllm_native` chat and embedding against
-  `vllm serve` behavior on Ray 2.48.0 + vLLM 0.18.x
+- broader production-comparison validation of `vllm_native` behavior against
+  standalone `vllm serve` behavior when upgrading Ray or vLLM versions
 - native `responses` API support
 - config reload and deployment reconcile without full process restart
 
@@ -1105,23 +1239,10 @@ Phase 1 should implement only the minimum platform needed to replace ad hoc pers
 
 The following should remain possible without architectural rework:
 - controlled dynamic registration
-- deeper Ascend runtime hardening, including more explicit NPU health and
+- deeper accelerator runtime hardening, including more explicit health and
   capacity reporting
 - richer rerank and multimodal support
 - stronger quota and rate-limit controls
 - admin APIs for model lifecycle operations
 - a thin internal UI built on top of native APIs
 - convergence from the current two-process startup shape toward a single operator-facing startup flow while preserving one external API entrypoint
-
-## 19. Recommended Next Step
-
-The next implementation artifact should be a repository scaffold that matches this architecture but keeps Phase 1 scope disciplined.
-
-Recommended immediate deliverables:
-1. project skeleton with `uv`
-2. config schema and model catalog loader
-3. FastAPI gateway with placeholder OpenAI-compatible routes
-4. Ray Serve integration skeleton
-5. admission and metrics interfaces
-
-This keeps the first coding step aligned with the intended runtime architecture instead of drifting into ad hoc service assembly.

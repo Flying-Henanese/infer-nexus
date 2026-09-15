@@ -1,11 +1,14 @@
 """API 路由集成测试。"""
 
+import asyncio
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from infer_nexus.control.worker_admission import WorkerOverloadedError
 from infer_nexus.core.errors import AdmissionRejectedError, RuntimeExecutionError, RuntimeNotConnectedError
 from infer_nexus.main import create_app
+from infer_nexus.observability.metrics import render_prometheus_metrics
 from infer_nexus.runtime.executor import RuntimeExecutor
 
 
@@ -46,6 +49,23 @@ def test_catalog_and_openai_model_endpoints(prepared_model_store: Path) -> None:
         'bge-reranker-v2-m3',
     ]
     assert load.json()['active_models'] == 3
+
+
+def test_metrics_endpoint_exposes_prometheus_text(prepared_model_store: Path) -> None:
+    """metrics 接口应暴露 Prometheus 文本格式指标。"""
+    app = create_app()
+
+    with TestClient(app) as client:
+        response = client.get('/metrics')
+
+    assert response.status_code == 200
+    assert response.headers['content-type'].startswith('text/plain')
+    assert 'infer_nexus_requests_total' in response.text
+    assert 'infer_nexus_stream_tpot_seconds' in response.text
+    assert 'infer_nexus_stream_completions_total' in response.text
+    assert 'infer_nexus_request_queue_seconds' in response.text
+    assert 'infer_nexus_serve_handle_calls_total' in response.text
+    assert 'infer_nexus_runtime_guard_rejections_total' in response.text
 
 
 def test_catalog_model_lookup_by_alias(prepared_model_store: Path) -> None:
@@ -129,6 +149,29 @@ def test_chat_completions_returns_stub_chat_completion_for_chat_model(prepared_m
     assert 'model-qwen3-32b-instruct' in body['choices'][0]['message']['content']
 
 
+def test_chat_completions_updates_gateway_metrics(prepared_model_store: Path) -> None:
+    """成功 chat 请求应更新网关 Prometheus 指标。"""
+    app = create_app()
+
+    payload = {
+        'model': 'qwen3-chat',
+        'messages': [{'role': 'user', 'content': 'hello'}],
+    }
+
+    with TestClient(app) as client:
+        response = client.post('/v1/chat/completions', json=payload)
+        metrics = client.get('/metrics')
+
+    assert response.status_code == 200
+    assert metrics.status_code == 200
+    assert 'infer_nexus_requests_total{' in metrics.text
+    assert 'endpoint="/v1/chat/completions"' in metrics.text
+    assert 'model="qwen3-chat"' in metrics.text
+    assert 'status="success"' in metrics.text
+    assert 'task="chat"' in metrics.text
+    assert 'infer_nexus_input_tokens_total{' in metrics.text
+
+
 def test_chat_completions_reports_unknown_model(prepared_model_store: Path) -> None:
     """chat 接口请求未知模型应返回 model_not_found。"""
     app = create_app()
@@ -143,6 +186,26 @@ def test_chat_completions_reports_unknown_model(prepared_model_store: Path) -> N
 
     assert response.status_code == 404
     assert response.json()['error']['code'] == 'model_not_found'
+
+
+def test_chat_completions_error_updates_gateway_metrics(prepared_model_store: Path) -> None:
+    """失败请求应记录稳定错误码且未知模型不使用动态标签。"""
+    app = create_app()
+
+    payload = {
+        'model': 'does-not-exist',
+        'messages': [{'role': 'user', 'content': 'hello'}],
+    }
+
+    with TestClient(app) as client:
+        response = client.post('/v1/chat/completions', json=payload)
+        metrics = client.get('/metrics')
+
+    assert response.status_code == 404
+    assert 'infer_nexus_errors_total{' in metrics.text
+    assert 'code="model_not_found"' in metrics.text
+    assert 'model="unknown"' in metrics.text
+    assert 'task="chat"' in metrics.text
 
 
 def test_chat_completions_reports_missing_local_artifact(prepared_model_store: Path) -> None:
@@ -203,6 +266,59 @@ def test_chat_completions_returns_sse_stream_for_chat_model(prepared_model_store
     assert b'chat.completion.chunk' in body
     assert b'backend stub response from vllm' in body
     assert b'data: [DONE]\n\n' in body
+
+
+def test_streaming_chat_updates_stream_metrics(prepared_model_store: Path) -> None:
+    """流式输出包装器应记录 TTFT、TPOT 和完成状态指标。"""
+    executor = RuntimeExecutor()
+
+    async def chunks():
+        yield b"data: first\n\n"
+        yield b"data: second\n\n"
+
+    async def collect() -> None:
+        async for _chunk in executor._observe_stream_chunks(
+            chunks(),
+            model_label="qwen3-32b",
+            stream_start_time=0.0,
+        ):
+            pass
+
+    asyncio.run(collect())
+    metrics = render_prometheus_metrics()[0].decode("utf-8")
+
+    assert 'infer_nexus_stream_ttft_seconds_count{model="qwen3-32b"}' in metrics
+    assert 'infer_nexus_stream_tpot_seconds_count{model="qwen3-32b"}' in metrics
+    assert 'infer_nexus_stream_completions_total{model="qwen3-32b",status="success"}' in metrics
+
+
+def test_streaming_chat_records_error_completion_status(prepared_model_store: Path) -> None:
+    """流式迭代异常应记录 error 终止状态。"""
+    executor = RuntimeExecutor()
+
+    async def chunks():
+        yield b"data: first\n\n"
+        raise RuntimeError("stream failed")
+
+    async def collect() -> None:
+        async for _chunk in executor._observe_stream_chunks(
+            chunks(),
+            model_label="qwen3-32b-error",
+            stream_start_time=0.0,
+        ):
+            pass
+
+    try:
+        asyncio.run(collect())
+    except RuntimeError as exc:
+        assert str(exc) == "stream failed"
+    else:
+        raise AssertionError("stream error was not propagated")
+
+    metrics = render_prometheus_metrics()[0].decode("utf-8")
+
+    assert 'infer_nexus_stream_ttft_seconds_count{model="qwen3-32b-error"}' in metrics
+    assert 'infer_nexus_stream_completions_total{model="qwen3-32b-error",status="error"}' in metrics
 
 
 def test_chat_completions_accepts_multimodal_message_content_for_vision_model(
@@ -284,6 +400,30 @@ def test_chat_completions_returns_429_when_admission_rejects(prepared_model_stor
     assert response.json()['error']['code'] == 'queue_full'
 
 
+def test_chat_completions_returns_429_when_gateway_admission_rejects(
+    prepared_model_store: Path,
+    monkeypatch,
+) -> None:
+    """Gateway-local runtime admission rejects should map to rate limiting."""
+    app = create_app()
+    payload = {
+        'model': 'qwen3.5-9b',
+        'messages': [{'role': 'user', 'content': 'hello'}],
+    }
+
+    with TestClient(app) as client:
+        async def reject_gateway_overload(_executor, *, target, request):
+            raise AdmissionRejectedError('gateway overloaded', code='gateway_overloaded')
+
+        client.app.state.model_store.require_model_path = lambda _model: None
+        monkeypatch.setattr(RuntimeExecutor, 'execute_chat', reject_gateway_overload)
+        response = client.post('/v1/chat/completions', json=payload)
+
+    assert response.status_code == 429
+    assert response.json()['error']['type'] == 'rate_limit_error'
+    assert response.json()['error']['code'] == 'gateway_overloaded'
+
+
 def test_chat_completions_returns_501_when_serve_handle_is_unavailable(
     prepared_model_store: Path,
 ) -> None:
@@ -304,19 +444,21 @@ def test_chat_completions_returns_501_when_serve_handle_is_unavailable(
 
 def test_chat_completions_maps_proxy_upstream_timeout_to_504(
     prepared_model_store: Path,
+    monkeypatch,
 ) -> None:
     """Gateway-stage upstream timeouts should use a stable 504 error response."""
     app = create_app()
     payload = {
-        'model': 'qwen3-chat',
+        'model': 'qwen3.5-9b',
         'messages': [{'role': 'user', 'content': 'hello'}],
     }
 
     with TestClient(app) as client:
-        async def raise_upstream_timeout(*, target, request):
+        async def raise_upstream_timeout(_executor, *, target, request):
             raise RuntimeNotConnectedError('upstream timed out', code='upstream_timeout')
 
-        client.app.state.runtime_dispatcher.executor.execute_chat = raise_upstream_timeout
+        client.app.state.model_store.require_model_path = lambda _model: None
+        monkeypatch.setattr(RuntimeExecutor, 'execute_chat', raise_upstream_timeout)
         response = client.post('/v1/chat/completions', json=payload)
 
     assert response.status_code == 504
@@ -326,21 +468,23 @@ def test_chat_completions_maps_proxy_upstream_timeout_to_504(
 
 def test_chat_completions_returns_500_when_serve_execution_fails(
     prepared_model_store: Path,
+    monkeypatch,
 ) -> None:
     """serve 远端执行失败时 chat 接口应返回 500 而不是 501。"""
     app = create_app()
     payload = {
-        'model': 'qwen3-chat',
+        'model': 'qwen3.5-9b',
         'messages': [{'role': 'user', 'content': 'hello'}],
     }
 
     with TestClient(app) as client:
-        async def raise_runtime_execution_error(*, target, request):
+        async def raise_runtime_execution_error(_executor, *, target, request):
             raise RuntimeExecutionError(
                 f"Serve execution failed for deployment '{target.deployment_name}' in app '{target.app_name}'."
             )
 
-        client.app.state.runtime_dispatcher.executor.execute_chat = raise_runtime_execution_error
+        client.app.state.model_store.require_model_path = lambda _model: None
+        monkeypatch.setattr(RuntimeExecutor, 'execute_chat', raise_runtime_execution_error)
         response = client.post('/v1/chat/completions', json=payload)
 
     assert response.status_code == 500

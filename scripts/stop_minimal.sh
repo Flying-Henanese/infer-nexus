@@ -9,9 +9,8 @@ STATE_DIR="${ROOT_DIR}/.infer-nexus"
 PID_DIR="${STATE_DIR}/pids"
 RAY_STATE_FILE="${STATE_DIR}/ray_state.env"
 
-# 这两个 pid 文件分别记录 gateway 和 serve runtime 启动器的后台进程。
+# 此 pid 文件记录 one-shot Serve runtime 启动器进程。
 SERVE_PID_FILE="${PID_DIR}/serve_runtime.pid"
-GATEWAY_PID_FILE="${PID_DIR}/gateway.pid"
 
 # 根据 pid 文件终止进程，并尽量连同进程组里的子进程一起清理掉。
 # 这样可以处理像 uv / python / shell wrapper 这类“外面一层壳，里面一层真进程”的启动方式。
@@ -143,9 +142,8 @@ kill_stray_ray_local() {
   done
 }
 
-# 先停掉 gateway 和 serve runtime 这两个后台进程。
+# 先停掉 Serve runtime 启动器进程。
 # 注意：serve runtime 这里只是“启动器”进程，真正的副作用在 Ray Serve 集群里。
-kill_from_pid_file "${GATEWAY_PID_FILE}" "gateway"
 kill_from_pid_file "${SERVE_PID_FILE}" "serve runtime"
 
 # 读取 Ray 归属信息，决定后续是否有权把本地 Ray cluster 整个停掉。

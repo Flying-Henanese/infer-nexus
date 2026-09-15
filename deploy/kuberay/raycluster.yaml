@@ -1,0 +1,102 @@
+# POC-only manifest for the current single A100 worker.
+# The node-local source and model hostPaths, imagePullPolicy: Never, hostname
+# pin, and one-GPU worker are intentional temporary constraints for bring-up.
+# /nas_data/models must be pre-mounted at the same path on every selected node.
+# Before adding worker nodes or using this in production, replace them with an
+# immutable registry image, accelerator-class scheduling labels, an NFS/CSI
+# backed PV/PVC, and a validated per-node GPU worker shape.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ray
+---
+apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: infer-nexus-ray
+  namespace: ray
+spec:
+  rayVersion: "2.55.1"
+  upgradeStrategy:
+    type: Recreate
+  headGroupSpec:
+    rayStartParams:
+      num-gpus: "0"
+    template:
+      spec:
+        nodeSelector:
+          kubernetes.io/hostname: bms-3qab-0001-0001
+        containers:
+          - name: ray-head
+            image: infer-nexus:runtime
+            imagePullPolicy: Never
+            workingDir: /workspace/infer-nexus
+            env:
+              - name: PYTHONPATH
+                value: /workspace/infer-nexus/src
+            resources:
+              requests:
+                cpu: "2"
+                memory: 8Gi
+              limits:
+                cpu: "2"
+                memory: 8Gi
+            volumeMounts:
+              - name: infer-nexus-source
+                mountPath: /workspace/infer-nexus
+                readOnly: true
+              - name: infer-nexus-models
+                mountPath: /models
+                readOnly: true
+        volumes:
+          - name: infer-nexus-source
+            hostPath:
+              path: /home/mineru_dev/github/infer-nexus
+              type: Directory
+          - name: infer-nexus-models
+            hostPath:
+              path: /nas_data/models
+              type: Directory
+  workerGroupSpecs:
+    - groupName: a100-workers
+      replicas: 1
+      minReplicas: 1
+      maxReplicas: 4
+      rayStartParams: {}
+      template:
+        spec:
+          nodeSelector:
+            kubernetes.io/hostname: bms-3qab-0001-0001
+          containers:
+            - name: ray-worker
+              image: infer-nexus:runtime
+              imagePullPolicy: Never
+              workingDir: /workspace/infer-nexus
+              env:
+                - name: PYTHONPATH
+                  value: /workspace/infer-nexus/src
+              resources:
+                requests:
+                  cpu: "8"
+                  memory: 32Gi
+                  nvidia.com/gpu: "1"
+                limits:
+                  cpu: "8"
+                  memory: 32Gi
+                  nvidia.com/gpu: "1"
+              volumeMounts:
+                - name: infer-nexus-source
+                  mountPath: /workspace/infer-nexus
+                  readOnly: true
+                - name: infer-nexus-models
+                  mountPath: /models
+                  readOnly: true
+          volumes:
+            - name: infer-nexus-source
+              hostPath:
+                path: /home/mineru_dev/github/infer-nexus
+                type: Directory
+            - name: infer-nexus-models
+              hostPath:
+                path: /nas_data/models
+                type: Directory

@@ -4,9 +4,9 @@ Shared inference service factory for internal development and testing.
 
 ## Current Runtime Shape
 
-- Runtime mode: `Gateway + per-model backend dispatch`
-- Gateway: `FastAPI` (`/v1/*` OpenAI-compatible + `/api/*` platform APIs)
-- Default gateway bind: `0.0.0.0:8000`
+- Runtime mode: `Ray Serve Gateway ingress + per-model backend dispatch`
+- Gateway: `FastAPI` routes carried by a CPU-only Ray Serve ingress (`/v1/*` OpenAI-compatible + `/api/*` platform APIs)
+- Public endpoint: Ray head Serve HTTP proxy on `0.0.0.0:8000`
 - Supported task APIs: `chat`, `embeddings`, `rerank`
 - Backends:
   - `vllm`: local Ray Serve + `LLM.chat/embed/score` path
@@ -26,7 +26,7 @@ For first-time Ubuntu + CUDA bring-up:
 
 - [ARCHITECTURE.md](./ARCHITECTURE.md): system design, boundaries, and phase goals
 - [OPENAI_PROXY_REFACTOR_PLAN.md](./OPENAI_PROXY_REFACTOR_PLAN.md): proxy-first refactor plan and rollout contract
-- [AGENT.md](./AGENT.md): implementation rules and constraints
+- [AGENTS.md](./AGENTS.md): implementation rules and constraints
 
 ## Current Status
 
@@ -74,3 +74,84 @@ What changed in the refactored branch:
 Validation coverage added by tests:
 - Added/updated tests for remote model reference resolution, deployment override behavior,
   runtime spec metadata preservation, richer sampling params, and multimodal data URL normalization.
+
+## Docker Compose Runtime Split
+
+The first-stage Compose deployment keeps the current infer-nexus runtime architecture and only separates process lifecycles. The runtime image uses CUDA devel/runtime base images in a two-stage Dockerfile so dependency resolution stays in the builder stage while all services share the same CUDA-capable final image:
+
+- `ray-head` runs the Ray control plane.
+- `ray-worker` joins the Ray cluster and hosts Ray Serve replicas plus replica-local vLLM runtimes.
+- `serve-deployer` runs `scripts/run_serve_runtime.py` once, submits Ray Serve applications, waits for readiness, and exits.
+- The `ray-head` Serve HTTP proxy exposes the CPU-only FastAPI Gateway ingress on port 8000; no standalone Uvicorn inference gateway is deployed.
+
+Basic startup flow:
+
+```bash
+docker compose build
+docker compose up
+```
+
+Useful deployment variables:
+
+```bash
+BUILDER_BASE_IMAGE=nvidia/cuda:12.2.0-devel-ubuntu22.04
+RUNTIME_BASE_IMAGE=nvidia/cuda:12.2.0-runtime-ubuntu22.04
+PYTHON_VERSION=3.11
+APP_UID=10001
+APP_GID=10001
+CUDA_VISIBLE_DEVICES=0,1,2,3
+INFER_NEXUS_RAY_ADDRESS=ray-head:6379
+MODEL_STORE_HOST_PATH=/data/models
+GATEWAY_WORKERS=2
+```
+
+Containers run as the `infer-nexus` non-root user created in the image. Make sure mounted host paths such as `MODEL_STORE_HOST_PATH` are readable, and writable if runtime artifact downloads are expected, by UID/GID `10001:10001` or the overridden `APP_UID`/`APP_GID`. CUDA Compose runs require NVIDIA Container Toolkit on the host so Docker can mount the driver into `ray-worker`. `CUDA_VISIBLE_DEVICES` defines the visible accelerator pool; per-model replica resource requirements still belong in `config/models.yaml`.
+
+### Host-visible Compose logs
+
+Compose creates a host-side `logs/` tree before starting the runtime services.
+Both CUDA and Ascend Compose profiles use the same service-first layout:
+
+```text
+logs/
+  ray-head/
+    container.log          # container command stdout and stderr
+    ray/session_latest/logs/  # Ray Serve, Gateway, replica, and vLLM files
+  ray-worker/
+    container.log
+    ray/session_latest/logs/
+  serve-deployer/
+    container.log
+    ray/session_latest/logs/
+```
+
+The one-shot `log-init` service creates these directories and grants the
+non-root container user write access, so no manual `mkdir` or `chown` is
+needed. View a service's startup output directly from the host, for example:
+
+```bash
+tail -F logs/ray-head/container.log
+find logs/ray-worker/ray/session_latest/logs -type f
+rg 'model.replica.failed' logs
+```
+
+Ray component logs retain their Ray-managed 50 MiB × three-file rotation.
+`container.log` is an append-only host file so that its full command output is
+available without Docker's private log directory; use the host's normal
+`logrotate` policy if a deployment needs a retention limit for that file.
+
+
+For development, use the root Compose file directly. It already mounts the source tree portions needed by the runtime, so source, script, docs, and config edits are visible without rebuilding the image:
+
+```bash
+docker compose up
+```
+
+The image-owned `/app/.venv` is left intact, while `src/`, `scripts/`, `docs/`, `README.md`, `config/`, and the model store are mounted by the base Compose file.
+
+After startup, validate from the host:
+
+```bash
+curl http://127.0.0.1:8000/healthz
+curl http://127.0.0.1:8000/v1/models
+```

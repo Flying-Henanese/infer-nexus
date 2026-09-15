@@ -25,15 +25,24 @@ class RuntimeDispatcher:
         registry: ModelRegistry,
         serve_builder: ServeApplicationBuilder,
         executor: RuntimeExecutor,
+        model_targets: dict[str, dict[str, str]] | None = None,
     ) -> None:
         """初始化对象并保存运行时依赖。"""
         self.registry = registry
         self.serve_builder = serve_builder
         self.executor = executor
+        self._configured_model_targets = (
+            {public_name: dict(target) for public_name, target in model_targets.items()}
+            if model_targets is not None
+            else None
+        )
+        self._targets = {
+            model.name: self._build_target(model)
+            for model in registry.list_models()
+        }
 
-    def resolve_target(self, model: ModelConfig) -> RuntimeTarget:
-        """根据模型配置解析运行时目标。"""
-        # 核心职责：把“目录模型声明”转换成“可执行目标”，包含部署名和运行时上下文。
+    def _build_target(self, model: ModelConfig) -> RuntimeTarget:
+        """Build one config-derived target during gateway startup."""
         deployment_name = self.serve_builder.deployment_factory.build_deployment_name(model)
         if model.backend == BackendType.VLLM_OPENAI_PROXY:
             runtime_context = {
@@ -48,6 +57,18 @@ class RuntimeDispatcher:
             }
         else:
             runtime_context = self.serve_builder.build_runtime_context(self.registry, model.name)
+            if self._configured_model_targets is not None:
+                configured_target = self._configured_model_targets.get(model.name)
+                if configured_target is None:
+                    raise ValueError(
+                        f"Model '{model.name}' is not present in the deployed Gateway target table."
+                    )
+                deployment_name = configured_target["deployment_name"]
+                runtime_context = {
+                    **runtime_context,
+                    "app_name": configured_target["application_name"],
+                    "deployment_name": deployment_name,
+                }
         return RuntimeTarget(
             model_name=model.name,
             model_alias=model.alias,
@@ -56,6 +77,14 @@ class RuntimeDispatcher:
             deployment_name=deployment_name,
             runtime_context=runtime_context,
         )
+
+    def resolve_target(self, model: ModelConfig) -> RuntimeTarget:
+        """Return the precomputed target for a catalog-resolved model."""
+        return self._targets[model.name]
+
+    def model_target_table(self) -> dict[str, RuntimeTarget]:
+        """Return a copy of the immutable-at-startup model target mapping."""
+        return dict(self._targets)
 
     async def dispatch_chat(
         self,

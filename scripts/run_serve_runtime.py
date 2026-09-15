@@ -7,6 +7,7 @@ publishes them under the configured service name.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from typing import Any
@@ -15,8 +16,16 @@ from infer_nexus.catalog.loader import load_model_catalog
 from infer_nexus.catalog.registry import ModelRegistry
 from infer_nexus.core.config import load_settings
 from infer_nexus.model_store import LocalModelStore
-from infer_nexus.runtime.deployments import DeploymentFactory
-from infer_nexus.runtime.serve_app import ServeApplicationBuilder
+from infer_nexus.observability.logging import configure_logging, get_logger
+from infer_nexus.observability.ray_logging import (
+    configure_ray_logging_environment,
+    configure_vllm_logging,
+    ray_core_logging_config,
+    serve_logging_config,
+)
+from infer_nexus.runtime.request_id_proxy_middleware import (
+    ray_serve_request_id_middleware,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -34,8 +43,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--proxy-location",
-        default="Disabled",
-        help="Serve proxy location. Default disables Serve HTTP proxy to avoid port conflicts.",
+        default="HeadOnly",
+        help="Serve proxy location. HeadOnly exposes the public Gateway ingress on the Ray head.",
     )
     parser.add_argument(
         "--blocking",
@@ -148,6 +157,26 @@ def main() -> None:
     args = parse_args()
 
     settings = load_settings(args.settings)
+    logging_settings = settings.observability.logging
+    configure_ray_logging_environment(logging_settings)
+    configure_vllm_logging(logging_settings)
+    configure_logging(
+        logging_settings,
+        {
+            "service": settings.service.name,
+            "service_version": "0.1.0",
+            "environment": os.getenv("INFER_NEXUS_ENVIRONMENT", "development"),
+            "process_role": "serve_deployer",
+            "pid": os.getpid(),
+        },
+    )
+    logger = get_logger(__name__)
+    logger.info("app.starting", process_role="serve_deployer")
+
+    # Import deployment modules only after framework logging environment is set.
+    from infer_nexus.runtime.deployments import DeploymentFactory
+    from infer_nexus.runtime.serve_app import ServeApplicationBuilder
+
     registry = ModelRegistry(load_model_catalog(settings.catalog.models_path))
     model_store = LocalModelStore.from_settings(settings.model_store)
     builder = ServeApplicationBuilder(
@@ -156,7 +185,9 @@ def main() -> None:
         service_name=settings.service.name,
         deployment_factory=DeploymentFactory(
             inference_device_type=settings.cluster.inference_device_type,
+            logging_settings=logging_settings,
         ),
+        logging_settings=logging_settings,
     )
     builder.validate_registry_runtime_configs(registry)
 
@@ -171,10 +202,41 @@ def main() -> None:
         "working_dir": ".",
         # 排除这些文件，防止 Ray 自动触发环境构建逻辑
         "excludes": ["pyproject.toml", "uv.lock", ".venv", ".git"],
-        "env_vars": {"RAY_RUNTIME_ENV_MODIFY_PYTHON_PATH": "0"},
+        "env_vars": {
+            "RAY_RUNTIME_ENV_MODIFY_PYTHON_PATH": "0",
+            # The Gateway ingress reads the same validated deployment settings
+            # inside its Serve replica; it must not inherit a Ray Client address.
+            "INFER_NEXUS_SETTINGS": args.settings,
+            "RAY_LOGGING_CONFIG_ENCODING": os.getenv(
+                "RAY_LOGGING_CONFIG_ENCODING",
+                "JSON" if logging_settings.format == "json" else "TEXT",
+            ),
+            "RAY_BACKEND_LOG_JSON": os.getenv("RAY_BACKEND_LOG_JSON", "1"),
+            "RAY_ROTATION_MAX_BYTES": os.getenv("RAY_ROTATION_MAX_BYTES", "52428800"),
+            "RAY_ROTATION_BACKUP_COUNT": os.getenv("RAY_ROTATION_BACKUP_COUNT", "3"),
+            "VLLM_LOGGING_LEVEL": logging_settings.named_levels.get(
+                "vllm", logging_settings.level
+            ),
+            "VLLM_CONFIGURE_LOGGING": "0",
+        },
     }
-    ray.init(address=args.ray_address, runtime_env=runtime_env)
-    serve.start(proxy_location=args.proxy_location)
+    ray_init_kwargs = {
+        "address": args.ray_address,
+        "runtime_env": runtime_env,
+    }
+    core_logging_config = ray_core_logging_config(ray, logging_settings)
+    if core_logging_config is not None:
+        ray_init_kwargs["logging_config"] = core_logging_config
+    ray.init(**ray_init_kwargs)
+    serve.start(
+        proxy_location=args.proxy_location,
+        http_options={
+            "host": settings.service.host,
+            "port": settings.service.port,
+            "middlewares": [ray_serve_request_id_middleware()],
+        },
+        logging_config=serve_logging_config(logging_settings),
+    )
 
     bindings = builder.build_serve_bindings(registry, serve=serve)
     app_names: list[str] = []
@@ -194,8 +256,35 @@ def main() -> None:
         timeout_seconds=args.ready_timeout_seconds,
         poll_interval_seconds=args.ready_poll_interval_seconds,
     )
+
+    gateway_spec = builder.build_gateway_spec(registry, settings=settings)
+    gateway_binding = builder.build_gateway_binding(
+        registry,
+        settings=settings,
+        serve=serve,
+    )
+    serve.run(
+        gateway_binding,
+        name=gateway_spec.application_name,
+        route_prefix=gateway_spec.route_prefix,
+        blocking=False,
+    )
+    wait_for_serve_applications_ready(
+        serve=serve,
+        app_names=[gateway_spec.application_name],
+        timeout_seconds=args.ready_timeout_seconds,
+        poll_interval_seconds=args.ready_poll_interval_seconds,
+    )
+    logger.info(
+        "app.ready",
+        process_role="serve_deployer",
+        model_application_count=len(app_names),
+        gateway_application=gateway_spec.application_name,
+    )
     print(
-        f"infer-nexus Serve runtime deployed {len(app_names)} application(s) "
+        f"infer-nexus Serve runtime deployed {len(app_names)} model application(s) and "
+        f"Gateway application '{gateway_spec.application_name}' at "
+        f"{settings.service.host}:{settings.service.port}{gateway_spec.route_prefix} "
         f"with proxy_location={args.proxy_location!r}"
     )
 

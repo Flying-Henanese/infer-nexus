@@ -10,6 +10,7 @@ class ServeDeploymentHandleResolver:
     def __init__(self, serve: Any | None = None) -> None:
         """初始化对象并保存运行时依赖。"""
         self._serve = serve
+        self._handles: dict[tuple[str, str], Any] = {}
 
     def require_serve(self) -> Any:
         """执行运行时相关逻辑。"""
@@ -25,5 +26,10 @@ class ServeDeploymentHandleResolver:
 
     def get_handle(self, deployment_name: str, *, app_name: str) -> Any:
         """执行运行时相关逻辑。"""
+        cache_key = (app_name, deployment_name)
+        if cache_key in self._handles:
+            return self._handles[cache_key]
         serve = self.require_serve()
-        return serve.get_deployment_handle(deployment_name, app_name=app_name)
+        handle = serve.get_deployment_handle(deployment_name, app_name=app_name)
+        self._handles[cache_key] = handle
+        return handle

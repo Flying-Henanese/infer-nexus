@@ -119,17 +119,15 @@ python3 -m compileall src tests
 ## 8. Start Order
 
 1. Start Ray.
-2. Start the Serve runtime:
+2. Start the Serve runtime and its HeadOnly HTTP proxy:
 
 ```bash
-uv run python scripts/run_serve_runtime.py --ray-address auto
+uv run python scripts/run_serve_runtime.py --ray-address auto --proxy-location HeadOnly
 ```
 
-3. Start the gateway:
-
-```bash
-uv run python scripts/run_gateway.py
-```
+The runtime deployer starts all model applications first, then the public
+`infer-nexus-gateway` Serve application. Do not start `scripts/run_gateway.py`
+for serve-mode public traffic.
 
 ## 9. Smoke Validation
 
@@ -147,13 +145,13 @@ curl http://127.0.0.1:8000/v1/models
 curl http://127.0.0.1:8000/api/catalog/models
 ```
 
-- Required: run at least one chat request against an actually registered chat alias (for current default config, `qwen3-8b` works):
+- Required: run at least one chat request against an actually registered chat alias (for current default config, `qwen3.5-27b` works):
 
 ```bash
 curl -X POST http://127.0.0.1:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "qwen3-8b",
+    "model": "qwen3.5-27b",
     "messages": [{"role": "user", "content": "hello"}]
   }'
 ```
@@ -171,6 +169,11 @@ curl -X POST http://127.0.0.1:8000/v1/chat/completions \
   - Requested parameter is not accepted by current request/backend path.
 - `501 runtime_not_connected`
   - The gateway cannot resolve or invoke the Serve deployment handle.
+- `503` returned before an application error body during overload
+  - The Ray Serve HTTP proxy rejected the request at the Gateway deployment's
+    finite `max_queued_requests` boundary. Check proxy access logs and Ray's
+    `serve_deployment_queued_queries` metric for deployment `gateway`; this
+    request intentionally does not reach FastAPI's worker-admission metric.
 - Startup crash during Serve runtime deployment
   - Usually means resource sizing, backend initialization, or model artifact issues.
 

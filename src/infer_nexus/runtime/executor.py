@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import inspect
 import json
-import logging
 import os
-from time import time
+from time import perf_counter, time
 from typing import Any
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 import httpx
@@ -18,7 +18,13 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 
 from infer_nexus.catalog.models import ProxyConfig
 from infer_nexus.core.enums import BackendType, CompatibilityMode
-from infer_nexus.core.errors import BackendConfigurationError, RuntimeExecutionError, RuntimeNotConnectedError
+from infer_nexus.core.errors import (
+    AdmissionRejectedError,
+    BackendConfigurationError,
+    RuntimeExecutionError,
+    RuntimeNotConnectedError,
+)
+from infer_nexus.core.request_context import RequestContext, current_request_state
 from infer_nexus.core.schemas import (
     ChatCompletionChoice,
     ChatCompletionsRequest,
@@ -33,11 +39,222 @@ from infer_nexus.core.schemas import (
     RerankUsage,
     TokenUsage,
 )
+from infer_nexus.observability.logging import get_logger
+from infer_nexus.observability.metrics import GATEWAY_METRICS
 from infer_nexus.runtime.deployments import ModelRuntimeReplica
 from infer_nexus.runtime.handles import ServeDeploymentHandleResolver
 from infer_nexus.runtime.types import RuntimeTarget
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
+_VALIDATION_STREAM_ERROR_CODES = frozenset(
+    {"unsupported_parameter", "unsupported_message_content", "invalid_input"}
+)
+_NO_TRACEBACK_STREAM_ERROR_CODES = frozenset(
+    {
+        *_VALIDATION_STREAM_ERROR_CODES,
+        "admission_rejected",
+        "gateway_overloaded",
+        "gateway_queue_full",
+        "gateway_queue_timeout",
+        "gateway_worker_overloaded",
+        "invalid_request",
+        "overloaded",
+        "runtime_circuit_open",
+        "streaming_unavailable",
+        "unsupported_task_type",
+        "upstream_timeout",
+    }
+)
+
+
+class _ServeDeploymentGuard:
+    """Bounded gateway-local admission guard for one execution budget."""
+
+    def __init__(
+        self,
+        *,
+        key: str,
+        model_label: str,
+        max_inflight: int,
+        max_queued: int,
+        acquire_timeout_seconds: int | float,
+        circuit_breaker_enabled: bool,
+        failure_threshold: int,
+        cooldown_seconds: int | float,
+    ) -> None:
+        self.key = key
+        self.model_label = model_label
+        self.max_inflight = max_inflight
+        self.max_queued = max_queued
+        self.acquire_timeout_seconds = acquire_timeout_seconds
+        self.circuit_breaker_enabled = circuit_breaker_enabled
+        self.failure_threshold = failure_threshold
+        self.cooldown_seconds = cooldown_seconds
+        self._active = 0
+        self._queued = 0
+        self._condition = asyncio.Condition()
+        self._consecutive_failures = 0
+        self._opened_at: float | None = None
+
+    @property
+    def active(self) -> int:
+        """Return currently admitted requests."""
+        return self._active
+
+    @property
+    def queued(self) -> int:
+        """Return currently queued requests."""
+        return self._queued
+
+    def _sync_metrics(self) -> None:
+        GATEWAY_METRICS.set_model_inflight(model=self.model_label, value=self._active)
+        GATEWAY_METRICS.set_model_queue_depth(model=self.model_label, value=self._queued)
+        GATEWAY_METRICS.set_serve_circuit_state(
+            model=self.model_label,
+            open=self._opened_at is not None,
+        )
+
+    def check_circuit(self) -> None:
+        """Reject requests while the deployment circuit is open."""
+        if not self.circuit_breaker_enabled or self._opened_at is None:
+            return
+        elapsed = time() - self._opened_at
+        if elapsed < self.cooldown_seconds:
+            remaining = self.cooldown_seconds - elapsed
+            raise RuntimeNotConnectedError(
+                f"Serve deployment '{self.key}' circuit breaker is open; "
+                f"retry after {remaining:.1f}s.",
+                code="runtime_circuit_open",
+            )
+        self._opened_at = None
+        self._sync_metrics()
+        logger.info(
+            "runtime.circuit.closed",
+            model=self.model_label,
+            reason="cooldown_elapsed",
+        )
+
+    def _reject(self, message: str, *, code: str) -> None:
+        GATEWAY_METRICS.observe_runtime_guard_rejection(
+            model=self.model_label,
+            reason=code,
+        )
+        GATEWAY_METRICS.observe_admission_rejection(
+            model=self.model_label,
+            reason=code,
+        )
+        logger.warning(
+            "admission.rejected",
+            model=self.model_label,
+            reason=code,
+            retry_after_seconds=(
+                max(1, int(self.acquire_timeout_seconds))
+                if self.acquire_timeout_seconds > 0
+                else None
+            ),
+            admission_layer="serve_handle",
+        )
+        raise AdmissionRejectedError(message, code=code)
+
+    async def acquire(self) -> float:
+        """Acquire one gateway-side slot, allowing only a bounded waiter burst."""
+        start = perf_counter()
+        self.check_circuit()
+        if self.max_inflight <= 0:
+            self._active += 1
+            self._sync_metrics()
+            return 0.0
+
+        timeout = self.acquire_timeout_seconds
+        async with self._condition:
+            self.check_circuit()
+            if self._active < self.max_inflight:
+                self._active += 1
+                self._sync_metrics()
+                return 0.0
+
+            if self.max_queued <= 0:
+                self._reject(
+                    f"Serve deployment '{self.key}' has reached the gateway admission limit "
+                    f"({self.max_inflight}).",
+                    code="gateway_overloaded",
+                )
+            if self._queued >= self.max_queued:
+                self._reject(
+                    f"Serve deployment '{self.key}' gateway queue is full "
+                    f"({self.max_queued}).",
+                    code="gateway_queue_full",
+                )
+            if timeout <= 0:
+                self._reject(
+                    f"Serve deployment '{self.key}' has reached the gateway admission limit "
+                    f"({self.max_inflight}).",
+                    code="gateway_overloaded",
+                )
+
+            self._queued += 1
+            self._sync_metrics()
+            try:
+                deadline = perf_counter() + timeout
+                while self._active >= self.max_inflight:
+                    remaining = deadline - perf_counter()
+                    if remaining <= 0:
+                        self._reject(
+                            f"Serve deployment '{self.key}' gateway admission wait timed out "
+                            f"after {timeout}s.",
+                            code="gateway_queue_timeout",
+                        )
+                    try:
+                        await asyncio.wait_for(self._condition.wait(), timeout=remaining)
+                    except TimeoutError:
+                        self._reject(
+                            f"Serve deployment '{self.key}' gateway admission wait timed out "
+                            f"after {timeout}s.",
+                            code="gateway_queue_timeout",
+                        )
+                    self.check_circuit()
+                self._active += 1
+                waited = perf_counter() - start
+                GATEWAY_METRICS.observe_admission_wait(
+                    model=self.model_label,
+                    seconds=waited,
+                )
+                return waited
+            finally:
+                if self._queued > 0:
+                    self._queued -= 1
+                self._sync_metrics()
+
+    async def release(self) -> None:
+        """Release one gateway-side admission slot and wake one bounded waiter."""
+        async with self._condition:
+            if self._active > 0:
+                self._active -= 1
+                self._condition.notify(1)
+            self._sync_metrics()
+
+    def record_success(self) -> None:
+        """Close the breaker after a successful request."""
+        self._consecutive_failures = 0
+        self._opened_at = None
+        self._sync_metrics()
+
+    def record_failure(self) -> None:
+        """Open the breaker after enough consecutive runtime failures."""
+        if not self.circuit_breaker_enabled:
+            return
+        self._consecutive_failures += 1
+        if self._consecutive_failures >= self.failure_threshold and self._opened_at is None:
+            self._opened_at = time()
+            logger.error(
+                "runtime.circuit.opened",
+                model=self.model_label,
+                reason="consecutive_runtime_failures",
+                failure_count=self._consecutive_failures,
+                cooldown_seconds=self.cooldown_seconds,
+            )
+        self._sync_metrics()
+
 
 @dataclass(slots=True)
 class RuntimeExecutor:
@@ -45,6 +262,130 @@ class RuntimeExecutor:
 
     mode: str = "stub"
     handle_resolver: ServeDeploymentHandleResolver | None = None
+    serve_request_timeout_seconds: int | float = 120
+    serve_stream_idle_timeout_seconds: int | float = 30
+    serve_stream_max_lifetime_seconds: int | float = 900
+    max_inflight_per_model: int = 0
+    max_streaming_inflight_per_model: int = 0
+    max_non_streaming_inflight_per_model: int = 0
+    max_queued_per_model: int = 0
+    admission_acquire_timeout_seconds: int | float = 0
+    admission_queue_timeout_seconds: int | float = 0
+    circuit_breaker_enabled: bool = False
+    circuit_breaker_failure_threshold: int = 3
+    circuit_breaker_cooldown_seconds: int | float = 60
+    runtime_worker_client: Any | None = None
+    _guards: dict[str, _ServeDeploymentGuard] = field(default_factory=dict, init=False)
+
+    def _guard_key(self, target: RuntimeTarget, *, stream: bool) -> str:
+        """Return the stable key used for per-deployment gateway safeguards."""
+        base = f"{target.app_name or 'unknown'}:{target.deployment_name}"
+        if self.max_streaming_inflight_per_model > 0 or self.max_non_streaming_inflight_per_model > 0:
+            return f"{base}:{'stream' if stream else 'nonstream'}"
+        return base
+
+    def _metric_model(self, target: RuntimeTarget) -> str:
+        """Return the stable model label used by gateway runtime metrics."""
+        return str(
+            target.model_alias
+            or target.runtime_context.get("served_model_name")
+            or target.model_name
+            or target.deployment_name
+        )
+
+    def _request_context(
+        self,
+        target: RuntimeTarget,
+        *,
+        stream: bool | None = None,
+    ) -> RequestContext:
+        """Copy allowlisted lifecycle metadata for one runtime boundary call."""
+        state = current_request_state()
+        current = state.context if state is not None else None
+        if current is not None:
+            current.model = self._metric_model(target)
+            current.backend = getattr(target.backend, "value", str(target.backend))
+            current.compat_mode = target.runtime_context.get("compat_mode")
+            current.serve_app = target.app_name
+            current.deployment = target.deployment_name
+            if stream is not None:
+                current.stream = stream
+        task = current.task if current is not None else None
+        if task is None:
+            task = getattr(target.runtime_context.get("task"), "value", None)
+            task = task or target.runtime_context.get("task")
+        return RequestContext(
+            request_id=current.request_id if current is not None else uuid4().hex,
+            method=current.method if current is not None else None,
+            route=current.route if current is not None else None,
+            model=self._metric_model(target),
+            task=task,
+            stream=current.stream if stream is None and current is not None else bool(stream),
+            backend=getattr(target.backend, "value", str(target.backend)),
+            compat_mode=target.runtime_context.get("compat_mode"),
+            serve_app=target.app_name,
+            deployment=target.deployment_name,
+        )
+
+    @staticmethod
+    def _active_request_context_kwargs(
+        request_context: RequestContext,
+    ) -> dict[str, RequestContext]:
+        """Only extend internal worker contracts for a real HTTP lifecycle."""
+        return (
+            {"request_context": request_context}
+            if current_request_state() is not None
+            else {}
+        )
+
+    def _log_runtime_call_failure(
+        self,
+        target: RuntimeTarget,
+        *,
+        method_name: str,
+        error_code: str,
+    ) -> None:
+        """Emit one safe runtime-boundary failure event without a duplicate trace."""
+        logger.error(
+            "runtime.call.failed",
+            model=self._metric_model(target),
+            serve_app=target.app_name,
+            deployment=target.deployment_name,
+            method=method_name,
+            error_code=error_code,
+        )
+
+    def _max_inflight_for_request(self, *, stream: bool) -> int:
+        """Return the configured active-request budget for one request shape."""
+        if stream and self.max_streaming_inflight_per_model > 0:
+            return self.max_streaming_inflight_per_model
+        if not stream and self.max_non_streaming_inflight_per_model > 0:
+            return self.max_non_streaming_inflight_per_model
+        return self.max_inflight_per_model
+
+    def _guard_acquire_timeout(self) -> int | float:
+        """Return queue wait timeout while preserving the old config field."""
+        if self.admission_queue_timeout_seconds > 0:
+            return self.admission_queue_timeout_seconds
+        return self.admission_acquire_timeout_seconds
+
+    def _get_guard(self, target: RuntimeTarget, *, stream: bool = False) -> "_ServeDeploymentGuard":
+        """Return the per-deployment fail-fast guard."""
+        key = self._guard_key(target, stream=stream)
+        guard = self._guards.get(key)
+        if guard is None:
+            guard = _ServeDeploymentGuard(
+                key=key,
+                model_label=self._metric_model(target),
+                max_inflight=self._max_inflight_for_request(stream=stream),
+                max_queued=self.max_queued_per_model,
+                acquire_timeout_seconds=self._guard_acquire_timeout(),
+                circuit_breaker_enabled=self.circuit_breaker_enabled,
+                failure_threshold=self.circuit_breaker_failure_threshold,
+                cooldown_seconds=self.circuit_breaker_cooldown_seconds,
+            )
+            self._guards[key] = guard
+        return guard
 
     async def execute_chat(
         self,
@@ -53,10 +394,44 @@ class RuntimeExecutor:
         request: ChatCompletionsRequest,
     ) -> ChatCompletionsResponse | Response:
         """执行 chat completion，并按模型后端选择代理、Serve 或本地路径。"""
+        request_context = self._request_context(target, stream=request.stream)
         if target.backend == BackendType.VLLM_OPENAI_PROXY:
-            return await self._execute_proxy_chat(target=target, request=request)
+            return await self._execute_proxy_chat(
+                target=target,
+                request=request,
+                request_context=request_context,
+            )
+        if self.mode == "serve" and self.runtime_worker_client is not None:
+            if request.stream:
+                stream_start_time = perf_counter()
+                chunks = await self.runtime_worker_client.chat_completion_stream(
+                    target=target,
+                    request=request,
+                    **self._active_request_context_kwargs(request_context),
+                )
+                chunks = await self._prime_stream_chunks(
+                    chunks,
+                    model_label=self._stream_metric_model(target, request),
+                    stream_start_time=stream_start_time,
+                )
+                return self._build_chat_stream_response(
+                    request,
+                    target,
+                    chunks,
+                    stream_start_time=stream_start_time,
+                    request_context=request_context,
+                )
+            return await self.runtime_worker_client.chat_completion(
+                target=target,
+                request=request,
+                **self._active_request_context_kwargs(request_context),
+            )
         if request.stream:
-            return await self._execute_chat_stream(target=target, request=request)
+            return await self._execute_chat_stream(
+                target=target,
+                request=request,
+                request_context=request_context,
+            )
 
         # serve 模式走远程句柄；stub 模式本地实例化副本，便于本地开发与测试。
         if self.mode == "serve":
@@ -64,12 +439,14 @@ class RuntimeExecutor:
                 target=target,
                 method_name="chat_completion",
                 payload=request.model_dump(mode="json"),
+                request_context=request_context,
             )
         else:
             payload = await self._invoke_local_replica(
                 target=target,
                 method_name="chat_completion",
                 payload=request.model_dump(mode="json"),
+                request_context=request_context,
             )
         if self._is_openai_chat_payload(payload):
             return JSONResponse(content=self._strip_internal_status(payload))
@@ -80,24 +457,38 @@ class RuntimeExecutor:
         *,
         target: RuntimeTarget,
         request: ChatCompletionsRequest,
+        request_context: RequestContext,
     ) -> StreamingResponse:
         """执行流式 chat completion，并在返回响应前预取首块暴露早期错误。"""
+        stream_start_time = perf_counter()
         if self.mode == "serve":
             chunks = await self._invoke_handle_stream(
                 target=target,
                 method_name="chat_completion_stream",
                 payload=request.model_dump(mode="json"),
+                request_context=request_context,
             )
         else:
             chunks = await self._invoke_local_replica_stream(
                 target=target,
                 method_name="chat_completion_stream",
                 payload=request.model_dump(mode="json"),
+                request_context=request_context,
             )
         # Prime one chunk before sending response headers so unsupported streaming requests
         # fail as JSON errors instead of returning a broken 200 SSE connection.
-        chunks = await self._prime_stream_chunks(chunks)
-        return self._build_chat_stream_response(request, target, chunks)
+        chunks = await self._prime_stream_chunks(
+            chunks,
+            model_label=self._stream_metric_model(target, request),
+            stream_start_time=stream_start_time,
+        )
+        return self._build_chat_stream_response(
+            request,
+            target,
+            chunks,
+            stream_start_time=stream_start_time,
+            request_context=request_context,
+        )
 
     async def execute_embedding(
         self,
@@ -106,19 +497,32 @@ class RuntimeExecutor:
         request: EmbeddingRequest,
     ) -> EmbeddingResponse | Response:
         """执行 embedding 请求，并把后端载荷整理为 OpenAI 兼容响应。"""
+        request_context = self._request_context(target, stream=False)
         if target.backend == BackendType.VLLM_OPENAI_PROXY:
-            return await self._execute_proxy_embedding(target=target, request=request)
+            return await self._execute_proxy_embedding(
+                target=target,
+                request=request,
+                request_context=request_context,
+            )
+        if self.mode == "serve" and self.runtime_worker_client is not None:
+            return await self.runtime_worker_client.embedding(
+                target=target,
+                request=request,
+                **self._active_request_context_kwargs(request_context),
+            )
         if self.mode == "serve":
             payload = await self._invoke_handle(
                 target=target,
                 method_name="embedding",
                 payload=request.model_dump(mode="json"),
+                request_context=request_context,
             )
         else:
             payload = await self._invoke_local_replica(
                 target=target,
                 method_name="embedding",
                 payload=request.model_dump(mode="json"),
+                request_context=request_context,
             )
         return self._build_embedding_response_from_payload(request, target, payload)
 
@@ -129,19 +533,32 @@ class RuntimeExecutor:
         request: RerankRequest,
     ) -> RerankResponse | Response:
         """执行 rerank 请求，并把后端载荷整理为统一 rerank 响应。"""
+        request_context = self._request_context(target, stream=False)
         if target.backend == BackendType.VLLM_OPENAI_PROXY:
-            return await self._execute_proxy_rerank(target=target, request=request)
+            return await self._execute_proxy_rerank(
+                target=target,
+                request=request,
+                request_context=request_context,
+            )
+        if self.mode == "serve" and self.runtime_worker_client is not None:
+            return await self.runtime_worker_client.rerank(
+                target=target,
+                request=request,
+                **self._active_request_context_kwargs(request_context),
+            )
         if self.mode == "serve":
             payload = await self._invoke_handle(
                 target=target,
                 method_name="rerank",
                 payload=request.model_dump(mode="json"),
+                request_context=request_context,
             )
         else:
             payload = await self._invoke_local_replica(
                 target=target,
                 method_name="rerank",
                 payload=request.model_dump(mode="json"),
+                request_context=request_context,
             )
         return self._build_rerank_response_from_payload(request, target, payload)
 
@@ -151,13 +568,19 @@ class RuntimeExecutor:
         target: RuntimeTarget,
         method_name: str,
         payload: dict[str, Any],
+        request_context: RequestContext | None = None,
     ) -> dict[str, Any]:
         """在 stub/dev 模式下直接实例化副本并调用指定方法。"""
         # Local path is used for stub/dev mode without requiring Ray Serve connectivity.
         try:
             replica = ModelRuntimeReplica(target.runtime_context)
             method = getattr(replica, method_name)
-            return await method(request_payload=payload)
+            return await method(
+                request_payload=payload,
+                **self._active_request_context_kwargs(
+                    request_context or self._request_context(target)
+                ),
+            )
         except BackendConfigurationError as exc:
             raise RuntimeExecutionError(str(exc), code="backend_misconfigured") from exc
 
@@ -167,12 +590,20 @@ class RuntimeExecutor:
         target: RuntimeTarget,
         method_name: str,
         payload: dict[str, Any],
+        request_context: RequestContext | None = None,
     ) -> AsyncIterator[dict[str, Any] | bytes | str]:
         """在 stub/dev 模式下调用本地副本的流式方法并归一化结果。"""
         try:
             replica = ModelRuntimeReplica(target.runtime_context)
             method = getattr(replica, method_name)
-            return self._normalize_stream_result(method(request_payload=payload))
+            return self._normalize_stream_result(
+                method(
+                    request_payload=payload,
+                    **self._active_request_context_kwargs(
+                        request_context or self._request_context(target, stream=True)
+                    ),
+                )
+            )
         except BackendConfigurationError as exc:
             raise RuntimeExecutionError(str(exc), code="backend_misconfigured") from exc
 
@@ -182,6 +613,7 @@ class RuntimeExecutor:
         target: RuntimeTarget,
         method_name: str,
         payload: dict[str, Any],
+        request_context: RequestContext | None = None,
     ) -> dict[str, Any]:
         """在 serve 模式下解析部署句柄并远程调用副本方法。"""
         # Serve mode relies on model-specific deployment handles resolved by app name + deployment name.
@@ -215,20 +647,91 @@ class RuntimeExecutor:
                 f"'{method_name}.remote(...)'."
             )
 
+        model_label = self._metric_model(target)
+        call_start = perf_counter()
+        call_status = "error"
+        guard_acquired = False
+        released = False
         try:
-            response = remote_method.remote(request_payload=payload)
-            return await self._await_handle_response(response)
-        except RuntimeNotConnectedError:
+            guard = self._get_guard(target, stream=False)
+            await guard.acquire()
+            guard_acquired = True
+            response = remote_method.remote(
+                request_payload=payload,
+                **self._active_request_context_kwargs(
+                    request_context or self._request_context(target)
+                ),
+            )
+            try:
+                result = await asyncio.wait_for(
+                    self._await_handle_response(response),
+                    timeout=self.serve_request_timeout_seconds,
+                )
+            except TimeoutError as exc:
+                guard.record_failure()
+                call_status = "timeout"
+                GATEWAY_METRICS.observe_serve_handle_timeout(
+                    model=model_label,
+                    method=method_name,
+                )
+                raise self._serve_timeout_error(target, method_name) from exc
+            except Exception:
+                guard.record_failure()
+                raise
+            else:
+                guard.record_success()
+                call_status = "success"
+                return result
+            finally:
+                if guard_acquired:
+                    await guard.release()
+                released = True
+                GATEWAY_METRICS.observe_serve_handle_call(
+                    model=model_label,
+                    method=method_name,
+                    status=call_status,
+                    latency_seconds=perf_counter() - call_start,
+                )
+        except AdmissionRejectedError:
+            raise
+        except RuntimeNotConnectedError as exc:
+            if not released:
+                if guard_acquired:
+                    await guard.release()
+                GATEWAY_METRICS.observe_serve_handle_call(
+                    model=model_label,
+                    method=method_name,
+                    status=call_status,
+                    latency_seconds=perf_counter() - call_start,
+                )
+            self._log_runtime_call_failure(
+                target,
+                method_name=method_name,
+                error_code=exc.code,
+            )
             raise
         except Exception as exc:
+            if not released:
+                if guard_acquired:
+                    await guard.release()
+                GATEWAY_METRICS.observe_serve_handle_call(
+                    model=model_label,
+                    method=method_name,
+                    status=call_status,
+                    latency_seconds=perf_counter() - call_start,
+                )
             code = self._extract_execution_error_code(exc)
             message = self._extract_execution_error_message(exc)
-            logger.exception(
-                "Serve execution failed for deployment '%s' in app '%s' method '%s'.",
-                target.deployment_name,
-                target.app_name,
-                method_name,
-            )
+            if code not in {
+                "unsupported_parameter",
+                "unsupported_message_content",
+                "invalid_input",
+            }:
+                self._log_runtime_call_failure(
+                    target,
+                    method_name=method_name,
+                    error_code=code,
+                )
             if code in {"unsupported_parameter", "unsupported_message_content", "invalid_input"}:
                 raise RuntimeExecutionError(message, code=code) from exc
             raise RuntimeExecutionError(
@@ -243,6 +746,7 @@ class RuntimeExecutor:
         target: RuntimeTarget,
         method_name: str,
         payload: dict[str, Any],
+        request_context: RequestContext | None = None,
     ) -> AsyncIterator[dict[str, Any] | bytes | str]:
         """在 serve 模式下通过部署句柄调用远程流式副本方法。"""
         if self.handle_resolver is None:
@@ -275,32 +779,91 @@ class RuntimeExecutor:
                 f"'{method_name}.remote(...)'."
             )
 
+        model_label = self._metric_model(target)
+        call_start = perf_counter()
+        guard_acquired = False
         try:
-            stream_handle = handle
+            guard = self._get_guard(target, stream=True)
+            await guard.acquire()
+            guard_acquired = True
             options_method = getattr(handle, "options", None)
-            if callable(options_method):
-                try:
-                    stream_handle = options_method(stream=True)
-                except Exception:
-                    # Fallback to legacy handle invocation for environments lacking stream options support.
-                    stream_handle = handle
+            if not callable(options_method):
+                raise RuntimeNotConnectedError(
+                    f"Serve streaming is unavailable for model '{self._metric_model(target)}' "
+                    f"because deployment '{target.deployment_name}' in app '{target.app_name}' "
+                    "does not expose handle.options(stream=True).",
+                    code="streaming_unavailable",
+                )
+            try:
+                stream_handle = options_method(stream=True)
+            except Exception as exc:
+                raise RuntimeNotConnectedError(
+                    f"Serve streaming is unavailable for model '{self._metric_model(target)}' "
+                    f"at deployment '{target.deployment_name}' in app '{target.app_name}': {exc}",
+                    code="streaming_unavailable",
+                ) from exc
             stream_remote_method = getattr(stream_handle, method_name, None)
             if stream_remote_method is None or not hasattr(stream_remote_method, "remote"):
-                stream_remote_method = remote_method
+                raise RuntimeNotConnectedError(
+                    f"Streaming Serve handle for model '{self._metric_model(target)}' "
+                    f"at deployment '{target.deployment_name}' in app '{target.app_name}' "
+                    f"does not expose '{method_name}.remote(...)'.",
+                    code="streaming_unavailable",
+                )
 
-            response = stream_remote_method.remote(request_payload=payload)
-            return self._normalize_stream_result(response)
-        except RuntimeNotConnectedError:
+            response = stream_remote_method.remote(
+                request_payload=payload,
+                **self._active_request_context_kwargs(
+                    request_context or self._request_context(target, stream=True)
+                ),
+            )
+            GATEWAY_METRICS.observe_serve_handle_call(
+                model=model_label,
+                method=method_name,
+                status="started",
+                latency_seconds=perf_counter() - call_start,
+            )
+            return self._guard_stream_chunks(
+                self._normalize_stream_result(response),
+                guard=guard,
+                target=target,
+                method_name=method_name,
+                model_label=model_label,
+            )
+        except AdmissionRejectedError:
+            raise
+        except RuntimeNotConnectedError as exc:
+            if guard_acquired:
+                await guard.release()
+            self._log_runtime_call_failure(
+                target,
+                method_name=method_name,
+                error_code=exc.code,
+            )
             raise
         except Exception as exc:
+            if "guard" in locals():
+                guard.record_failure()
+            if guard_acquired:
+                await guard.release()
+            GATEWAY_METRICS.observe_serve_handle_call(
+                model=model_label,
+                method=method_name,
+                status="error",
+                latency_seconds=perf_counter() - call_start,
+            )
             code = self._extract_execution_error_code(exc)
             message = self._extract_execution_error_message(exc)
-            logger.exception(
-                "Serve streaming execution failed for deployment '%s' in app '%s' method '%s'.",
-                target.deployment_name,
-                target.app_name,
-                method_name,
-            )
+            if code not in {
+                "unsupported_parameter",
+                "unsupported_message_content",
+                "invalid_input",
+            }:
+                self._log_runtime_call_failure(
+                    target,
+                    method_name=method_name,
+                    error_code=code,
+                )
             if code in {"unsupported_parameter", "unsupported_message_content", "invalid_input"}:
                 raise RuntimeExecutionError(message, code=code) from exc
             raise RuntimeExecutionError(
@@ -309,12 +872,123 @@ class RuntimeExecutor:
                 code=code,
             ) from exc
 
+    def _serve_timeout_error(self, target: RuntimeTarget, method_name: str) -> RuntimeNotConnectedError:
+        """Build a stable upstream timeout error for a Serve handle call."""
+        return RuntimeNotConnectedError(
+            f"Serve request timed out after {self.serve_request_timeout_seconds}s for "
+            f"deployment '{target.deployment_name}' in app '{target.app_name}' "
+            f"method '{method_name}'.",
+            code="upstream_timeout",
+        )
+
+    def _serve_stream_idle_timeout_error(self, target: RuntimeTarget, method_name: str) -> RuntimeNotConnectedError:
+        """Build a stable upstream timeout error for an idle Serve stream."""
+        return RuntimeNotConnectedError(
+            f"Serve stream produced no chunks for {self.serve_stream_idle_timeout_seconds}s "
+            f"for deployment '{target.deployment_name}' in app '{target.app_name}' "
+            f"method '{method_name}'.",
+            code="upstream_timeout",
+        )
+
+    async def _guard_stream_chunks(
+        self,
+        chunks: AsyncIterator[dict[str, Any] | bytes | str],
+        *,
+        guard: _ServeDeploymentGuard,
+        target: RuntimeTarget,
+        method_name: str,
+        model_label: str,
+    ) -> AsyncIterator[dict[str, Any] | bytes | str]:
+        """Apply timeout, circuit accounting, and inflight release to a Serve stream."""
+        iterator = chunks.__aiter__()
+        stream_started = perf_counter()
+        try:
+            while True:
+                timeout = self.serve_stream_idle_timeout_seconds
+                if self.serve_stream_max_lifetime_seconds > 0:
+                    remaining_lifetime = self.serve_stream_max_lifetime_seconds - (
+                        perf_counter() - stream_started
+                    )
+                    if remaining_lifetime <= 0:
+                        guard.record_failure()
+                        GATEWAY_METRICS.observe_serve_handle_timeout(
+                            model=model_label,
+                            method=method_name,
+                        )
+                        GATEWAY_METRICS.observe_serve_handle_call(
+                            model=model_label,
+                            method=method_name,
+                            status="timeout",
+                            latency_seconds=perf_counter() - stream_started,
+                        )
+                        raise RuntimeNotConnectedError(
+                            f"Serve stream exceeded max lifetime "
+                            f"{self.serve_stream_max_lifetime_seconds}s for deployment "
+                            f"'{target.deployment_name}' in app '{target.app_name}' "
+                            f"method '{method_name}'.",
+                            code="upstream_timeout",
+                        )
+                    timeout = min(timeout, remaining_lifetime)
+                try:
+                    chunk = await asyncio.wait_for(
+                        iterator.__anext__(),
+                        timeout=timeout,
+                    )
+                except StopAsyncIteration:
+                    guard.record_success()
+                    GATEWAY_METRICS.observe_serve_handle_call(
+                        model=model_label,
+                        method=method_name,
+                        status="success",
+                        latency_seconds=perf_counter() - stream_started,
+                    )
+                    return
+                except TimeoutError as exc:
+                    guard.record_failure()
+                    GATEWAY_METRICS.observe_serve_handle_timeout(
+                        model=model_label,
+                        method=method_name,
+                    )
+                    GATEWAY_METRICS.observe_serve_handle_call(
+                        model=model_label,
+                        method=method_name,
+                        status="timeout",
+                        latency_seconds=perf_counter() - stream_started,
+                    )
+                    raise self._serve_stream_idle_timeout_error(target, method_name) from exc
+                yield chunk
+        except asyncio.CancelledError:
+            raise
+        except RuntimeNotConnectedError as exc:
+            self._log_runtime_call_failure(
+                target,
+                method_name=method_name,
+                error_code=exc.code,
+            )
+            raise
+        except Exception as exc:
+            guard.record_failure()
+            self._log_runtime_call_failure(
+                target,
+                method_name=method_name,
+                error_code=self._extract_execution_error_code(exc),
+            )
+            GATEWAY_METRICS.observe_serve_handle_call(
+                model=model_label,
+                method=method_name,
+                status="error",
+                latency_seconds=perf_counter() - stream_started,
+            )
+            raise
+        finally:
+            await guard.release()
+
     async def _await_handle_response(self, response: Any) -> Any:
         """兼容 awaitable、ObjectRef 风格和普通返回值。"""
         if inspect.isawaitable(response):
             return await response
         if hasattr(response, "result"):
-            return response.result()
+            return await asyncio.to_thread(response.result)
         return response
 
     async def _normalize_stream_result(self, response: Any) -> AsyncIterator[dict[str, Any] | bytes | str]:
@@ -327,7 +1001,7 @@ class RuntimeExecutor:
         if inspect.isawaitable(response):
             response = await response
         if hasattr(response, "result") and not hasattr(response, "__aiter__"):
-            response = response.result()
+            response = await asyncio.to_thread(response.result)
 
         if hasattr(response, "__aiter__"):
             async for chunk in response:
@@ -351,6 +1025,9 @@ class RuntimeExecutor:
     async def _prime_stream_chunks(
         self,
         chunks: AsyncIterator[dict[str, Any] | bytes | str],
+        *,
+        model_label: str,
+        stream_start_time: float,
     ) -> AsyncIterator[dict[str, Any] | bytes | str]:
         """先消费首个流式片段，让参数错误能以 JSON 错误返回。"""
         iterator = chunks.__aiter__()
@@ -362,6 +1039,19 @@ class RuntimeExecutor:
                 if False:
                     yield {}
             return empty()
+        except asyncio.CancelledError:
+            self._record_early_stream_cancellation(
+                model_label=model_label,
+                stream_start_time=stream_start_time,
+            )
+            raise
+        except Exception as exc:
+            self._record_early_stream_failure(
+                exc,
+                model_label=model_label,
+                stream_start_time=stream_start_time,
+            )
+            raise
 
         async def replay() -> AsyncIterator[dict[str, Any] | bytes | str]:
             """重放已预取的首块并继续转发剩余片段。"""
@@ -370,6 +1060,60 @@ class RuntimeExecutor:
                 yield chunk
 
         return replay()
+
+    def _record_early_stream_cancellation(
+        self,
+        *,
+        model_label: str,
+        stream_start_time: float,
+    ) -> None:
+        """Record client cancellation while priming before HTTP headers exist."""
+        GATEWAY_METRICS.observe_stream_completion(model=model_label, status="cancelled")
+        state = current_request_state()
+        if state is not None:
+            state.outcome = "cancelled"
+            state.stream_terminal_logged = True
+        logger.info(
+            "stream.cancelled",
+            model=model_label,
+            outcome="cancelled",
+            duration_ms=round((perf_counter() - stream_start_time) * 1000, 3),
+        )
+
+    def _record_early_stream_failure(
+        self,
+        exc: Exception,
+        *,
+        model_label: str,
+        stream_start_time: float,
+    ) -> None:
+        """Record unexpected first-chunk failures without logging validation errors."""
+        state = current_request_state()
+        if type(exc).__name__ in {"ClientDisconnect", "DisconnectError"} or (
+            state is not None and state.context.stream and isinstance(exc, OSError)
+        ):
+            self._record_early_stream_cancellation(
+                model_label=model_label,
+                stream_start_time=stream_start_time,
+            )
+            return
+        error_code = getattr(exc, "code", None)
+        if error_code in _VALIDATION_STREAM_ERROR_CODES:
+            return
+        error_code = error_code or "stream_failed"
+        GATEWAY_METRICS.observe_stream_completion(model=model_label, status="error")
+        if state is not None:
+            state.error_code = state.error_code or error_code
+            state.stream_terminal_logged = True
+        log_fields: dict[str, Any] = {
+            "model": model_label,
+            "outcome": "error",
+            "error_code": error_code,
+            "duration_ms": round((perf_counter() - stream_start_time) * 1000, 3),
+        }
+        if error_code not in _NO_TRACEBACK_STREAM_ERROR_CODES:
+            log_fields["exc_info"] = (type(exc), exc, exc.__traceback__)
+        logger.error("stream.failed", **log_fields)
 
     def _parse_proxy_config(self, target: RuntimeTarget) -> ProxyConfig:
         """从运行时目标中读取并校验 OpenAI 兼容代理配置。"""
@@ -407,6 +1151,28 @@ class RuntimeExecutor:
             headers["Authorization"] = f"Bearer {token}"
         return headers
 
+    @staticmethod
+    def _log_proxy_failure(
+        proxy_config: ProxyConfig,
+        *,
+        error_code: str,
+        status_code: int | None = None,
+    ) -> None:
+        """Log safe upstream metadata without credentials, paths, or payloads."""
+        upstream_host = urlsplit(proxy_config.upstream_base_url).hostname
+        state = current_request_state()
+        fields: dict[str, Any] = {"error_code": error_code}
+        if upstream_host:
+            fields["upstream_host"] = upstream_host
+        if state is not None:
+            if state.context.model:
+                fields["model"] = state.context.model
+            if status_code is not None:
+                state.upstream_status = status_code
+        if status_code is not None:
+            fields["upstream_status"] = status_code
+        logger.warning("proxy.request.failed", **fields)
+
     async def _request_proxy(
         self,
         *,
@@ -437,6 +1203,12 @@ class RuntimeExecutor:
                     if backoff > 0:
                         await asyncio.sleep(backoff * attempt)
                     continue
+                if response.status_code >= 400:
+                    self._log_proxy_failure(
+                        proxy_config,
+                        error_code=f"upstream_http_{response.status_code}",
+                        status_code=response.status_code,
+                    )
                 return response
             except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout) as exc:
                 last_exc = exc
@@ -445,10 +1217,12 @@ class RuntimeExecutor:
                 if backoff > 0:
                     await asyncio.sleep(backoff * attempt)
 
+        self._log_proxy_failure(proxy_config, error_code="upstream_timeout")
+        upstream_host = urlsplit(proxy_config.upstream_base_url).hostname or "unknown"
         raise RuntimeNotConnectedError(
-            f"proxy upstream request failed for '{url}': {last_exc}",
+            f"proxy upstream request to '{upstream_host}' failed: {type(last_exc).__name__}",
             code="upstream_timeout",
-        )
+        ) from last_exc
 
     def _proxy_payload(self, *, model_name: str, payload: dict[str, Any], proxy_config: ProxyConfig) -> dict[str, Any]:
         """替换或保留请求中的模型名，生成发送给上游的载荷。"""
@@ -458,7 +1232,13 @@ class RuntimeExecutor:
 
     def _to_proxy_response(self, response: httpx.Response, *, request_id: str) -> Response:
         """将上游 HTTP 响应原样包装为网关响应并附加请求 ID。"""
-        headers = {"X-Infer-Nexus-Request-ID": request_id}
+        state = current_request_state()
+        if state is not None and response.status_code >= 400:
+            state.upstream_status = response.status_code
+        headers = {
+            "X-Request-ID": request_id,
+            "X-Infer-Nexus-Request-ID": request_id,
+        }
         content_type = response.headers.get("content-type")
         if content_type:
             headers["content-type"] = content_type
@@ -473,10 +1253,11 @@ class RuntimeExecutor:
         *,
         target: RuntimeTarget,
         request: ChatCompletionsRequest,
+        request_context: RequestContext,
     ) -> ChatCompletionsResponse | Response:
         """把 chat 请求转发到 OpenAI 兼容上游，必要时走 SSE 透传。"""
         proxy_config = self._parse_proxy_config(target)
-        request_id = uuid4().hex
+        request_id = request_context.request_id
         payload = self._proxy_payload(
             model_name=request.model,
             payload=request.model_dump(mode="json", exclude_none=True),
@@ -493,6 +1274,8 @@ class RuntimeExecutor:
                 path="/chat/completions",
                 payload=payload,
                 request_id=request_id,
+                model_label=self._stream_metric_model(target, request),
+                stream_start_time=perf_counter(),
             )
         response = await self._request_proxy(
             proxy_config=proxy_config,
@@ -509,6 +1292,8 @@ class RuntimeExecutor:
         path: str,
         payload: dict[str, Any],
         request_id: str,
+        model_label: str,
+        stream_start_time: float,
     ) -> Response:
         """建立上游流式 HTTP 连接并把 SSE 字节流透传给客户端。"""
         upstream = proxy_config.upstream_base_url.rstrip("/")
@@ -522,8 +1307,22 @@ class RuntimeExecutor:
         headers = self._build_proxy_headers(proxy_config, request_id=request_id)
         client = httpx.AsyncClient(timeout=timeout)
         request = client.build_request("POST", url, json=payload, headers=headers)
-        response = await client.send(request, stream=True)
+        try:
+            response = await client.send(request, stream=True)
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout) as exc:
+            await client.aclose()
+            self._log_proxy_failure(proxy_config, error_code="upstream_timeout")
+            upstream_host = urlsplit(proxy_config.upstream_base_url).hostname or "unknown"
+            raise RuntimeNotConnectedError(
+                f"proxy upstream request to '{upstream_host}' failed: {type(exc).__name__}",
+                code="upstream_timeout",
+            ) from exc
         if response.status_code >= 400:
+            self._log_proxy_failure(
+                proxy_config,
+                error_code=f"upstream_http_{response.status_code}",
+                status_code=response.status_code,
+            )
             await response.aread()
             await response.aclose()
             await client.aclose()
@@ -534,15 +1333,28 @@ class RuntimeExecutor:
             try:
                 async for chunk in response.aiter_bytes():
                     yield chunk
+            except Exception:
+                self._log_proxy_failure(
+                    proxy_config,
+                    error_code="upstream_stream_failed",
+                )
+                raise
             finally:
                 await response.aclose()
                 await client.aclose()
 
         return StreamingResponse(
-            iterator(),
+            self._observe_stream_chunks(
+                iterator(),
+                model_label=model_label,
+                stream_start_time=stream_start_time,
+            ),
             status_code=response.status_code,
             media_type=response.headers.get("content-type", "text/event-stream"),
-            headers={"X-Infer-Nexus-Request-ID": request_id},
+            headers={
+                "X-Request-ID": request_id,
+                "X-Infer-Nexus-Request-ID": request_id,
+            },
         )
 
     def _extract_execution_error_code(self, exc: Exception) -> str:
@@ -603,10 +1415,11 @@ class RuntimeExecutor:
         *,
         target: RuntimeTarget,
         request: EmbeddingRequest,
+        request_context: RequestContext,
     ) -> EmbeddingResponse | Response:
         """把 embedding 请求转发到 OpenAI 兼容上游并透传响应。"""
         proxy_config = self._parse_proxy_config(target)
-        request_id = uuid4().hex
+        request_id = request_context.request_id
         response = await self._request_proxy(
             proxy_config=proxy_config,
             path="/embeddings",
@@ -624,10 +1437,11 @@ class RuntimeExecutor:
         *,
         target: RuntimeTarget,
         request: RerankRequest,
+        request_context: RequestContext,
     ) -> RerankResponse | Response:
         """把 rerank 请求转发到上游服务并透传响应。"""
         proxy_config = self._parse_proxy_config(target)
-        request_id = uuid4().hex
+        request_id = request_context.request_id
         response = await self._request_proxy(
             proxy_config=proxy_config,
             path="/rerank",
@@ -709,13 +1523,117 @@ class RuntimeExecutor:
             text = chunk
         return "data: [DONE]" in text
 
+    def _stream_metric_model(self, target: RuntimeTarget, request: ChatCompletionsRequest) -> str:
+        """返回流式指标使用的稳定模型标签。"""
+        return str(
+            target.model_alias
+            or target.runtime_context.get("served_model_name")
+            or target.model_name
+            or request.model
+        )
+
+    def _observe_stream_emit(
+        self,
+        *,
+        model_label: str,
+        stream_start_time: float,
+        previous_emit_time: float | None,
+    ) -> float:
+        """记录流式首块延迟或相邻块间隔，并返回当前输出时间。"""
+        now = perf_counter()
+        if previous_emit_time is None:
+            GATEWAY_METRICS.observe_stream_ttft(
+                model=model_label,
+                seconds=now - stream_start_time,
+            )
+        else:
+            GATEWAY_METRICS.observe_stream_chunk_interval(
+                model=model_label,
+                seconds=now - previous_emit_time,
+            )
+        return now
+
+    async def _observe_stream_chunks(
+        self,
+        chunks: AsyncIterator[bytes],
+        *,
+        model_label: str,
+        stream_start_time: float,
+    ) -> AsyncIterator[bytes]:
+        """包装 SSE 字节流，统一记录 TTFT 和相邻输出块间隔。"""
+        previous_emit_time: float | None = None
+        stream_started = perf_counter()
+
+        def mark_terminal() -> None:
+            state = current_request_state()
+            if state is not None:
+                state.stream_terminal_logged = True
+
+        def terminal_fields(*, outcome: str, error_code: str | None = None) -> dict[str, Any]:
+            fields: dict[str, Any] = {
+                "model": model_label,
+                "outcome": outcome,
+                "duration_ms": round((perf_counter() - stream_started) * 1000, 3),
+            }
+            if error_code:
+                fields["error_code"] = error_code
+            return fields
+
+        def record_cancelled() -> None:
+            GATEWAY_METRICS.observe_stream_completion(model=model_label, status="cancelled")
+            state = current_request_state()
+            mark_terminal()
+            if state is not None:
+                state.outcome = "cancelled"
+            logger.info("stream.cancelled", **terminal_fields(outcome="cancelled"))
+
+        try:
+            async for chunk in chunks:
+                previous_emit_time = self._observe_stream_emit(
+                    model_label=model_label,
+                    stream_start_time=stream_start_time,
+                    previous_emit_time=previous_emit_time,
+                )
+                yield chunk
+        except (asyncio.CancelledError, GeneratorExit):
+            record_cancelled()
+            raise
+        except Exception as exc:
+            if type(exc).__name__ in {"ClientDisconnect", "DisconnectError"}:
+                record_cancelled()
+                raise
+            GATEWAY_METRICS.observe_stream_completion(model=model_label, status="error")
+            state = current_request_state()
+            error_code = getattr(exc, "code", None)
+            if state is not None:
+                state.error_code = state.error_code or error_code or "stream_failed"
+                state.stream_terminal_logged = True
+            terminal_error_code = error_code or "stream_failed"
+            log_fields = terminal_fields(
+                outcome="error",
+                error_code=terminal_error_code,
+            )
+            if terminal_error_code not in _NO_TRACEBACK_STREAM_ERROR_CODES:
+                log_fields["exc_info"] = (type(exc), exc, exc.__traceback__)
+            logger.error("stream.failed", **log_fields)
+            raise
+        else:
+            GATEWAY_METRICS.observe_stream_completion(model=model_label, status="success")
+            mark_terminal()
+            logger.info("stream.completed", **terminal_fields(outcome="success"))
+
     def _build_chat_stream_response(
         self,
         request: ChatCompletionsRequest,
         target: RuntimeTarget,
         chunks: dict[str, Any] | AsyncIterator[dict[str, Any] | bytes | str],
+        *,
+        stream_start_time: float,
+        request_context: RequestContext | None = None,
     ) -> StreamingResponse:
         """根据兼容模式选择 SSE 透传或内部增量事件映射。"""
+        model_label = self._stream_metric_model(target, request)
+        request_context = request_context or self._request_context(target, stream=True)
         if not isinstance(chunks, dict):
             runtime_spec = target.runtime_context.get("runtime_spec") or {}
             compat_mode = target.runtime_context.get("compat_mode") or runtime_spec.get("compat_mode")
@@ -723,8 +1641,20 @@ class RuntimeExecutor:
                 CompatibilityMode.VLLM_NATIVE.value,
                 CompatibilityMode.STRICT_OPENAI.value,
             }:
-                return self._build_passthrough_stream_response(chunks)
-            return self._build_mapped_chat_stream_response(request, target, chunks)
+                return self._build_passthrough_stream_response(
+                    chunks,
+                    model_label=model_label,
+                    stream_start_time=stream_start_time,
+                    request_id=request_context.request_id,
+                )
+            return self._build_mapped_chat_stream_response(
+                request,
+                target,
+                chunks,
+                model_label=model_label,
+                stream_start_time=stream_start_time,
+                request_id=request_context.request_id,
+            )
 
         payload = chunks
         created = payload.get("created", int(time()))
@@ -739,7 +1669,7 @@ class RuntimeExecutor:
             f"for model '{target.model_name}'",
         )
         finish_reason = payload.get("finish_reason", "stop")
-        request_id = uuid4().hex
+        request_id = request_context.request_id
 
         async def iterator() -> Any:
             """把单次载荷或预置片段输出为 OpenAI chat SSE 流。"""
@@ -794,45 +1724,53 @@ class RuntimeExecutor:
             yield b"data: [DONE]\n\n"
 
         return StreamingResponse(
-            iterator(),
+            self._observe_stream_chunks(
+                iterator(),
+                model_label=model_label,
+                stream_start_time=stream_start_time,
+            ),
             media_type="text/event-stream",
-            headers={"X-Infer-Nexus-Request-ID": request_id},
+            headers={
+                "X-Request-ID": request_id,
+                "X-Infer-Nexus-Request-ID": request_id,
+            },
         )
 
     def _build_passthrough_stream_response(
         self,
         chunks: AsyncIterator[dict[str, Any] | bytes | str],
+        *,
+        model_label: str,
+        stream_start_time: float,
+        request_id: str,
     ) -> StreamingResponse:
         """直接透传后端 SSE 片段，并在缺失时补充 `[DONE]`。"""
-        request_id = uuid4().hex
-
         async def iterator() -> Any:
             """逐块转发后端流式片段，兼容 bytes、str 和 dict 事件。"""
             saw_done = False
-            try:
-                async for chunk in chunks:
-                    if isinstance(chunk, bytes):
-                        saw_done = saw_done or self._is_done_sse_chunk(chunk)
-                        yield chunk
-                    elif isinstance(chunk, str):
-                        saw_done = saw_done or self._is_done_sse_chunk(chunk)
-                        yield chunk.encode("utf-8")
-                    elif isinstance(chunk, dict):
-                        yield self._encode_sse_chunk(chunk)
-            except Exception as exc:
-                logger.exception(
-                    "SSE stream iteration failed for request_id '%s': %s",
-                    request_id,
-                    exc,
-                )
-                return
+            async for chunk in chunks:
+                if isinstance(chunk, bytes):
+                    saw_done = saw_done or self._is_done_sse_chunk(chunk)
+                    yield chunk
+                elif isinstance(chunk, str):
+                    saw_done = saw_done or self._is_done_sse_chunk(chunk)
+                    yield chunk.encode("utf-8")
+                elif isinstance(chunk, dict):
+                    yield self._encode_sse_chunk(chunk)
             if not saw_done:
                 yield b"data: [DONE]\n\n"
 
         return StreamingResponse(
-            iterator(),
+            self._observe_stream_chunks(
+                iterator(),
+                model_label=model_label,
+                stream_start_time=stream_start_time,
+            ),
             media_type="text/event-stream",
-            headers={"X-Infer-Nexus-Request-ID": request_id},
+            headers={
+                "X-Request-ID": request_id,
+                "X-Infer-Nexus-Request-ID": request_id,
+            },
         )
 
     def _build_mapped_chat_stream_response(
@@ -840,10 +1778,12 @@ class RuntimeExecutor:
         request: ChatCompletionsRequest,
         target: RuntimeTarget,
         chunks: AsyncIterator[dict[str, Any] | bytes | str],
+        *,
+        model_label: str,
+        stream_start_time: float,
+        request_id: str,
     ) -> StreamingResponse:
         """把内部 chat_delta 事件映射为 OpenAI chat completion chunk。"""
-        request_id = uuid4().hex
-
         async def iterator() -> Any:
             """维护 role、delta 和 finish 事件顺序并生成 SSE 输出。"""
             saw_done = False
@@ -852,86 +1792,78 @@ class RuntimeExecutor:
             response_id = f"chatcmpl-{uuid4().hex}"
             created = int(time())
             model = target.runtime_context.get("served_model_name", request.model)
-            try:
-                async for chunk in chunks:
-                    if isinstance(chunk, bytes):
-                        saw_done = saw_done or self._is_done_sse_chunk(chunk)
-                        yield chunk
-                        continue
-                    if isinstance(chunk, str):
-                        saw_done = saw_done or self._is_done_sse_chunk(chunk)
-                        yield chunk.encode("utf-8")
-                        continue
-                    if not self._is_chat_delta_event(chunk):
-                        yield self._encode_sse_chunk(chunk)
-                        continue
+            async for chunk in chunks:
+                if isinstance(chunk, bytes):
+                    saw_done = saw_done or self._is_done_sse_chunk(chunk)
+                    yield chunk
+                    continue
+                if isinstance(chunk, str):
+                    saw_done = saw_done or self._is_done_sse_chunk(chunk)
+                    yield chunk.encode("utf-8")
+                    continue
+                if not self._is_chat_delta_event(chunk):
+                    yield self._encode_sse_chunk(chunk)
+                    continue
 
-                    response_id = str(chunk.get("id") or response_id)
-                    created = int(chunk.get("created") or created)
-                    model = str(chunk.get("model") or model)
-                    if not sent_role:
-                        yield self._encode_sse_chunk(
-                            {
-                                "id": response_id,
-                                "object": "chat.completion.chunk",
-                                "created": created,
-                                "model": model,
-                                "choices": [
-                                    {
-                                        "index": 0,
-                                        "delta": {"role": "assistant"},
-                                        "finish_reason": None,
-                                    }
-                                ],
-                            }
-                        )
-                        sent_role = True
+                response_id = str(chunk.get("id") or response_id)
+                created = int(chunk.get("created") or created)
+                model = str(chunk.get("model") or model)
+                if not sent_role:
+                    yield self._encode_sse_chunk(
+                        {
+                            "id": response_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {"role": "assistant"},
+                                    "finish_reason": None,
+                                }
+                            ],
+                        }
+                    )
+                    sent_role = True
 
-                    delta_text = chunk.get("delta_text")
-                    if isinstance(delta_text, str) and delta_text:
-                        yield self._encode_sse_chunk(
-                            {
-                                "id": response_id,
-                                "object": "chat.completion.chunk",
-                                "created": created,
-                                "model": model,
-                                "choices": [
-                                    {
-                                        "index": 0,
-                                        "delta": {"content": delta_text},
-                                        "finish_reason": None,
-                                    }
-                                ],
-                            }
-                        )
+                delta_text = chunk.get("delta_text")
+                if isinstance(delta_text, str) and delta_text:
+                    yield self._encode_sse_chunk(
+                        {
+                            "id": response_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {"content": delta_text},
+                                    "finish_reason": None,
+                                }
+                            ],
+                        }
+                    )
 
-                    finish_reason = chunk.get("finish_reason")
-                    if finish_reason:
-                        yield self._encode_sse_chunk(
-                            {
-                                "id": response_id,
-                                "object": "chat.completion.chunk",
-                                "created": created,
-                                "model": model,
-                                "choices": [
-                                    {
-                                        "index": 0,
-                                        "delta": {},
-                                        "finish_reason": finish_reason,
-                                    }
-                                ],
-                            }
-                        )
-                        sent_finish = True
-                        yield b"data: [DONE]\n\n"
-                        saw_done = True
-            except Exception as exc:
-                logger.exception(
-                    "SSE stream iteration failed for request_id '%s': %s",
-                    request_id,
-                    exc,
-                )
-                return
+                finish_reason = chunk.get("finish_reason")
+                if finish_reason:
+                    yield self._encode_sse_chunk(
+                        {
+                            "id": response_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {},
+                                    "finish_reason": finish_reason,
+                                }
+                            ],
+                        }
+                    )
+                    sent_finish = True
+                    yield b"data: [DONE]\n\n"
+                    saw_done = True
             if not saw_done:
                 if sent_role and not sent_finish:
                     yield self._encode_sse_chunk(
@@ -952,9 +1884,16 @@ class RuntimeExecutor:
                 yield b"data: [DONE]\n\n"
 
         return StreamingResponse(
-            iterator(),
+            self._observe_stream_chunks(
+                iterator(),
+                model_label=model_label,
+                stream_start_time=stream_start_time,
+            ),
             media_type="text/event-stream",
-            headers={"X-Infer-Nexus-Request-ID": request_id},
+            headers={
+                "X-Request-ID": request_id,
+                "X-Infer-Nexus-Request-ID": request_id,
+            },
         )
 
     def _build_embedding_response_from_payload(

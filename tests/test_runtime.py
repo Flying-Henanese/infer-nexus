@@ -9,6 +9,7 @@ import pytest
 from infer_nexus.catalog.loader import load_model_catalog
 from infer_nexus.catalog.models import ModelCatalogFile, ModelConfig
 from infer_nexus.catalog.registry import ModelRegistry
+from infer_nexus.core.config import Settings
 from infer_nexus.backends.vllm import DynamicVLLMOpenAIChatServingAdapter
 from infer_nexus.backends.vllm import DynamicVLLMOpenAIEmbeddingServingAdapter
 from infer_nexus.backends.vllm import OpenAIServingEngineClientCompatProxy
@@ -60,6 +61,21 @@ class FakeServe:
             return FakeBoundDeployment(kwargs, replica_cls)
 
         return wrapper
+
+
+class FakeGatewayIngressServe(FakeServe):
+    """Fake Serve surface that records the ASGI application wrapped by ingress."""
+
+    def __init__(self) -> None:
+        self.ingress_app = None
+
+    def ingress(self, app):
+        self.ingress_app = app
+
+        def wrap(replica_cls):
+            return replica_cls
+
+        return wrap
 
 
 class FakeOpenAIChatServingAdapter:
@@ -342,6 +358,45 @@ def test_build_serve_bindings_from_fake_serve(
     )
 
 
+def test_build_gateway_binding_uses_a_unique_bounded_cpu_ingress(
+    registry: ModelRegistry,
+    model_store: LocalModelStore,
+) -> None:
+    """The public Gateway is the only bounded Serve HTTP deployment."""
+    settings = Settings()
+    settings.service.name = 'infer-nexus'
+    settings.runtime.gateway_ingress.application_name = 'infer-nexus-gateway'
+    settings.runtime.gateway_ingress.num_replicas = 2
+    settings.runtime.gateway_ingress.num_cpus = 0.5
+    settings.runtime.gateway_ingress.max_ongoing_requests = 12
+    settings.runtime.gateway_ingress.max_queued_requests = 24
+    serve = FakeGatewayIngressServe()
+    builder = ServeApplicationBuilder(model_store=model_store, service_name=settings.service.name)
+
+    spec = builder.build_gateway_spec(registry, settings=settings)
+    binding = builder.build_gateway_binding(registry, settings=settings, serve=serve)
+
+    assert spec.application_name == 'infer-nexus-gateway'
+    assert spec.route_prefix == '/'
+    assert spec.model_targets['qwen3.5-27b'] == {
+        'application_name': 'infer-nexus-model-Qwen3.5-27B',
+        'deployment_name': 'model-Qwen3.5-27B',
+    }
+    assert binding['deployment_kwargs'] == {
+        'name': 'gateway',
+        'num_replicas': 2,
+        'max_ongoing_requests': 12,
+        'max_queued_requests': 24,
+        'ray_actor_options': {'num_cpus': 0.5},
+        'logging_config': {
+            'encoding': 'TEXT',
+            'log_level': 'INFO',
+            'enable_access_log': False,
+        },
+    }
+    assert serve.ingress_app is not None
+
+
 def test_build_serve_bindings_include_request_router_config_for_local_chat_model() -> None:
     """Chat deployments should forward explicit Ray request-router config to Serve."""
     builder = ServeApplicationBuilder(model_store=LocalModelStore('models'))
@@ -400,6 +455,10 @@ def test_deployment_factory_applies_llmconfig_style_overrides() -> None:
                     'target_ongoing_requests': 20,
                 },
                 'ray_actor_options': {'num_cpus': 6},
+                'serve_deployment_kwargs': {
+                    'max_queued_requests': 32,
+                    'max_ongoing_requests': 1,
+                },
             },
         )
     )
@@ -411,6 +470,17 @@ def test_deployment_factory_applies_llmconfig_style_overrides() -> None:
     }
     assert spec.ray_actor_options['num_cpus'] == 6
     assert spec.ray_actor_options['num_gpus'] == 1
+    assert spec.serve_deployment_kwargs == {
+        'max_queued_requests': 32,
+        'max_ongoing_requests': 1,
+    }
+
+    deployment_kwargs = ServeApplicationBuilder(
+        model_store=LocalModelStore('models')
+    ).deployment_factory.build_serve_deployment_kwargs(spec)
+
+    assert deployment_kwargs['max_queued_requests'] == 32
+    assert deployment_kwargs['max_ongoing_requests'] == 1
 
 
 def test_request_router_config_is_rejected_for_non_local_chat_models() -> None:

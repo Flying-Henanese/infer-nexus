@@ -1,6 +1,6 @@
 """服务健康检查路由。"""
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, Request
 
 from infer_nexus.core.schemas import HealthResponse
 
@@ -15,6 +15,9 @@ async def healthz() -> HealthResponse:
 
 
 @router.get("/readyz", response_model=HealthResponse)
-async def readyz() -> HealthResponse:
-    """就绪探针：当前阶段与健康探针一致，后续可接入依赖检查。"""
+async def readyz(request: Request) -> HealthResponse:
+    """Readiness requires every configured local model Serve app to be healthy."""
+    readiness_checker = getattr(request.app.state, "readiness_checker", None)
+    if readiness_checker is not None and not readiness_checker():
+        raise HTTPException(status_code=503, detail="one or more model Serve applications are not ready")
     return HealthResponse()

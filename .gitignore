@@ -77,3 +77,4 @@ src/infer_nexus/artifacts/**/*.pyc
 .mypy_cache/
 .dmypy.json
 dmypy.json
+benchmark-results/

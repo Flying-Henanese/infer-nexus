@@ -2,19 +2,29 @@
 
 import asyncio
 import json
+import logging
+from time import perf_counter
 
 import httpx
 import pytest
 from starlette.responses import Response
 from starlette.responses import StreamingResponse
 
+from infer_nexus.api.request_logging_middleware import _finalize
 from infer_nexus.catalog.models import ModelCatalogFile, ModelConfig
 from infer_nexus.catalog.loader import load_model_catalog
 from infer_nexus.catalog.registry import ModelRegistry
+from infer_nexus.core.config import LoggingSettings, Settings
 from infer_nexus.core.enums import BackendType, TaskType
-from infer_nexus.core.errors import RuntimeNotConnectedError
+from infer_nexus.core.errors import AdmissionRejectedError, RuntimeNotConnectedError
+from infer_nexus.core.request_context import (
+    RequestContext,
+    RequestLifecycleState,
+    bind_request_state,
+)
 from infer_nexus.core.schemas import ChatCompletionsRequest, EmbeddingRequest, RerankRequest
 from infer_nexus.model_store import LocalModelStore
+from infer_nexus.observability.metrics import render_prometheus_metrics
 from infer_nexus.runtime.dispatcher import RuntimeDispatcher
 from infer_nexus.runtime.executor import RuntimeExecutor
 from infer_nexus.runtime.handles import ServeDeploymentHandleResolver
@@ -149,6 +159,7 @@ def test_chat_stream_response_preserves_vllm_reasoning_deltas() -> None:
                 },
             ],
         },
+        stream_start_time=perf_counter(),
     )
 
     async def collect() -> bytes:
@@ -187,6 +198,7 @@ def test_chat_stream_response_forwards_raw_sse_bytes_unchanged() -> None:
         request,
         target,
         {'stream_chunks': [raw]},
+        stream_start_time=perf_counter(),
     )
 
     async def collect() -> bytes:
@@ -241,7 +253,12 @@ def test_chat_stream_response_maps_standard_delta_events_to_openai_sse() -> None
             'finish_reason': 'stop',
         }
 
-    response = executor._build_chat_stream_response(request, target, chunks())
+    response = executor._build_chat_stream_response(
+        request,
+        target,
+        chunks(),
+        stream_start_time=perf_counter(),
+    )
 
     async def collect() -> list[dict | str]:
         payloads = []
@@ -524,6 +541,42 @@ def test_dispatch_chat_uses_serve_handle_in_serve_mode() -> None:
     assert 'model-qwen3-32b-instruct' in str(response.choices[0].message.content)
 
 
+def test_dispatcher_reuses_precomputed_catalog_target() -> None:
+    """Request routing never derives Ray application names from client input."""
+    registry, _, dispatcher = make_dispatcher()
+    model = registry.get('qwen3.5-27b')
+
+    first = dispatcher.resolve_target(model)
+    second = dispatcher.resolve_target(model)
+
+    assert first is second
+    assert first.app_name == 'infer-nexus-model-Qwen3.5-27B'
+    assert first.deployment_name == 'model-Qwen3.5-27B'
+
+
+def test_dispatcher_uses_the_deployed_gateway_target_snapshot() -> None:
+    """A restarted ingress cannot reconstruct a different Serve address from mutable config."""
+    registry, store, _ = make_dispatcher()
+    builder = ServeApplicationBuilder(model_store=store)
+    snapshot = builder.build_gateway_spec(registry, settings=Settings()).model_targets
+    model = registry.list_models()[0]
+    snapshot[model.name] = {
+        "application_name": "locked-model-application",
+        "deployment_name": "locked-model-deployment",
+    }
+    dispatcher = RuntimeDispatcher(
+        registry=registry,
+        serve_builder=builder,
+        executor=RuntimeExecutor(),
+        model_targets=snapshot,
+    )
+
+    target = dispatcher.resolve_target(model)
+
+    assert target.app_name == "locked-model-application"
+    assert target.deployment_name == "locked-model-deployment"
+
+
 def test_dispatch_chat_uses_keyword_request_payload_when_invoking_serve_handle() -> None:
     """Serve chat dispatch should send request payload as an explicit keyword argument."""
     resolver = ServeDeploymentHandleResolver(serve=FakeKeywordOnlyServe())
@@ -539,6 +592,66 @@ def test_dispatch_chat_uses_keyword_request_payload_when_invoking_serve_handle()
     assert response.object == 'chat.completion'
     assert response.model == 'qwen3-chat'
     assert 'serve chat response from deployment' in str(response.choices[0].message.content)
+
+
+def test_dispatch_chat_propagates_gateway_request_context_to_serve_handle() -> None:
+    """Serve calls receive allowlisted request metadata beside the OpenAI payload."""
+    captured: dict[str, object] = {}
+
+    class CapturingMethod:
+        async def remote(self, *, request_payload, request_context):
+            captured["request_payload"] = request_payload
+            captured["request_context"] = request_context
+            return {
+                "status": "ok",
+                "model": "qwen3-chat",
+                "content": "ok",
+            }
+
+    class CapturingServe:
+        def get_deployment_handle(self, deployment_name, app_name):
+            return type(
+                "Handle",
+                (),
+                {"chat_completion": CapturingMethod()},
+            )()
+
+    executor = RuntimeExecutor(
+        mode="serve",
+        handle_resolver=ServeDeploymentHandleResolver(serve=CapturingServe()),
+    )
+    registry, _, dispatcher = make_dispatcher(executor)
+    chat_model = next(
+        model.alias or model.name
+        for model in registry.list_models()
+        if model.task is TaskType.CHAT
+    )
+    target = dispatcher.resolve_target(registry.get(chat_model))
+    request = ChatCompletionsRequest(
+        model=chat_model,
+        messages=[{"role": "user", "content": "hello"}],
+    )
+    lifecycle = RequestLifecycleState(
+        context=RequestContext(
+            request_id="req-cross-process-123",
+            method="POST",
+            route="/v1/chat/completions",
+            task="chat",
+        )
+    )
+
+    with bind_request_state(lifecycle):
+        response = asyncio.run(dispatcher.dispatch_chat(registry.get(chat_model), request))
+
+    assert response.object == "chat.completion"
+    assert captured["request_payload"]["model"] == chat_model
+    propagated = captured["request_context"]
+    assert isinstance(propagated, RequestContext)
+    assert propagated.request_id == "req-cross-process-123"
+    assert propagated.model == chat_model
+    assert propagated.backend == "vllm"
+    assert propagated.serve_app == target.app_name
+    assert propagated.deployment == target.deployment_name
 
 
 def test_dispatch_chat_passthrough_openai_payload_without_collapsing_choices() -> None:
@@ -593,6 +706,220 @@ def test_dispatch_chat_stream_uses_serve_streaming_handle_without_rewriting_requ
     assert body.endswith(b'data: [DONE]\n\n')
 
 
+def test_first_stream_chunk_failure_is_logged_before_response_creation(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Failures discovered while priming are logged before SSE headers are sent."""
+    executor = RuntimeExecutor()
+    lifecycle = RequestLifecycleState(
+        context=RequestContext(
+            request_id="req-early-stream-failure",
+            route="/v1/chat/completions",
+            stream=True,
+        )
+    )
+
+    async def failing_chunks():
+        raise RuntimeError("upstream detail must stay out of structured fields")
+        yield {}
+
+    async def prime() -> None:
+        with bind_request_state(lifecycle):
+            await executor._prime_stream_chunks(
+                failing_chunks(),
+                model_label="qwen3-chat",
+                stream_start_time=perf_counter(),
+            )
+
+    with caplog.at_level(logging.ERROR, logger="infer_nexus"):
+        with pytest.raises(RuntimeError, match="upstream detail") as exc_info:
+            asyncio.run(prime())
+        lifecycle.exception = exc_info.value
+        _finalize(lifecycle, LoggingSettings(slow_request_ms=10**9))
+
+    events = [
+        record
+        for record in caplog.records
+        if getattr(record, "structured_event", None)
+        in {"stream.failed", "request.failed"}
+    ]
+    stream_failures = [
+        record for record in events if record.structured_event == "stream.failed"
+    ]
+    request_failures = [
+        record for record in events if record.structured_event == "request.failed"
+    ]
+    assert len(stream_failures) == 1
+    assert stream_failures[0].structured_fields["error_code"] == "stream_failed"
+    assert stream_failures[0].exc_info is not None
+    assert len(request_failures) == 1
+    assert request_failures[0].exc_info is None
+    assert lifecycle.stream_terminal_logged is True
+    assert lifecycle.error_code == "stream_failed"
+
+
+@pytest.mark.parametrize(
+    ("terminal_error", "expected_event", "expected_outcome"),
+    [
+        (RuntimeError("stream interrupted"), "stream.failed", "error"),
+        (asyncio.CancelledError(), "stream.cancelled", "cancelled"),
+    ],
+)
+def test_stream_terminal_error_is_logged_once(
+    caplog: pytest.LogCaptureFixture,
+    terminal_error: BaseException,
+    expected_event: str,
+    expected_outcome: str,
+) -> None:
+    """A failure or cancellation after SSE starts has one stream terminal event."""
+    executor = RuntimeExecutor()
+    lifecycle = RequestLifecycleState(
+        context=RequestContext(
+            request_id="req-stream-terminal",
+            route="/v1/chat/completions",
+            stream=True,
+        )
+    )
+
+    async def chunks():
+        yield b"data: first\n\n"
+        raise terminal_error
+
+    async def collect() -> None:
+        with bind_request_state(lifecycle):
+            async for _ in executor._observe_stream_chunks(
+                chunks(),
+                model_label="qwen3-chat",
+                stream_start_time=perf_counter(),
+            ):
+                pass
+
+    with caplog.at_level(logging.INFO, logger="infer_nexus"):
+        with pytest.raises(type(terminal_error)):
+            asyncio.run(collect())
+
+    terminal_records = [
+        record
+        for record in caplog.records
+        if getattr(record, "structured_event", None) == expected_event
+    ]
+    assert len(terminal_records) == 1
+    assert terminal_records[0].structured_fields["outcome"] == expected_outcome
+    assert (terminal_records[0].exc_info is not None) == (expected_outcome == "error")
+    assert lifecycle.stream_terminal_logged is True
+    if expected_outcome == "cancelled":
+        assert lifecycle.outcome == "cancelled"
+    else:
+        assert lifecycle.error_code == "stream_failed"
+
+
+@pytest.mark.parametrize("failure_stage", ["priming", "streaming"])
+def test_expected_stream_timeout_is_logged_without_traceback(
+    caplog: pytest.LogCaptureFixture,
+    failure_stage: str,
+) -> None:
+    """Expected timeouts keep the stream error event but omit exception stacks."""
+    executor = RuntimeExecutor()
+    lifecycle = RequestLifecycleState(
+        context=RequestContext(
+            request_id="req-stream-timeout",
+            route="/v1/chat/completions",
+            stream=True,
+        )
+    )
+
+    async def timeout_chunks():
+        if failure_stage == "streaming":
+            yield b"data: first\n\n"
+        raise RuntimeNotConnectedError("deadline exceeded", code="upstream_timeout")
+        yield {}
+
+    async def consume() -> None:
+        with bind_request_state(lifecycle):
+            chunks = timeout_chunks()
+            if failure_stage == "priming":
+                await executor._prime_stream_chunks(
+                    chunks,
+                    model_label="qwen3-chat",
+                    stream_start_time=perf_counter(),
+                )
+                return
+            async for _ in executor._observe_stream_chunks(
+                chunks,
+                model_label="qwen3-chat",
+                stream_start_time=perf_counter(),
+            ):
+                pass
+
+    with caplog.at_level(logging.ERROR, logger="infer_nexus"):
+        with pytest.raises(RuntimeNotConnectedError):
+            asyncio.run(consume())
+
+    failures = [
+        record
+        for record in caplog.records
+        if getattr(record, "structured_event", None) == "stream.failed"
+    ]
+    assert len(failures) == 1
+    assert failures[0].structured_fields["error_code"] == "upstream_timeout"
+    assert failures[0].exc_info is None
+    assert lifecycle.stream_terminal_logged is True
+    assert lifecycle.error_code == "upstream_timeout"
+
+
+def test_streaming_handle_capability_failure_never_falls_back_to_unary_handle() -> None:
+    """A Ray Client-style stream capability error must fail before invoking the model method."""
+
+    class StreamMethod:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def remote(self, *, request_payload: dict) -> dict:
+            self.calls += 1
+            return {"status": "ok", "payload": request_payload}
+
+    class UnsupportedStreamHandle:
+        def __init__(self) -> None:
+            self.chat_completion_stream = StreamMethod()
+
+        def options(self, *, stream: bool) -> "UnsupportedStreamHandle":
+            assert stream is True
+            raise RuntimeError("stream=True is not supported over Ray Client")
+
+    class UnsupportedStreamServe:
+        def __init__(self) -> None:
+            self.handle = UnsupportedStreamHandle()
+
+        def get_deployment_handle(self, deployment_name: str, app_name: str) -> UnsupportedStreamHandle:
+            return self.handle
+
+    serve = UnsupportedStreamServe()
+    executor = RuntimeExecutor(
+        mode='serve',
+        handle_resolver=ServeDeploymentHandleResolver(serve=serve),
+    )
+    target = RuntimeTarget(
+        model_name='registered-model',
+        model_alias='registered-model',
+        backend=BackendType.VLLM,
+        app_name='infer-nexus-model-registered-model',
+        deployment_name='model-registered-model',
+        runtime_context={'served_model_name': 'registered-model'},
+    )
+
+    with pytest.raises(RuntimeNotConnectedError) as exc_info:
+        asyncio.run(
+            executor._invoke_handle_stream(
+                target=target,
+                method_name='chat_completion_stream',
+                payload={'stream': True},
+            )
+        )
+
+    assert exc_info.value.code == 'streaming_unavailable'
+    assert serve.handle.chat_completion_stream.calls == 0
+
+
 def test_dispatch_embedding_uses_serve_handle_in_serve_mode() -> None:
     """serve 模式下 embedding 分发应通过 deployment handle 执行。"""
     resolver = ServeDeploymentHandleResolver(serve=FakeServe())
@@ -643,6 +970,371 @@ def test_dispatch_raises_when_serve_mode_has_no_resolver() -> None:
 
     with pytest.raises(RuntimeNotConnectedError, match='no handle resolver'):
         asyncio.run(dispatcher.dispatch_chat(registry.get('qwen3-chat'), request))
+
+
+def test_serve_handle_resolver_caches_handles_by_app_and_deployment() -> None:
+    """Serve handles should be reused instead of fetched for every request."""
+
+    class CountingServe:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def get_deployment_handle(self, deployment_name: str, app_name: str) -> object:
+            self.calls += 1
+            return {"deployment_name": deployment_name, "app_name": app_name}
+
+    serve = CountingServe()
+    resolver = ServeDeploymentHandleResolver(serve=serve)
+
+    first = resolver.get_handle("model-qwen3", app_name="infer-nexus-model-qwen3")
+    second = resolver.get_handle("model-qwen3", app_name="infer-nexus-model-qwen3")
+
+    assert first is second
+    assert serve.calls == 1
+
+
+def test_dispatch_chat_times_out_slow_serve_handle() -> None:
+    """Serve handle calls should fail fast when the router or replica stalls."""
+
+    class SlowDeploymentMethod:
+        async def remote(self, *, request_payload: dict) -> dict:
+            await asyncio.sleep(1)
+            return {"status": "ok", "payload": request_payload}
+
+    class SlowDeploymentHandle:
+        def __init__(self) -> None:
+            self.chat_completion = SlowDeploymentMethod()
+
+    class SlowServe:
+        def get_deployment_handle(self, deployment_name: str, app_name: str) -> SlowDeploymentHandle:
+            return SlowDeploymentHandle()
+
+    resolver = ServeDeploymentHandleResolver(serve=SlowServe())
+    executor = RuntimeExecutor(
+        mode='serve',
+        handle_resolver=resolver,
+        serve_request_timeout_seconds=0.01,
+    )
+    request = ChatCompletionsRequest(
+        model='qwen3-chat',
+        messages=[{'role': 'user', 'content': 'hello'}],
+    )
+    target = RuntimeTarget(
+        model_name='qwen3-32b-instruct',
+        model_alias='qwen3-chat',
+        backend=BackendType.VLLM,
+        app_name='infer-nexus-model-qwen3-32b-instruct',
+        deployment_name='model-qwen3-32b-instruct',
+        runtime_context={'served_model_name': 'qwen3-chat'},
+    )
+
+    with pytest.raises(RuntimeNotConnectedError) as exc_info:
+        asyncio.run(executor.execute_chat(target=target, request=request))
+
+    assert exc_info.value.code == 'upstream_timeout'
+
+
+def test_dispatch_chat_rejects_when_gateway_inflight_limit_is_reached() -> None:
+    """Gateway-side inflight limits should reject excess requests before Serve routing."""
+
+    async def run_case() -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        class BlockingDeploymentMethod:
+            async def remote(self, *, request_payload: dict) -> dict:
+                started.set()
+                await release.wait()
+                return {"status": "ok", "payload": request_payload}
+
+        class BlockingDeploymentHandle:
+            def __init__(self) -> None:
+                self.chat_completion = BlockingDeploymentMethod()
+
+        class BlockingServe:
+            def get_deployment_handle(self, deployment_name: str, app_name: str) -> BlockingDeploymentHandle:
+                return BlockingDeploymentHandle()
+
+        resolver = ServeDeploymentHandleResolver(serve=BlockingServe())
+        executor = RuntimeExecutor(
+            mode='serve',
+            handle_resolver=resolver,
+            max_inflight_per_model=1,
+        )
+        request = ChatCompletionsRequest(
+            model='qwen3-chat',
+            messages=[{'role': 'user', 'content': 'hello'}],
+        )
+        target = RuntimeTarget(
+            model_name='qwen3-32b-instruct',
+            model_alias='qwen3-chat',
+            backend=BackendType.VLLM,
+            app_name='infer-nexus-model-qwen3-32b-instruct',
+            deployment_name='model-qwen3-32b-instruct',
+            runtime_context={'served_model_name': 'qwen3-chat'},
+        )
+
+        first_task = asyncio.create_task(executor.execute_chat(target=target, request=request))
+        await started.wait()
+        with pytest.raises(AdmissionRejectedError) as exc_info:
+            await executor.execute_chat(target=target, request=request)
+        release.set()
+        await first_task
+
+        assert exc_info.value.code == 'gateway_overloaded'
+
+    asyncio.run(run_case())
+
+
+def test_dispatch_chat_opens_circuit_after_repeated_serve_timeouts(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Repeated Serve timeouts should open the deployment circuit breaker."""
+
+    class SlowDeploymentMethod:
+        async def remote(self, *, request_payload: dict) -> dict:
+            await asyncio.sleep(1)
+            return {"status": "ok", "payload": request_payload}
+
+    class SlowDeploymentHandle:
+        def __init__(self) -> None:
+            self.chat_completion = SlowDeploymentMethod()
+
+    class SlowServe:
+        def get_deployment_handle(self, deployment_name: str, app_name: str) -> SlowDeploymentHandle:
+            return SlowDeploymentHandle()
+
+    async def run_case() -> None:
+        resolver = ServeDeploymentHandleResolver(serve=SlowServe())
+        executor = RuntimeExecutor(
+            mode='serve',
+            handle_resolver=resolver,
+            serve_request_timeout_seconds=0.01,
+            circuit_breaker_enabled=True,
+            circuit_breaker_failure_threshold=1,
+            circuit_breaker_cooldown_seconds=60,
+        )
+        request = ChatCompletionsRequest(
+            model='qwen3-chat',
+            messages=[{'role': 'user', 'content': 'hello'}],
+        )
+        target = RuntimeTarget(
+            model_name='qwen3-32b-instruct',
+            model_alias='qwen3-chat',
+            backend=BackendType.VLLM,
+            app_name='infer-nexus-model-qwen3-32b-instruct',
+            deployment_name='model-qwen3-32b-instruct',
+            runtime_context={'served_model_name': 'qwen3-chat'},
+        )
+
+        with pytest.raises(RuntimeNotConnectedError) as timeout_info:
+            await executor.execute_chat(target=target, request=request)
+        with pytest.raises(RuntimeNotConnectedError) as circuit_info:
+            await executor.execute_chat(target=target, request=request)
+
+        assert timeout_info.value.code == 'upstream_timeout'
+        assert circuit_info.value.code == 'runtime_circuit_open'
+
+    asyncio.run(run_case())
+
+    failure_events = [
+        record
+        for record in caplog.records
+        if getattr(record, "structured_event", None) == "runtime.call.failed"
+    ]
+    assert [record.structured_fields["error_code"] for record in failure_events] == [
+        "upstream_timeout",
+        "runtime_circuit_open",
+    ]
+
+
+def test_dispatch_chat_uses_bounded_gateway_queue_before_serve_routing() -> None:
+    """Gateway-local model queues should absorb only a bounded request burst."""
+
+    async def run_case() -> None:
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        call_count = 0
+
+        class BlockingDeploymentMethod:
+            async def remote(self, *, request_payload: dict) -> dict:
+                nonlocal call_count
+                call_count += 1
+                if call_count == 1:
+                    first_started.set()
+                    await release_first.wait()
+                return {"status": "ok", "payload": request_payload}
+
+        class BlockingDeploymentHandle:
+            def __init__(self) -> None:
+                self.chat_completion = BlockingDeploymentMethod()
+
+        class BlockingServe:
+            def __init__(self) -> None:
+                self.handle = BlockingDeploymentHandle()
+
+            def get_deployment_handle(self, deployment_name: str, app_name: str) -> BlockingDeploymentHandle:
+                return self.handle
+
+        resolver = ServeDeploymentHandleResolver(serve=BlockingServe())
+        executor = RuntimeExecutor(
+            mode='serve',
+            handle_resolver=resolver,
+            max_inflight_per_model=1,
+            max_queued_per_model=1,
+            admission_queue_timeout_seconds=1,
+        )
+        request = ChatCompletionsRequest(
+            model='qwen3-chat',
+            messages=[{'role': 'user', 'content': 'hello'}],
+        )
+        target = RuntimeTarget(
+            model_name='qwen3-32b-instruct',
+            model_alias='qwen3-chat',
+            backend=BackendType.VLLM,
+            app_name='infer-nexus-model-qwen3-32b-instruct',
+            deployment_name='model-qwen3-32b-instruct',
+            runtime_context={'served_model_name': 'qwen3-chat'},
+        )
+
+        first_task = asyncio.create_task(executor.execute_chat(target=target, request=request))
+        await first_started.wait()
+        queued_task = asyncio.create_task(executor.execute_chat(target=target, request=request))
+        await asyncio.sleep(0)
+
+        with pytest.raises(AdmissionRejectedError) as exc_info:
+            await executor.execute_chat(target=target, request=request)
+
+        release_first.set()
+        await first_task
+        await queued_task
+
+        assert exc_info.value.code == 'gateway_queue_full'
+
+    asyncio.run(run_case())
+
+
+def test_dispatch_chat_stream_uses_idle_timeout_instead_of_total_timeout() -> None:
+    """Streaming Serve calls should fail only when chunks stop arriving."""
+
+    class SlowStreamMethod:
+        def remote(self, *, request_payload: dict):
+            async def iterator():
+                await asyncio.sleep(1)
+                yield {"type": "chat_delta", "delta_text": "late"}
+
+            return iterator()
+
+    class SlowStreamHandle:
+        def __init__(self) -> None:
+            self.chat_completion_stream = SlowStreamMethod()
+
+        def options(self, *, stream: bool) -> "SlowStreamHandle":
+            assert stream is True
+            return self
+
+    class SlowStreamServe:
+        def get_deployment_handle(self, deployment_name: str, app_name: str) -> SlowStreamHandle:
+            return SlowStreamHandle()
+
+    async def run_case() -> None:
+        resolver = ServeDeploymentHandleResolver(serve=SlowStreamServe())
+        executor = RuntimeExecutor(
+            mode='serve',
+            handle_resolver=resolver,
+            serve_request_timeout_seconds=30,
+            serve_stream_idle_timeout_seconds=0.01,
+        )
+        request = ChatCompletionsRequest(
+            model='qwen3-chat',
+            messages=[{'role': 'user', 'content': 'hello'}],
+            stream=True,
+        )
+        target = RuntimeTarget(
+            model_name='qwen3-32b-instruct',
+            model_alias='qwen3-chat',
+            backend=BackendType.VLLM,
+            app_name='infer-nexus-model-qwen3-32b-instruct',
+            deployment_name='model-qwen3-32b-instruct',
+            runtime_context={'served_model_name': 'qwen3-chat'},
+        )
+
+        with pytest.raises(RuntimeNotConnectedError) as exc_info:
+            await executor.execute_chat(target=target, request=request)
+
+        assert exc_info.value.code == 'upstream_timeout'
+
+    asyncio.run(run_case())
+
+
+def test_runtime_worker_client_delegates_serve_chat_without_direct_handle() -> None:
+    """Configured runtime workers should own Serve execution instead of the HTTP executor."""
+
+    class FakeWorkerClient:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def chat_completion(self, *, target: RuntimeTarget, request: ChatCompletionsRequest):
+            self.calls.append((target.deployment_name, request.model))
+            return Response(content=b'worker-ok', media_type='text/plain')
+
+    worker = FakeWorkerClient()
+    executor = RuntimeExecutor(mode='serve', runtime_worker_client=worker)
+    request = ChatCompletionsRequest(
+        model='qwen3-chat',
+        messages=[{'role': 'user', 'content': 'hello'}],
+    )
+    target = RuntimeTarget(
+        model_name='qwen3-32b-instruct',
+        model_alias='qwen3-chat',
+        backend=BackendType.VLLM,
+        app_name='infer-nexus-model-qwen3-32b-instruct',
+        deployment_name='model-qwen3-32b-instruct',
+        runtime_context={'served_model_name': 'qwen3-chat'},
+    )
+
+    response = asyncio.run(executor.execute_chat(target=target, request=request))
+
+    assert isinstance(response, Response)
+    assert response.body == b'worker-ok'
+    assert worker.calls == [('model-qwen3-32b-instruct', 'qwen3-chat')]
+
+
+def test_gateway_runtime_metrics_render_after_serve_call() -> None:
+    """Serve handle health metrics should be visible through Prometheus rendering."""
+
+    class FastDeploymentMethod:
+        async def remote(self, *, request_payload: dict) -> dict:
+            return {"status": "ok", "payload": request_payload}
+
+    class FastDeploymentHandle:
+        def __init__(self) -> None:
+            self.chat_completion = FastDeploymentMethod()
+
+    class FastServe:
+        def get_deployment_handle(self, deployment_name: str, app_name: str) -> FastDeploymentHandle:
+            return FastDeploymentHandle()
+
+    resolver = ServeDeploymentHandleResolver(serve=FastServe())
+    executor = RuntimeExecutor(mode='serve', handle_resolver=resolver, max_inflight_per_model=1)
+    request = ChatCompletionsRequest(
+        model='qwen3-chat',
+        messages=[{'role': 'user', 'content': 'hello'}],
+    )
+    target = RuntimeTarget(
+        model_name='qwen3-32b-instruct',
+        model_alias='qwen3-chat',
+        backend=BackendType.VLLM,
+        app_name='infer-nexus-model-qwen3-32b-instruct',
+        deployment_name='model-qwen3-32b-instruct',
+        runtime_context={'served_model_name': 'qwen3-chat'},
+    )
+
+    asyncio.run(executor.execute_chat(target=target, request=request))
+
+    metrics = render_prometheus_metrics()[0].decode("utf-8")
+    assert 'infer_nexus_serve_handle_calls_total{model="qwen3-chat",method="chat_completion",status="success"}' in metrics
+    assert 'infer_nexus_model_inflight{model="qwen3-chat"}' in metrics
 
 
 def _build_proxy_dispatcher() -> tuple[ModelRegistry, RuntimeDispatcher]:

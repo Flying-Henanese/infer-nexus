@@ -6,10 +6,26 @@ Loads service host/port from settings and allows CLI overrides for local runs.
 from __future__ import annotations
 
 import argparse
+import os
 
 import uvicorn
 
 from infer_nexus.core.config import load_settings
+
+
+def describe_gateway_capacity(*, workers: int, per_worker_limit: int) -> str:
+    """Describe process-local and theoretical aggregate admission capacity."""
+    if per_worker_limit <= 0:
+        per_worker = "unlimited"
+        aggregate = "unlimited"
+    else:
+        per_worker = str(per_worker_limit)
+        aggregate = str(workers * per_worker_limit)
+    return (
+        f"Gateway shared listener: workers={workers}, "
+        f"per_worker_max_inflight={per_worker}, "
+        f"theoretical_aggregate_max_inflight={aggregate}"
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -36,6 +52,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Enable Uvicorn reload mode for local development.",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="Number of Uvicorn worker processes for the gateway.",
+    )
     return parser.parse_args()
 
 
@@ -43,11 +65,22 @@ def main() -> None:
     """Run the gateway app entrypoint with resolved host/port."""
     args = parse_args()
     settings = load_settings(args.settings)
+    workers = args.workers or settings.service.workers
+    if args.reload and workers != 1:
+        raise SystemExit("--reload cannot be used with multiple gateway workers.")
+    os.environ["INFER_NEXUS_SETTINGS"] = args.settings
+    print(
+        describe_gateway_capacity(
+            workers=workers,
+            per_worker_limit=settings.runtime.gateway_worker_max_inflight,
+        )
+    )
     uvicorn.run(
         "infer_nexus.main:app",
         host=args.host or settings.service.host,
         port=args.port or settings.service.port,
         reload=args.reload,
+        workers=workers,
     )
 
 

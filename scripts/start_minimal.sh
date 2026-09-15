@@ -8,13 +8,14 @@ set -euo pipefail
 # 2. optionally install / sync dependencies with uv
 # 3. ensure a Ray head is available, starting one if needed
 # 4. deploy the Serve runtime process
-# 5. launch the FastAPI gateway
+# 5. verify the Ray Serve Gateway ingress
 #
 # Keeping these steps in one place makes local bring-up reproducible and also
 # gives us a single log/pid directory to inspect when something fails.
 #
-# Logs:   .infer-nexus/logs/{ray,serve_runtime,gateway}.log
-# PIDs:   .infer-nexus/pids/{serve_runtime,gateway}.pid
+# Logs:   .infer-nexus/logs/{ray_bootstrap,serve_runtime}.log
+# Ray:    .infer-nexus/ray/session_latest/logs/
+# PIDs:   .infer-nexus/pids/{serve_runtime}.pid
 # Status: .infer-nexus/STATUS
 
 # Resolve the repository root relative to this script so the command works
@@ -26,6 +27,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STATE_DIR="${ROOT_DIR}/.infer-nexus"
 LOG_DIR="${STATE_DIR}/logs"
 PID_DIR="${STATE_DIR}/pids"
+RAY_TEMP_DIR="${STATE_DIR}/ray"
 
 # This file records whether the current script invocation started Ray itself.
 # That makes it easier for downstream tooling to understand who owns the head.
@@ -34,11 +36,9 @@ RAY_STATE_FILE="${STATE_DIR}/ray_state.env"
 # Default runtime settings and startup behavior.
 SETTINGS="config/settings.yaml"
 RAY_ADDRESS="auto"
-PROXY_LOCATION="Disabled"
+PROXY_LOCATION="HeadOnly"
 INSTALL=1
-RELOAD=0
-CUDA_VISIBLE_DEVICES_VALUE="0,1,2,3"
-NUM_GPUS="4"
+CUDA_VISIBLE_DEVICES_VALUE="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 RAY_BIN="${RAY_BIN:-ray}"
 UV_BIN="${UV_BIN:-uv}"
@@ -52,18 +52,17 @@ Options:
   --no-install               Skip dependency sync before startup
   --install-artifacts        Also install the optional artifacts extra
   --ray-address ADDR         Ray address passed to the Serve runtime launcher
-  --num-gpus N               GPU count for a locally started Ray head
   --cuda-visible-devices CSV Export CUDA_VISIBLE_DEVICES before starting Ray/runtime
   --proxy-location VALUE     Ray Serve proxy location setting
-  --reload                   Enable uvicorn reload for the gateway
   -h, --help                 Show this help
 
 Examples:
-  scripts/start_minimal.sh --cuda-visible-devices 0,1,2,3 --num-gpus 4
+  scripts/start_minimal.sh --cuda-visible-devices 0,1,2,3
   scripts/start_minimal.sh --no-install --ray-address auto
 
 Environment overrides:
-  PYTHON_BIN=/path/to/python  Python interpreter for gateway and Serve runtime
+  CUDA_VISIBLE_DEVICES=0,1,2,3  GPU pool boundary; Ray GPU count is derived from this list
+  PYTHON_BIN=/path/to/python  Python interpreter for Serve runtime
   RAY_BIN=/path/to/ray        Ray CLI used for `ray status` and `ray start`
   UV_BIN=/path/to/uv          uv binary used only for optional dependency sync
 EOF
@@ -84,15 +83,15 @@ while [[ $# -gt 0 ]]; do
     --install-artifacts) INSTALL_ARTIFACTS=1; shift;;
     # Override the Ray address passed into the runtime launcher.
     --ray-address) RAY_ADDRESS="$2"; shift 2;;
-    # Set the GPU count for a locally spawned Ray head.
-    --num-gpus) NUM_GPUS="$2"; shift 2;;
+    --num-gpus)
+      echo "--num-gpus is no longer supported. Set --cuda-visible-devices or CUDA_VISIBLE_DEVICES instead." >&2
+      exit 2
+      ;;
     # Export CUDA_VISIBLE_DEVICES before Ray starts so both Ray and the
     # runtime see the same GPU subset.
     --cuda-visible-devices) CUDA_VISIBLE_DEVICES_VALUE="$2"; shift 2;;
     # Forward the proxy location to the Serve runtime launcher.
     --proxy-location) PROXY_LOCATION="$2"; shift 2;;
-    # Developer convenience: turn on hot-reload for the gateway process.
-    --reload) RELOAD=1; shift;;
     # Standard help flag.
     -h|--help) usage; exit 0;;
     # Fail fast on unknown flags so typos do not silently change behavior.
@@ -102,7 +101,7 @@ done
 
 # Create the local state directories up front so later commands can write logs,
 # pid files, and status markers without extra checks.
-mkdir -p "${LOG_DIR}" "${PID_DIR}"
+mkdir -p "${LOG_DIR}" "${PID_DIR}" "${RAY_TEMP_DIR}"
 
 # Clear the Ray ownership marker from previous runs. It will be recreated if
 # this invocation launches Ray itself.
@@ -111,10 +110,48 @@ rm -f "${RAY_STATE_FILE}"
 # Switch to repo root so all subsequent relative paths match the project layout.
 cd "${ROOT_DIR}"
 
+# Bound Ray's rotating component logs and keep C++ system records structured.
+RAY_LOGGING_CONFIG_ENCODING_DEFAULT=TEXT
+RAY_BACKEND_LOG_JSON_DEFAULT=0
+if [[ "${SETTINGS}" == *settings.compose.yaml ]] || [[ "${SETTINGS}" == *settings.ascend-compose.yaml ]]; then
+  RAY_LOGGING_CONFIG_ENCODING_DEFAULT=JSON
+  RAY_BACKEND_LOG_JSON_DEFAULT=1
+fi
+RAY_LOGGING_CONFIG_ENCODING="${RAY_LOGGING_CONFIG_ENCODING:-${RAY_LOGGING_CONFIG_ENCODING_DEFAULT}}"
+RAY_BACKEND_LOG_JSON="${RAY_BACKEND_LOG_JSON:-${RAY_BACKEND_LOG_JSON_DEFAULT}}"
+export RAY_LOGGING_CONFIG_ENCODING RAY_BACKEND_LOG_JSON
+export RAY_ROTATION_MAX_BYTES="${RAY_ROTATION_MAX_BYTES:-52428800}"
+export RAY_ROTATION_BACKUP_COUNT="${RAY_ROTATION_BACKUP_COUNT:-3}"
+
 # If the caller supplied a GPU allowlist, export it before starting any process.
-# This keeps the Ray head, Serve runtime, and gateway aligned on the same device set.
+# This keeps the Ray head and Serve runtime aligned on the same device set.
 if [[ -n "${CUDA_VISIBLE_DEVICES_VALUE}" ]]; then
   export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES_VALUE}"
+fi
+
+count_csv_items() {
+  local value="$1"
+  local count=0
+  local item
+  IFS=',' read -ra items <<<"${value}"
+  for item in "${items[@]}"; do
+    item="${item//[[:space:]]/}"
+    if [[ -n "${item}" ]]; then
+      count=$((count + 1))
+    fi
+  done
+  printf '%s\n' "${count}"
+}
+
+if [[ -z "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+  echo "CUDA_VISIBLE_DEVICES must define the infer-nexus GPU pool, for example: 0,1,2,3." >&2
+  exit 1
+fi
+
+NUM_GPUS="$(count_csv_items "${CUDA_VISIBLE_DEVICES}")"
+if [[ "${NUM_GPUS}" -le 0 ]]; then
+  echo "CUDA_VISIBLE_DEVICES must contain at least one device id." >&2
+  exit 1
 fi
 
 # Optionally sync the project environment before startup.
@@ -131,7 +168,7 @@ if [[ "${INSTALL}" -eq 1 ]]; then
   fi
 fi
 
-# The runtime launcher and gateway should both use the same selected Python interpreter.
+# The runtime launcher uses the selected Python interpreter.
 if ! "${PYTHON_BIN}" -V >/dev/null 2>&1; then
   echo "Configured PYTHON_BIN='${PYTHON_BIN}' is not executable." >&2
   exit 1
@@ -140,6 +177,11 @@ fi
 # Ray is a hard dependency for the runtime deployment step.
 if ! "${RAY_BIN}" --version >/dev/null 2>&1; then
   echo "Configured RAY_BIN='${RAY_BIN}' is not executable. Did you install ray in the selected environment?" >&2
+  exit 1
+fi
+
+if ! command -v curl >/dev/null 2>&1; then
+  echo "Missing 'curl' for the Serve Gateway ingress health check." >&2
   exit 1
 fi
 
@@ -166,15 +208,14 @@ EOF
 
   # Build the `ray start` argument list incrementally so we only pass flags
   # that are relevant for this invocation.
-  local args=(start --head --disable-usage-stats)
-  if [[ -n "${NUM_GPUS}" ]]; then
-    args+=(--num-gpus "${NUM_GPUS}")
-  fi
+  local args=(start --head --disable-usage-stats --temp-dir "${RAY_TEMP_DIR}")
+  args+=(--num-gpus "${NUM_GPUS}")
 
-  # Ray prints useful diagnostics during startup; capture them in the Ray log.
+  # This captures CLI startup output only. Ray's process logs live under the
+  # session directory rooted at RAY_TEMP_DIR.
   # Note: Ray daemonizes, so the command itself returns quickly after spawn.
-  (exec "${RAY_BIN}" "${args[@]}" >"${LOG_DIR}/ray.log" 2>&1) || {
-    echo "Failed to start Ray head. See ${LOG_DIR}/ray.log" >&2
+  (exec "${RAY_BIN}" "${args[@]}" >"${LOG_DIR}/ray_bootstrap.log" 2>&1) || {
+    echo "Failed to start Ray head. See ${LOG_DIR}/ray_bootstrap.log" >&2
     exit 1
   }
 
@@ -192,12 +233,12 @@ EOF
     sleep 0.25
   done
 
-  echo "Ray did not become ready in time. See ${LOG_DIR}/ray.log" >&2
+  echo "Ray did not become ready in time. See ${LOG_DIR}/ray_bootstrap.log" >&2
   exit 1
 }
 
 # Check whether a pid file points at a currently live process.
-# We use pid files for the long-running gateway and the serve-runtime launcher.
+# We use a pid file only for the one-shot Serve runtime launcher.
 pid_is_running() {
   local pid_file="$1"
   [[ -f "${pid_file}" ]] || return 1
@@ -234,13 +275,28 @@ write_status() {
   printf '%s\n' "${msg}" >"${STATE_DIR}/STATUS"
 }
 
+print_ray_session_log_path() {
+  local temp_root
+  for temp_root in "${RAY_TEMP_DIR}" "${RAY_TMPDIR:-}"; do
+    [[ -n "${temp_root}" ]] || continue
+    if [[ -d "${temp_root}/session_latest/logs" ]]; then
+      echo "Ray session logs: ${temp_root}/session_latest/logs"
+      return 0
+    fi
+  done
+  if [[ "${RAY_ADDRESS}" == "auto" && -d "/tmp/ray/session_latest/logs" ]]; then
+    echo "Ray session logs: /tmp/ray/session_latest/logs"
+    return 0
+  fi
+  echo "Ray session logs: no local session found (Ray may be externally managed)"
+}
+
 # Ensure the Ray head exists before launching anything that depends on it.
 start_ray_head_if_needed
 
 # Track the two background processes separately so we can detect and reuse
 # already-running instances on subsequent invocations.
 SERVE_PID_FILE="${PID_DIR}/serve_runtime.pid"
-GATEWAY_PID_FILE="${PID_DIR}/gateway.pid"
 
 STARTED_SERVE_RUNTIME=0
 
@@ -270,20 +326,25 @@ if [[ "${STARTED_SERVE_RUNTIME}" -eq 1 ]]; then
   fi
 fi
 
-# The gateway is a long-lived HTTP process. Reuse it if it is already alive;
-# otherwise start a new one and leave it running in the background.
-if pid_is_running "${GATEWAY_PID_FILE}"; then
-  echo "Gateway already running (pid $(cat "${GATEWAY_PID_FILE}"))."
-else
-  # Build the gateway command first so we can add `--reload` only when asked.
-  gateway_args=("${PYTHON_BIN}" scripts/run_gateway.py --settings "${SETTINGS}")
-  if [[ "${RELOAD}" -eq 1 ]]; then
-    gateway_args+=(--reload)
-  fi
+wait_for_serve_gateway_ready() {
+  local timeout_seconds="$1"
+  local waited=0
 
-  # Start the gateway in the background and capture its stdout/stderr in a log.
-  (exec "${gateway_args[@]}") >"${LOG_DIR}/gateway.log" 2>&1 &
-  echo $! >"${GATEWAY_PID_FILE}"
+  while [[ "${waited}" -lt "${timeout_seconds}" ]]; do
+    if curl --fail --silent --show-error --max-time 1 \
+      "http://127.0.0.1:8000/readyz" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+
+  echo "Timed out waiting for the Serve Gateway ingress. See ${LOG_DIR}/serve_runtime.log" >&2
+  return 1
+}
+
+if ! wait_for_serve_gateway_ready 120; then
+  exit 1
 fi
 
 # Publish the overall status for any wrapper scripts or tooling watching the
@@ -292,7 +353,9 @@ write_status "started"
 
 echo "Started."
 echo "Logs: ${LOG_DIR}"
+print_ray_session_log_path
 echo "PIDs: ${PID_DIR}"
+echo "Public API: Ray Serve Gateway ingress (HeadOnly proxy)"
 echo "Try:"
 echo "  curl http://127.0.0.1:8000/healthz"
 echo "  curl http://127.0.0.1:8000/v1/models"

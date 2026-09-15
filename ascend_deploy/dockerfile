@@ -3,7 +3,7 @@
 # 基础镜像：默认 mineru:npu-latest，由 docker load 命令导入。
 # 导入所用的 tar 包来源于 https://atomgit.com/Ascend-SACT/Mineru-Optimization.git 仓库中的镜像 mineru-ascend.tar。
 # 如果部署侧换成 vLLM 官方昇腾镜像，可以通过 ASCEND_BASE_IMAGE 覆盖；镜像内自带的 Python / torch / vLLM / vLLM-Ascend 栈必须保持不被覆盖。
-ARG ASCEND_BASE_IMAGE=quay.m.daocloud.io/ascend/vllm-ascend:v0.18.0
+ARG ASCEND_BASE_IMAGE=quay.io/ascend/vllm-ascend:v0.23.0
 ARG UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
 ARG APP_USER=infer-nexus
 ARG APP_UID=10001
@@ -73,13 +73,16 @@ RUN python -m pip install --no-cache-dir uv -i ${UV_INDEX_URL} \
     && uv pip compile pyproject.toml \
         --extra artifacts \
         --output-file requirements.txt \
-    && sed -i -E '/^(torch|torch-npu|torchaudio|torchvision|transformers|vllm|vllm-ascend|huggingface-hub)([[:space:]=<>!~]|$)/Id' requirements.txt \
+    && sed -i -E '/^(torch|torch-npu|torchaudio|torchvision|transformers|vllm|vllm-ascend|huggingface-hub|fastapi|starlette|uvicorn|httpx|anyio|pydantic|ray)([[:space:]=<>!~]|$)/Id' requirements.txt \
     && uv pip install --system --no-cache -r requirements.txt
 
 RUN groupadd --gid ${APP_GID} ${APP_USER} \
     && useradd --uid ${APP_UID} --gid ${APP_GID} --create-home --home-dir /home/${APP_USER} --shell /usr/sbin/nologin ${APP_USER} \
     && mkdir -p /app /models /tmp/ray /home/${APP_USER}/.cache/huggingface /home/${APP_USER}/.cache/modelscope /home/${APP_USER}/.cache/vllm \
     && chown -R ${APP_UID}:${APP_GID} /app /models /tmp/ray /home/${APP_USER}
+
+# vllm-ascend 自定义算子包默认以 root 权限安装，非 root 运行用户加载 vendor 算子会被拒
+RUN chmod -R a+rX /vllm-workspace/vllm-ascend/vllm_ascend/_cann_ops_custom
 
 USER ${APP_USER}
 

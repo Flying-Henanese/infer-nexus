@@ -40,10 +40,10 @@ runtime:
   serve_request_timeout_seconds: 120
   serve_stream_idle_timeout_seconds: 30
   serve_stream_max_lifetime_seconds: 900
-  max_inflight_per_model: 4
+  max_inflight_per_model: 20
   max_streaming_inflight_per_model: 0
   max_non_streaming_inflight_per_model: 0
-  max_queued_per_model: 0
+  max_queued_per_model: 10
   admission_acquire_timeout_seconds: 0
   admission_queue_timeout_seconds: 0
   circuit_breaker_enabled: false

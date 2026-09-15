@@ -8,6 +8,7 @@ Run explicitly against the pinned Ray runtime:
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import socket
 import time
@@ -39,18 +40,22 @@ def _ray_log_contains(
     log_paths: list[Path],
     request_id: str,
     *,
-    event: str | None = None,
+    route: str | None = None,
 ) -> bool:
     for path in log_paths:
         try:
             lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError:
             continue
-        if any(
-            request_id in line and (event is None or event in line)
-            for line in lines
-        ):
-            return True
+        for line in lines:
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(record, dict) or record.get("request_id") != request_id:
+                continue
+            if route is None or record.get("route") == route:
+                return True
     return False
 
 
@@ -375,5 +380,5 @@ def test_real_gateway_ingress_reuses_fastapi_without_ray_client(tmp_path: Path) 
     assert _ray_log_contains(
         list(serve_log_dir.glob(f"replica_{spec.application_name}_gateway_*.log")),
         streamed_request_id,
-        event="request.completed",
-    ), "Gateway request.completed log should carry the same canonical request ID"
+        route="/v1/chat/completions",
+    ), "Gateway application log should carry the same canonical request ID"

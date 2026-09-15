@@ -16,7 +16,9 @@ Use this file to orient yourself before tracing request behavior. Verify details
 
 1. `docker-compose.yml` starts `ray-head`.
 2. `ray-worker` joins the Ray cluster and registers the accelerator budget exposed by the Compose/runtime environment.
-3. `serve-deployer` runs `scripts/run_serve_runtime.py --settings config/settings.compose.yaml`, submits Ray Serve apps, waits for readiness, and exits.
+3. `serve-deployer` runs `scripts/run_serve_runtime.py --settings config/settings.compose.yaml`;
+   the runner installs `RequestIdProxyMiddleware` in Ray HTTP options before
+   submitting Serve apps, waits for readiness, and exits.
 4. `serve-deployer` deploys the CPU-only `infer-nexus-gateway` application after all model applications are healthy.
 5. `ray-head:8000` exposes the Serve HTTP proxy; Gateway ingress reaches local models through cached Ray Serve deployment handles.
 
@@ -55,7 +57,11 @@ Use this file to orient yourself before tracing request behavior. Verify details
 
 ## `/v1/chat/completions`
 
-1. `RequestLoggingMiddleware` runs outside worker admission. It validates or creates the canonical request ID, binds request context, and ensures every response includes `X-Request-ID`.
+1. On the Ray Serve HTTP path, `RequestIdProxyMiddleware` validates or replaces
+   inbound `X-Request-ID` before Ray's built-in middleware captures it.
+   `RequestLoggingMiddleware` then uses the same proxy-owned ID outside worker
+   admission. Direct Uvicorn runs validate or create the ID in
+   `RequestLoggingMiddleware`.
 2. `WorkerAdmissionMiddleware` may acquire a process-local gateway slot. If full, it emits `admission.rejected`; the outer lifecycle still records the 503 request terminal event and request ID.
 3. `api/openai_routes.py:create_chat_completion()` receives a `ChatCompletionsRequest`, resolves `request.model` through `ModelRegistry`, and requires `task: chat`.
 4. `_check_model_ready()` validates local model artifacts for non-proxy models and runs admission checks.

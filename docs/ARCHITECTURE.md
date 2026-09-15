@@ -52,10 +52,17 @@ Implemented:
   use readable console output; deployed JSON settings use one-record-per-line
   JSON. Both Compose profiles select JSON. Ray Core/Serve and vLLM have private
   adapters to align their logging with the selected profile.
-- An outer ASGI request lifecycle middleware validates or creates one request
-  ID, returns it in `X-Request-ID`, and keeps request context through streamed
-  response completion. The ID is passed to local model Serve replicas and to
-  proxy upstreams when the model's header policy enables request-ID forwarding.
+- In Serve mode, the Ray HTTP proxy installs a request-ID normalization
+  middleware before Ray's built-in request-ID middleware. It keeps one valid
+  inbound ID or replaces a missing, invalid, or duplicated value with a UUID.
+  The outer ASGI request lifecycle then uses the same proxy-owned ID, keeps its
+  context through streamed response completion, and passes it to local model
+  Serve replicas and proxy upstreams when enabled by the model header policy.
+  This proxy-boundary integration depends on `HTTPOptions.middlewares`, so the
+  Serve extra constrains Ray to `<2.58`; Ray 2.58 removed this option. Revisit
+  the boundary adapter before raising that cap.
+- Direct Uvicorn runs validate or generate the request ID in the outer ASGI
+  request lifecycle middleware and return it in `X-Request-ID`.
 - Local scripts expose Ray session logs under `.infer-nexus/ray/`; Compose
   gives the head, worker, and deployer separate named `/tmp/ray` volumes.
 
@@ -1049,13 +1056,19 @@ Current implementation status:
   Serve app/deployment, outcome, status, duration, and stable error code. The
   formatter redacts known sensitive field names and serializes exceptions
   inside a single record.
-- Request IDs are selected in this order: validated inbound `X-Request-ID`,
-  Ray Serve's request ID when available, then a generated UUID. Every response
-  receives `X-Request-ID`; streaming responses also carry the compatibility
-  header `X-Infer-Nexus-Request-ID`. The same allowlisted context is sent beside
+- In Serve mode, `RequestIdProxyMiddleware` runs before Ray's built-in
+  `RequestIdMiddleware`; it validates a single inbound `X-Request-ID` or
+  replaces a missing, invalid, or duplicated value with a UUID. Ray then owns
+  the canonical response header, so the ASGI lifecycle does not add a competing
+  `X-Request-ID`. Direct Uvicorn runs validate or generate the ID in the ASGI
+  lifecycle. Streaming responses also carry the compatibility header
+  `X-Infer-Nexus-Request-ID`. The same allowlisted context is sent beside
   internal Serve handle payloads and bound in model replicas. Proxy upstream
   requests receive `X-Request-ID` when `headers_policy.pass_request_id` is
-  enabled (it defaults to true).
+  enabled (it defaults to true). This uses Ray Serve's proxy-level
+  `HTTPOptions.middlewares`; the `serve` extra is capped below Ray 2.58, where
+  Ray removed that option. Revisit the proxy-boundary adapter before raising
+  the dependency cap.
 - The Gateway lifecycle owns one terminal `request.completed` or
   `request.failed` event per HTTP request. A streamed request also has one
   stream sub-lifecycle event (`stream.completed`, `stream.failed`, or

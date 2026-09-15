@@ -23,6 +23,9 @@ from infer_nexus.observability.ray_logging import (
     ray_core_logging_config,
     serve_logging_config,
 )
+from infer_nexus.runtime.request_id_proxy_middleware import (
+    ray_serve_request_id_middleware,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -227,7 +230,11 @@ def main() -> None:
     ray.init(**ray_init_kwargs)
     serve.start(
         proxy_location=args.proxy_location,
-        http_options={"host": settings.service.host, "port": settings.service.port},
+        http_options={
+            "host": settings.service.host,
+            "port": settings.service.port,
+            "middlewares": [ray_serve_request_id_middleware()],
+        },
         logging_config=serve_logging_config(logging_settings),
     )
 

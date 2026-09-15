@@ -1744,7 +1744,7 @@ requires-dist = [
     { name = "pydantic-settings", specifier = ">=2.4.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3.0" },
     { name = "pyyaml", specifier = ">=6.0.2" },
-    { name = "ray", extras = ["serve"], marker = "extra == 'serve'", specifier = ">=2.30.0" },
+    { name = "ray", extras = ["serve"], marker = "extra == 'serve'", specifier = ">=2.30.0,<2.58.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6.0" },
     { name = "tensorboard", marker = "extra == 'cuda-monitoring'", specifier = ">=2.18.0" },
     { name = "transformers", marker = "extra == 'vllm'", specifier = ">=4.44.0" },

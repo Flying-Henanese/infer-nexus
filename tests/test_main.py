@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from uuid import UUID
 
 from fastapi.testclient import TestClient
 
@@ -56,6 +57,23 @@ def test_request_logging_returns_canonical_id_and_emits_one_terminal_event(
     assert records[0]["request_id"] == "req-test-123"
     assert records[0]["route"] == "/v1/models"
     assert records[0]["process_role"] == "gateway"
+
+
+def test_request_logging_replaces_invalid_id_in_direct_uvicorn_mode(
+    prepared_model_store: Path,
+) -> None:
+    settings = Settings()
+    settings.model_store.root_dir = str(prepared_model_store)
+    app = create_app(settings=settings)
+
+    with TestClient(app) as client:
+        response = client.get("/v1/models", headers={"X-Request-ID": "invalid id"})
+
+    assert response.status_code == 200
+    request_ids = response.headers.get_list("X-Request-ID")
+    assert len(request_ids) == 1
+    assert UUID(hex=request_ids[0]).hex == request_ids[0]
+    assert request_ids[0] != "invalid id"
 
 
 def test_unhandled_error_response_still_returns_request_id(

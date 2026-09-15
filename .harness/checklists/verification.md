@@ -97,6 +97,11 @@ Live metric validation requires a running gateway/Ray Serve environment.
 - Verify request-ID validation, generated IDs, the response `X-Request-ID`
   header, streaming legacy-header compatibility, and propagation through a
   fake Serve handle, replica context, and proxy header policy.
+- Through the real Ray Serve HTTP proxy, verify a missing, invalid, or duplicate
+  inbound `X-Request-ID` becomes exactly one canonical response header and the
+  same ID appears in both the Ray proxy and application request logs.
+- Confirm the installed Ray version satisfies the `serve` extra's `<2.58` cap;
+  `RequestIdProxyMiddleware` currently relies on `HTTPOptions.middlewares`.
 - Verify unary and streaming terminal events, stream error/cancellation
   outcomes, single traceback ownership, sampling behavior, and sensitive-field
   redaction. Keep request IDs out of Prometheus labels.

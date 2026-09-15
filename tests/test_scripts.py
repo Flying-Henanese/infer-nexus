@@ -81,7 +81,10 @@ def test_describe_gateway_capacity_distinguishes_per_worker_limit() -> None:
 
 def test_run_serve_runtime_main_deploys_per_model_apps(monkeypatch, prepared_model_store) -> None:
     """run_serve_runtime.main 应按服务名部署 Serve 应用。"""
+    from starlette.middleware import Middleware
+
     from infer_nexus.runtime.serve_app import ServeApplicationBuilder
+    from infer_nexus.runtime.request_id_proxy_middleware import RequestIdProxyMiddleware
 
     settings = Settings()
     settings.service.name = 'infer-nexus'
@@ -185,7 +188,13 @@ def test_run_serve_runtime_main_deploys_per_model_apps(monkeypatch, prepared_mod
 
     assert captured['ray_address'] == 'auto'
     assert captured['proxy_location'] == 'HeadOnly'
-    assert captured['http_options'] == {'host': '0.0.0.0', 'port': 8000}
+    http_options = captured['http_options']
+    assert http_options['host'] == '0.0.0.0'
+    assert http_options['port'] == 8000
+    assert len(http_options['middlewares']) == 1
+    proxy_middleware = http_options['middlewares'][0]
+    assert isinstance(proxy_middleware, Middleware)
+    assert proxy_middleware.cls is RequestIdProxyMiddleware
     assert captured['ray_logging_config'].encoding == 'JSON'
     assert captured['serve_logging_config'] == {
         'encoding': 'JSON',

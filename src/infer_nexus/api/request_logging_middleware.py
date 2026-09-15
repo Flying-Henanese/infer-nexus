@@ -5,13 +5,16 @@ from __future__ import annotations
 import asyncio
 import json
 import random
-import re
 from time import perf_counter
 from typing import Any
-from uuid import uuid4
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from infer_nexus.core.request_ids import (
+    REQUEST_ID_HEADER,
+    new_request_id,
+    validate_request_id,
+)
 from infer_nexus.core.request_context import (
     RequestContext,
     RequestLifecycleState,
@@ -21,23 +24,15 @@ from infer_nexus.observability.logging import bind_log_context, get_logger
 from infer_nexus.observability.metrics import GATEWAY_METRICS
 
 logger = get_logger(__name__)
-_REQUEST_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 _LEGACY_REQUEST_ID_HEADER = b"x-infer-nexus-request-id"
-_REQUEST_ID_HEADER = b"x-request-id"
+_REQUEST_ID_HEADER = REQUEST_ID_HEADER
 _SUPPRESSED_SUCCESS_PATHS = frozenset({"/healthz", "/readyz", "/metrics"})
-
-
-def _validated_request_id(value: str | None) -> str | None:
-    if value is None or _REQUEST_ID_PATTERN.fullmatch(value) is None:
-        return None
-    return value
-
 
 def _client_request_id(scope: Scope) -> str | None:
     for name, value in scope.get("headers", []):
         if name.lower() == _REQUEST_ID_HEADER:
             try:
-                return _validated_request_id(value.decode("ascii"))
+                return validate_request_id(value.decode("ascii"))
             except UnicodeDecodeError:
                 return None
     return None
@@ -49,7 +44,7 @@ def _serve_request_id() -> str | None:
         from ray.serve.context import _get_serve_request_context
 
         context = _get_serve_request_context()
-        return _validated_request_id(getattr(context, "request_id", None))
+        return validate_request_id(getattr(context, "request_id", None))
     except (ImportError, RuntimeError, AttributeError):
         return None
 
@@ -57,7 +52,7 @@ def _serve_request_id() -> str | None:
 def _request_identity(scope: Scope) -> tuple[str, bool]:
     """Return the canonical ID and whether the Ray proxy owns the response header."""
     serve_request_id = _serve_request_id()
-    request_id = _client_request_id(scope) or serve_request_id or uuid4().hex
+    request_id = _client_request_id(scope) or serve_request_id or new_request_id()
     return request_id, serve_request_id is not None
 
 

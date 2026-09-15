@@ -106,11 +106,17 @@ settings files rather than request-path code.
   Application JSON records carry process identity, source, stable event name,
   and sanitized structured fields. Ray Core/Serve and vLLM are configured by
   private adapters in `observability/ray_logging.py` and runtime bootstrap.
+- In Serve mode, `RequestIdProxyMiddleware` is installed through Ray
+  `HTTPOptions.middlewares` outside Ray's built-in request-ID middleware. It
+  reduces inbound `X-Request-ID` headers to one validated value or a generated
+  UUID before Ray captures the proxy request ID. The `serve` dependency is
+  constrained to Ray `<2.58` because that release removes this proxy option;
+  revisit the boundary adapter before raising the cap.
 - `RequestLoggingMiddleware` wraps the FastAPI application outside
-  `WorkerAdmissionMiddleware`. It validates inbound `X-Request-ID`, falls back
-  to the Ray Serve request ID, then generates a UUID. It returns `X-Request-ID`
-  on all responses and additionally returns `X-Infer-Nexus-Request-ID` on
-  streaming responses for compatibility.
+  `WorkerAdmissionMiddleware`. It uses the proxy-owned request ID in Serve mode;
+  in direct Uvicorn mode it validates the inbound ID or generates one itself.
+  It returns the canonical `X-Request-ID` and additionally returns
+  `X-Infer-Nexus-Request-ID` on streaming responses for compatibility.
 - The allowlisted `RequestContext` is passed beside internal Serve handle
   payloads, bound in `ModelRuntimeReplica`, and forwarded upstream as
   `X-Request-ID` when a proxy model's `headers_policy.pass_request_id` is true.

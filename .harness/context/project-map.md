@@ -45,6 +45,8 @@ Use this file to choose the first source files to inspect. It is a navigation ma
   - `deployments.py`: maps model configs to Ray Serve deployment specs.
   - `handles.py`: caches Ray Serve deployment handles.
   - `gateway_ingress.py`: CPU-only Serve ASGI ingress binding and static public route configuration.
+  - `request_id_proxy_middleware.py`: validates or replaces request IDs at the
+    Ray Serve HTTP proxy boundary.
   - `worker_client.py`: runtime-worker client scaffolding, not an active isolation path.
 
 - `src/infer_nexus/backends/`

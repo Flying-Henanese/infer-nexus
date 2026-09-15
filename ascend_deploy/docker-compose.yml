@@ -1,5 +1,5 @@
 x-infer-nexus-image: &infer-nexus-image
-  image: infer:v5
+  image: infer-nexus:v6.1_vllm_0.23
   build:
     context: ..
     dockerfile: ascend_deploy/dockerfile
@@ -78,7 +78,7 @@ services:
         --block
     environment:
       ASCEND_RT_VISIBLE_DEVICES: ${ASCEND_RT_VISIBLE_DEVICES:?ASCEND_RT_VISIBLE_DEVICES must define the infer-nexus NPU pool}
-      RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES: ${RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES:-1}
+      # RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES: ${RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES:-1}
     devices:
       - /dev/davinci_manager
       - /dev/devmm_svm

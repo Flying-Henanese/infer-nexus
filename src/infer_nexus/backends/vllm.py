@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import importlib
 import inspect
-import logging
 import re
 from collections.abc import AsyncIterator
 from time import time
@@ -31,9 +30,10 @@ from infer_nexus.catalog.models import ModelConfig
 from infer_nexus.core.enums import CompatibilityMode
 from infer_nexus.core.errors import BackendConfigurationError
 from infer_nexus.core.schemas import ChatCompletionsRequest, EmbeddingRequest, RerankRequest
+from infer_nexus.observability.logging import get_logger
 
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class VLLMBackend(InferenceBackend):
@@ -226,14 +226,15 @@ class VLLMBackend(InferenceBackend):
                 self.openai_serving_chat_adapter = self._initialize_openai_serving_chat_adapter()
                 self.openai_serving_embedding_adapter = None
                 if self.openai_serving_chat_adapter is not None:
-                    logger.info("Initialized vLLM OpenAI serving adapter for async engine.")
+                    logger.info(
+                        "backend.adapter.ready",
+                        model=self.runtime_spec.get("model_name")
+                        or self.runtime_spec.get("served_model_name"),
+                        adapter="chat",
+                        engine_kind=self.engine_kind,
+                    )
                 elif self._requires_openai_serving_adapter():
                     self._raise_openai_serving_unavailable()
-                elif self._should_use_openai_serving_adapter():
-                    logger.warning(
-                        "vLLM OpenAI serving adapter is disabled for async engine: %s",
-                        self.openai_serving_adapter_init_error,
-                    )
                 return
             except BackendConfigurationError:
                 raise
@@ -303,11 +304,12 @@ class VLLMBackend(InferenceBackend):
         if self.openai_serving_chat_adapter is None and self._requires_openai_serving_adapter():
             self._raise_openai_serving_unavailable()
         if self.openai_serving_chat_adapter is not None:
-            logger.info("Initialized vLLM OpenAI serving adapter for sync engine.")
-        elif self._should_use_openai_serving_adapter():
-            logger.warning(
-                "vLLM OpenAI serving adapter is disabled for sync engine: %s",
-                self.openai_serving_adapter_init_error,
+            logger.info(
+                "backend.adapter.ready",
+                model=self.runtime_spec.get("model_name")
+                or self.runtime_spec.get("served_model_name"),
+                adapter="chat",
+                engine_kind=self.engine_kind,
             )
 
         self.openai_serving_embedding_adapter = self._initialize_openai_serving_embedding_adapter()
@@ -317,11 +319,12 @@ class VLLMBackend(InferenceBackend):
         ):
             self._raise_openai_embedding_serving_unavailable()
         if self.openai_serving_embedding_adapter is not None:
-            logger.info("Initialized vLLM OpenAI embeddings serving adapter for sync engine.")
-        elif self._should_use_openai_serving_embedding_adapter():
-            logger.warning(
-                "vLLM OpenAI embeddings serving adapter is disabled for sync engine: %s",
-                self.openai_serving_embedding_adapter_init_error,
+            logger.info(
+                "backend.adapter.ready",
+                model=self.runtime_spec.get("model_name")
+                or self.runtime_spec.get("served_model_name"),
+                adapter="embedding",
+                engine_kind=self.engine_kind,
             )
         self.engine_state = "ready"
 

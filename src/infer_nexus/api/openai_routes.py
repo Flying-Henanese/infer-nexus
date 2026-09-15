@@ -3,17 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from contextvars import ContextVar
-from dataclasses import dataclass
 from functools import wraps
 import json
-import logging
-from time import perf_counter
 from typing import Any, TypeVar
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
-from starlette.responses import Response
+from starlette.responses import Response, StreamingResponse
 
 from infer_nexus.api.deps import (
     get_admission_controller,
@@ -33,6 +29,7 @@ from infer_nexus.core.errors import (
     RuntimeExecutionError,
     RuntimeNotConnectedError,
 )
+from infer_nexus.core.request_context import current_request_state
 from infer_nexus.core.schemas import (
     ChatCompletionsRequest,
     ChatCompletionsResponse,
@@ -51,28 +48,9 @@ from infer_nexus.runtime.dispatcher import RuntimeDispatcher
 
 router = APIRouter(prefix="/v1", tags=["openai"])
 compat_router = APIRouter(tags=["openai"])
-logger = logging.getLogger(__name__)
-
 UNKNOWN_MODEL_LABEL = "unknown"
 RouteResponse = ChatCompletionsResponse | EmbeddingResponse | RerankResponse | JSONResponse | Response
 RouteCallable = TypeVar("RouteCallable", bound=Callable[..., Awaitable[RouteResponse]])
-
-
-@dataclass(slots=True)
-class _RequestObservation:
-    """保存单次 OpenAI 兼容请求的指标上下文。"""
-
-    start_time: float
-    task: str
-    endpoint: str
-    model: str = UNKNOWN_MODEL_LABEL
-    inflight_started: bool = False
-
-
-_current_observation: ContextVar[_RequestObservation | None] = ContextVar(
-    "openai_request_observation",
-    default=None,
-)
 
 
 def _metric_model_label(model: ModelConfig) -> str:
@@ -87,17 +65,18 @@ def _metric_task_label(task: TaskType | str) -> str:
 
 def _observe_resolved_model(model: ModelConfig) -> None:
     """在路由解析到有效模型后启动 inflight 指标。"""
-    observation = _current_observation.get()
-    if observation is None:
+    state = current_request_state()
+    if state is None:
         return
-    observation.model = _metric_model_label(model)
-    if not observation.inflight_started:
+    state.context.model = _metric_model_label(model)
+    state.context.backend = getattr(model.backend, "value", str(model.backend))
+    if not state.inflight_started and state.context.task is not None:
         GATEWAY_METRICS.inc_inflight(
-            model=observation.model,
-            task=observation.task,
-            endpoint=observation.endpoint,
+            model=state.context.model,
+            task=state.context.task,
+            endpoint=state.endpoint,
         )
-        observation.inflight_started = True
+        state.inflight_started = True
 
 
 def _error_code_from_response(response: RouteResponse) -> str | None:
@@ -113,36 +92,6 @@ def _error_code_from_response(response: RouteResponse) -> str | None:
     return code if isinstance(code, str) and code else None
 
 
-def _observe_request_result(observation: _RequestObservation, response: RouteResponse) -> None:
-    """根据响应统一记录请求完成指标。"""
-    status_code = getattr(response, "status_code", 200)
-    error_code = _error_code_from_response(response)
-    status = "error" if status_code >= 400 or error_code else "success"
-    GATEWAY_METRICS.observe_request(
-        model=observation.model,
-        task=observation.task,
-        endpoint=observation.endpoint,
-        status=status,
-        latency_seconds=perf_counter() - observation.start_time,
-    )
-    if error_code:
-        GATEWAY_METRICS.observe_error(
-            model=observation.model,
-            task=observation.task,
-            code=error_code,
-        )
-    if status_code == 429 and error_code:
-        GATEWAY_METRICS.observe_admission_rejection(
-            model=observation.model,
-            reason=error_code,
-        )
-    GATEWAY_METRICS.observe_token_usage(
-        model=observation.model,
-        task=observation.task,
-        usage=getattr(response, "usage", None),
-    )
-
-
 def observe_openai_request(task: TaskType, *, endpoint: str | None = None) -> Callable[[RouteCallable], RouteCallable]:
     """装饰 OpenAI 兼容路由，统一记录请求级 Prometheus 指标。"""
 
@@ -153,38 +102,28 @@ def observe_openai_request(task: TaskType, *, endpoint: str | None = None) -> Ca
             path = endpoint
             if path is None and isinstance(http_request, Request):
                 path = http_request.url.path
-            observation = _RequestObservation(
-                start_time=perf_counter(),
-                task=_metric_task_label(task),
-                endpoint=path or "unknown",
-            )
-            token = _current_observation.set(observation)
+            state = current_request_state()
+            if state is not None:
+                state.context.task = _metric_task_label(task)
+                state.endpoint = path or "unknown"
+                if path:
+                    state.context.route = path
+                request_payload = kwargs.get("request")
+                state.context.stream = bool(getattr(request_payload, "stream", False))
             try:
                 response = await func(*args, **kwargs)
-                _observe_request_result(observation, response)
+                if state is not None:
+                    state.status_code = getattr(response, "status_code", 200)
+                    state.error_code = state.error_code or _error_code_from_response(response)
+                    state.token_usage = getattr(response, "usage", None)
+                    if isinstance(response, StreamingResponse):
+                        state.context.stream = True
                 return response
-            except Exception:
-                GATEWAY_METRICS.observe_request(
-                    model=observation.model,
-                    task=observation.task,
-                    endpoint=observation.endpoint,
-                    status="error",
-                    latency_seconds=perf_counter() - observation.start_time,
-                )
-                GATEWAY_METRICS.observe_error(
-                    model=observation.model,
-                    task=observation.task,
-                    code="unhandled_exception",
-                )
+            except Exception as exc:
+                if state is not None:
+                    state.exception = exc
+                    state.error_code = state.error_code or "unhandled_exception"
                 raise
-            finally:
-                if observation.inflight_started:
-                    GATEWAY_METRICS.dec_inflight(
-                        model=observation.model,
-                        task=observation.task,
-                        endpoint=observation.endpoint,
-                    )
-                _current_observation.reset(token)
 
         return wrapper  # type: ignore[return-value]
 
@@ -293,7 +232,15 @@ def _runtime_error_response(exc: Exception, *, operation: str, request_model: st
             code=exc.code,
         )
     if isinstance(exc, RuntimeExecutionError):
-        logger.exception("%s runtime execution failed for model '%s'.", operation, request_model)
+        state = current_request_state()
+        if state is not None:
+            state.error_code = exc.code
+            if exc.code not in {
+                "unsupported_parameter",
+                "unsupported_message_content",
+                "invalid_input",
+            }:
+                state.exception = exc
         status_code, error_type = runtime_execution_status(exc.code)
         return openai_error_response(
             status_code,

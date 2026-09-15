@@ -7,10 +7,12 @@ import os
 from fastapi import FastAPI
 
 from infer_nexus.api import health_routes, metrics_routes, openai_routes, platform_routes
+from infer_nexus.api.request_logging_middleware import RequestLoggingMiddleware
 from infer_nexus.api.worker_admission_middleware import WorkerAdmissionMiddleware
 from infer_nexus.core.config import Settings, load_settings
 from infer_nexus.gateway_runtime import GatewayRuntime
 from infer_nexus.observability.logging import configure_logging
+from infer_nexus.observability.ray_logging import configure_ray_logging_environment
 
 
 def initialize_ray_connection(ray_address: str) -> None:
@@ -29,7 +31,7 @@ def create_app(
     runtime: GatewayRuntime | None = None,
     model_targets: dict[str, dict[str, str]] | None = None,
     connect_ray: bool = True,
-) -> FastAPI:
+) -> RequestLoggingMiddleware:
     """Create the reusable HTTP API for Uvicorn or a Serve ingress replica."""
 
     @asynccontextmanager
@@ -38,6 +40,18 @@ def create_app(
         if active_runtime is None:
             resolved_settings = settings or load_settings(
                 os.getenv("INFER_NEXUS_SETTINGS", "config/settings.yaml")
+            )
+            logging_settings = resolved_settings.observability.logging
+            configure_ray_logging_environment(logging_settings)
+            configure_logging(
+                logging_settings,
+                {
+                    "service": resolved_settings.service.name,
+                    "service_version": "0.1.0",
+                    "environment": os.getenv("INFER_NEXUS_ENVIRONMENT", "development"),
+                    "process_role": "gateway",
+                    "pid": os.getpid(),
+                },
             )
             if (
                 connect_ray
@@ -62,7 +76,7 @@ def create_app(
     app.include_router(openai_routes.router)
     app.include_router(openai_routes.compat_router)
     app.include_router(platform_routes.router)
-    return app
+    return RequestLoggingMiddleware(app)
 
 
 app = create_app()

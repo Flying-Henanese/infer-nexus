@@ -98,6 +98,43 @@ settings files rather than request-path code.
 - Streaming handles must support `options(stream=True)`; unavailable capability
   fails explicitly and never falls back to unary invocation.
 
+## Logging And Request Correlation
+
+- The application logging interface is `configure_logging()`, `get_logger()`,
+  and `bind_log_context()` in `observability/logging.py`. Local
+  `config/settings.yaml` uses console output; both Compose profiles use JSONL.
+  Application JSON records carry process identity, source, stable event name,
+  and sanitized structured fields. Ray Core/Serve and vLLM are configured by
+  private adapters in `observability/ray_logging.py` and runtime bootstrap.
+- In Serve mode, `RequestIdProxyMiddleware` is installed through Ray
+  `HTTPOptions.middlewares` outside Ray's built-in request-ID middleware. It
+  reduces inbound `X-Request-ID` headers to one validated value or a generated
+  UUID before Ray captures the proxy request ID. The `serve` dependency is
+  constrained to Ray `<2.58` because that release removes this proxy option;
+  revisit the boundary adapter before raising the cap.
+- `RequestLoggingMiddleware` wraps the FastAPI application outside
+  `WorkerAdmissionMiddleware`. It uses the proxy-owned request ID in Serve mode;
+  in direct Uvicorn mode it validates the inbound ID or generates one itself.
+  It returns the canonical `X-Request-ID` and additionally returns
+  `X-Infer-Nexus-Request-ID` on streaming responses for compatibility.
+- The allowlisted `RequestContext` is passed beside internal Serve handle
+  payloads, bound in `ModelRuntimeReplica`, and forwarded upstream as
+  `X-Request-ID` when a proxy model's `headers_policy.pass_request_id` is true.
+  The request ID stays out of the OpenAI request body and metric labels.
+- The Gateway lifecycle owns one `request.completed` or `request.failed` event
+  per HTTP request. Streaming adds exactly one stream event
+  (`stream.completed`, `stream.failed`, or `stream.cancelled`) after body
+  termination. `admission.rejected` and replica/process lifecycle events belong
+  to their respective state owners. Unexpected failures carry one authoritative
+  traceback; the Gateway terminal record does not duplicate a traceback already
+  emitted by the stream owner. Successful `/healthz`, `/readyz`, and `/metrics`
+  requests are suppressed; successful ordinary request events are sampled
+  according to `success_sample_rate`.
+- Local Ray files live under `.infer-nexus/ray/session_latest/logs/`, apart from
+  CLI/bootstrap output at `.infer-nexus/logs/ray_bootstrap.log` and
+  `.infer-nexus/logs/serve_runtime.log`. Compose uses distinct named volumes
+  `ray-head-temp`, `ray-worker-temp`, and `ray-deployer-temp` at `/tmp/ray`.
+
 ## Known Checked-in Integration Gaps
 
 - `config/settings.yaml` now defaults to CUDA and matches

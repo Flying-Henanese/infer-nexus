@@ -81,11 +81,17 @@ def test_describe_gateway_capacity_distinguishes_per_worker_limit() -> None:
 
 def test_run_serve_runtime_main_deploys_per_model_apps(monkeypatch, prepared_model_store) -> None:
     """run_serve_runtime.main 应按服务名部署 Serve 应用。"""
+    from starlette.middleware import Middleware
+
+    from infer_nexus.runtime.serve_app import ServeApplicationBuilder
+    from infer_nexus.runtime.request_id_proxy_middleware import RequestIdProxyMiddleware
+
     settings = Settings()
     settings.service.name = 'infer-nexus'
     settings.model_store.root_dir = str(prepared_model_store)
     settings.runtime.backend_init_mode = 'stub'
     settings.cluster.inference_device_type = 'npu'
+    settings.observability.logging.format = 'json'
     captured: dict[str, object] = {}
 
     monkeypatch.setattr(run_serve_runtime, 'parse_args', lambda: types.SimpleNamespace(
@@ -106,19 +112,19 @@ def test_run_serve_runtime_main_deploys_per_model_apps(monkeypatch, prepared_mod
         }
 
     monkeypatch.setattr(
-        run_serve_runtime.ServeApplicationBuilder,
+        ServeApplicationBuilder,
         'build_serve_bindings',
         fake_build_bindings,
     )
     monkeypatch.setattr(
-        run_serve_runtime.ServeApplicationBuilder,
+        ServeApplicationBuilder,
         'build_specs',
         lambda self, registry: [
             types.SimpleNamespace(model_name='Qwen3.5-9B'),
         ],
     )
     monkeypatch.setattr(
-        run_serve_runtime.ServeApplicationBuilder,
+        ServeApplicationBuilder,
         'build_gateway_spec',
         lambda self, registry, *, settings: types.SimpleNamespace(
             application_name='infer-nexus-gateway',
@@ -126,7 +132,7 @@ def test_run_serve_runtime_main_deploys_per_model_apps(monkeypatch, prepared_mod
         ),
     )
     monkeypatch.setattr(
-        run_serve_runtime.ServeApplicationBuilder,
+        ServeApplicationBuilder,
         'build_gateway_binding',
         lambda self, registry, *, settings, serve=None: {'app': 'gateway'},
     )
@@ -149,8 +155,12 @@ def test_run_serve_runtime_main_deploys_per_model_apps(monkeypatch, prepared_mod
 
     captured_runs: list[dict[str, object]] = []
     fake_serve = types.SimpleNamespace(
-        start=lambda proxy_location, http_options: captured.update(
-            {'proxy_location': proxy_location, 'http_options': http_options}
+        start=lambda **kwargs: captured.update(
+            {
+                'proxy_location': kwargs['proxy_location'],
+                'http_options': kwargs['http_options'],
+                'serve_logging_config': kwargs['logging_config'],
+            }
         ),
         run=lambda app, name, route_prefix, blocking: captured_runs.append(
             {'app': app, 'name': name, 'route_prefix': route_prefix, 'blocking': blocking}
@@ -158,8 +168,18 @@ def test_run_serve_runtime_main_deploys_per_model_apps(monkeypatch, prepared_mod
         status=lambda: FakeServeStatus(),
     )
     fake_ray = types.ModuleType('ray')
-    fake_ray.init = lambda address=None, runtime_env=None: captured.update(
-        {'ray_address': address, 'runtime_env': runtime_env}
+    class FakeRayLoggingConfig:
+        def __init__(self, *, encoding, log_level):
+            self.encoding = encoding
+            self.log_level = log_level
+
+    fake_ray.LoggingConfig = FakeRayLoggingConfig
+    fake_ray.init = lambda **kwargs: captured.update(
+        {
+            'ray_address': kwargs['address'],
+            'runtime_env': kwargs['runtime_env'],
+            'ray_logging_config': kwargs['logging_config'],
+        }
     )
     fake_ray.serve = fake_serve
     monkeypatch.setitem(__import__('sys').modules, 'ray', fake_ray)
@@ -168,7 +188,19 @@ def test_run_serve_runtime_main_deploys_per_model_apps(monkeypatch, prepared_mod
 
     assert captured['ray_address'] == 'auto'
     assert captured['proxy_location'] == 'HeadOnly'
-    assert captured['http_options'] == {'host': '0.0.0.0', 'port': 8000}
+    http_options = captured['http_options']
+    assert http_options['host'] == '0.0.0.0'
+    assert http_options['port'] == 8000
+    assert len(http_options['middlewares']) == 1
+    proxy_middleware = http_options['middlewares'][0]
+    assert isinstance(proxy_middleware, Middleware)
+    assert proxy_middleware.cls is RequestIdProxyMiddleware
+    assert captured['ray_logging_config'].encoding == 'JSON'
+    assert captured['serve_logging_config'] == {
+        'encoding': 'JSON',
+        'log_level': 'INFO',
+        'enable_access_log': True,
+    }
     assert captured['runtime_env']['working_dir'] == '.'
     assert captured['registry_size'] == 1
     assert captured['inference_device_type'] == 'npu'

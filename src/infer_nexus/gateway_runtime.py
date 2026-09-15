@@ -9,6 +9,7 @@ cluster data plane and resolves deployment handles locally.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 
 from fastapi import FastAPI
 
@@ -20,11 +21,14 @@ from infer_nexus.control.worker_admission import WorkerAdmissionController
 from infer_nexus.core.config import Settings
 from infer_nexus.core.enums import BackendType
 from infer_nexus.model_store import LocalModelStore
-from infer_nexus.observability.logging import configure_logging
+from infer_nexus.observability.logging import configure_logging, get_logger
 from infer_nexus.runtime.dispatcher import RuntimeDispatcher
 from infer_nexus.runtime.executor import RuntimeExecutor
 from infer_nexus.runtime.handles import ServeDeploymentHandleResolver
 from infer_nexus.runtime.serve_app import ServeApplicationBuilder
+
+
+logger = get_logger(__name__)
 
 
 @dataclass(slots=True)
@@ -51,13 +55,24 @@ class GatewayRuntime:
         model_targets: dict[str, dict[str, str]] | None = None,
     ) -> "GatewayRuntime":
         """Create one gateway dependency graph without initializing Ray."""
-        configure_logging(settings.service.log_level)
+        configure_logging(
+            settings.observability.logging,
+            {
+                "service": settings.service.name,
+                "service_version": "0.1.0",
+                "environment": os.getenv("INFER_NEXUS_ENVIRONMENT", "development"),
+                "process_role": "gateway",
+                "pid": os.getpid(),
+            },
+        )
+        logger.info("app.starting", process_role="gateway")
         registry = ModelRegistry(load_model_catalog(settings.catalog.models_path))
         model_store = LocalModelStore.from_settings(settings.model_store)
         serve_builder = ServeApplicationBuilder(
             model_store=model_store,
             backend_init_mode=settings.runtime.backend_init_mode,
             service_name=settings.service.name,
+            logging_settings=settings.observability.logging,
         )
         serve_builder.validate_registry_runtime_configs(registry)
 
@@ -84,7 +99,7 @@ class GatewayRuntime:
             max_inflight=settings.runtime.gateway_worker_max_inflight,
             retry_after_seconds=settings.runtime.gateway_worker_retry_after_seconds,
         )
-        return cls(
+        runtime = cls(
             settings=settings,
             registry=registry,
             model_store=model_store,
@@ -101,6 +116,13 @@ class GatewayRuntime:
             ),
             serve_ingress=model_targets is not None,
         )
+        logger.info(
+            "app.ready",
+            process_role="gateway",
+            execution_mode=settings.runtime.execution_mode,
+            model_count=len(registry.list_models()),
+        )
+        return runtime
 
     def attach(self, app: FastAPI) -> None:
         """Attach the existing dependency keys consumed by the API routers."""
@@ -139,7 +161,7 @@ class GatewayRuntime:
     async def shutdown(self) -> None:
         """Release explicit gateway resources when FastAPI shuts down."""
         # Backend lifetimes belong to their model Serve deployments.
-        return None
+        logger.info("app.shutdown", process_role="gateway")
 
 
 def _serve_status_is_ready(application: object) -> bool:

@@ -7,6 +7,7 @@ from typing import Protocol
 
 from starlette.responses import Response
 
+from infer_nexus.core.request_context import RequestContext
 from infer_nexus.core.schemas import (
     ChatCompletionsRequest,
     ChatCompletionsResponse,
@@ -26,6 +27,7 @@ class RuntimeWorkerClient(Protocol):
         *,
         target: RuntimeTarget,
         request: ChatCompletionsRequest,
+        request_context: RequestContext | None = None,
     ) -> ChatCompletionsResponse | Response:
         """Execute one non-streaming chat completion in a runtime worker."""
 
@@ -34,6 +36,7 @@ class RuntimeWorkerClient(Protocol):
         *,
         target: RuntimeTarget,
         request: ChatCompletionsRequest,
+        request_context: RequestContext | None = None,
     ) -> AsyncIterator[dict | bytes | str]:
         """Execute one streaming chat completion in a runtime worker."""
 
@@ -42,6 +45,7 @@ class RuntimeWorkerClient(Protocol):
         *,
         target: RuntimeTarget,
         request: EmbeddingRequest,
+        request_context: RequestContext | None = None,
     ) -> EmbeddingResponse | Response:
         """Execute one embedding request in a runtime worker."""
 
@@ -50,5 +54,6 @@ class RuntimeWorkerClient(Protocol):
         *,
         target: RuntimeTarget,
         request: RerankRequest,
+        request_context: RequestContext | None = None,
     ) -> RerankResponse | Response:
         """Execute one rerank request in a runtime worker."""

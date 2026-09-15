@@ -8,11 +8,13 @@ Run explicitly against the pinned Ray runtime:
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import socket
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 
@@ -32,6 +34,43 @@ def _free_port() -> int:
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         return int(listener.getsockname()[1])
+
+
+def _ray_log_contains(
+    log_paths: list[Path],
+    request_id: str,
+    *,
+    event: str | None = None,
+    route: str | None = None,
+) -> bool:
+    for path in log_paths:
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(record, dict) or record.get("request_id") != request_id:
+                continue
+            if event is not None and record.get("event") != event:
+                continue
+            if route is not None and record.get("route") != route:
+                continue
+            return True
+    return False
+
+
+def _ray_log_text_contains(log_paths: list[Path], request_id: str) -> bool:
+    for path in log_paths:
+        try:
+            if request_id in path.read_text(encoding="utf-8", errors="replace"):
+                return True
+        except OSError:
+            continue
+    return False
 
 
 MODEL_APPLICATION_NAME = "poc-model-app"
@@ -211,7 +250,14 @@ def test_real_gateway_ingress_reuses_fastapi_without_ray_client(tmp_path: Path) 
     from infer_nexus.catalog.registry import ModelRegistry
     from infer_nexus.core.config import Settings
     from infer_nexus.model_store import LocalModelStore
+    from infer_nexus.observability.ray_logging import (
+        ray_core_logging_config,
+        serve_logging_config,
+    )
     from infer_nexus.runtime.serve_app import ServeApplicationBuilder
+    from infer_nexus.runtime.request_id_proxy_middleware import (
+        ray_serve_request_id_middleware,
+    )
 
     catalog_path = tmp_path / "models.yaml"
     model_path = tmp_path / "poc-model"
@@ -235,14 +281,17 @@ def test_real_gateway_ingress_reuses_fastapi_without_ray_client(tmp_path: Path) 
     settings.model_store.root_dir = str(tmp_path / "models")
     settings.runtime.execution_mode = "serve"
     settings.runtime.backend_init_mode = "stub"
+    settings.observability.logging.format = "json"
     settings.runtime.gateway_ingress.application_name = "poc-real-gateway"
     settings.runtime.gateway_ingress.route_prefix = "/poc"
     proxy_port = _free_port()
+    ray_temp_dir = Path(f"/tmp/infer-nexus-real-ingress-poc-{os.getpid()}")
     registry = ModelRegistry(load_model_catalog(catalog_path))
     builder = ServeApplicationBuilder(
         model_store=LocalModelStore(settings.model_store.root_dir),
         backend_init_mode=settings.runtime.backend_init_mode,
         service_name=settings.service.name,
+        logging_settings=settings.observability.logging,
     )
 
     ray.init(
@@ -252,12 +301,19 @@ def test_real_gateway_ingress_reuses_fastapi_without_ray_client(tmp_path: Path) 
         # waiting forever for the bounded ingress placement.
         num_cpus=2,
         include_dashboard=False,
-        _temp_dir=f"/tmp/infer-nexus-real-ingress-poc-{os.getpid()}",
+        _temp_dir=str(ray_temp_dir),
+        logging_config=ray_core_logging_config(ray, settings.observability.logging),
     )
+    streamed_request_id: str | None = None
     try:
         serve.start(
             proxy_location="HeadOnly",
-            http_options={"host": "127.0.0.1", "port": proxy_port},
+            http_options={
+                "host": "127.0.0.1",
+                "port": proxy_port,
+                "middlewares": [ray_serve_request_id_middleware()],
+            },
+            logging_config=serve_logging_config(settings.observability.logging),
         )
         spec = builder.build_gateway_spec(registry, settings=settings)
         model_bindings = builder.build_serve_bindings(registry, serve=serve)
@@ -277,14 +333,41 @@ def test_real_gateway_ingress_reuses_fastapi_without_ray_client(tmp_path: Path) 
             models = client.get("/v1/models")
             assert models.status_code == 200
             assert models.json()["data"][0]["id"] == "poc-model"
+            missing_ids = models.headers.get_list("X-Request-ID")
+            assert len(missing_ids) == 1
+            assert UUID(hex=missing_ids[0]).hex == missing_ids[0]
+            invalid_request_id = client.get(
+                "/v1/models",
+                headers={"X-Request-ID": "invalid id"},
+            )
+            assert invalid_request_id.status_code == 200
+            canonical_ids = invalid_request_id.headers.get_list("X-Request-ID")
+            assert len(canonical_ids) == 1
+            assert UUID(hex=canonical_ids[0]).hex == canonical_ids[0]
+            assert canonical_ids[0] != "invalid id"
+            duplicate_request_ids = client.get(
+                "/v1/models",
+                headers=[
+                    ("X-Request-ID", "first-client-id"),
+                    ("x-request-id", "second-client-id"),
+                ],
+            )
+            assert duplicate_request_ids.status_code == 200
+            collapsed_ids = duplicate_request_ids.headers.get_list("X-Request-ID")
+            assert len(collapsed_ids) == 1
+            assert UUID(hex=collapsed_ids[0]).hex == collapsed_ids[0]
+            assert collapsed_ids[0] not in {"first-client-id", "second-client-id"}
             completion = client.post(
                 "/v1/chat/completions",
+                headers={"X-Request-ID": "req-ray-ingress-001"},
                 json={"model": "poc-model", "messages": [{"role": "user", "content": "hello"}]},
             )
             assert completion.status_code == 200
+            assert completion.headers.get_list("X-Request-ID") == ["req-ray-ingress-001"]
             assert completion.json()["object"] == "chat.completion"
             streamed = client.post(
                 "/v1/chat/completions",
+                headers={"X-Request-ID": "invalid id"},
                 json={
                     "model": "poc-model",
                     "messages": [{"role": "user", "content": "hello"}],
@@ -292,8 +375,26 @@ def test_real_gateway_ingress_reuses_fastapi_without_ray_client(tmp_path: Path) 
                 },
             )
             assert streamed.status_code == 200
+            streamed_ids = streamed.headers.get_list("X-Request-ID")
+            assert len(streamed_ids) == 1
+            assert UUID(hex=streamed_ids[0]).hex == streamed_ids[0]
+            streamed_request_id = streamed_ids[0]
+            assert streamed.headers["X-Infer-Nexus-Request-ID"] == streamed_ids[0]
             assert streamed.text.count("data: [DONE]") == 1
         assert spec.application_name in str(serve.status())
     finally:
         serve.shutdown()
         ray.shutdown()
+
+    assert streamed_request_id is not None
+    ray_log_dir = ray_temp_dir / "session_latest" / "logs"
+    serve_log_dir = ray_log_dir / "serve"
+    assert _ray_log_text_contains(
+        list(serve_log_dir.glob("proxy_*.log")), streamed_request_id
+    ), "Ray Serve proxy log should carry the response's canonical request ID"
+    assert _ray_log_contains(
+        list(ray_log_dir.glob("worker-*.out")),
+        streamed_request_id,
+        event="request.completed",
+        route="/v1/chat/completions",
+    ), "Gateway application log should carry the same canonical request ID"

@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from infer_nexus.core.config import Settings
+from infer_nexus.observability.ray_logging import serve_logging_config
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,5 +78,9 @@ def build_gateway_ingress_binding(*, serve: Any, settings: Settings, spec: Gatew
         max_ongoing_requests=spec.max_ongoing_requests,
         max_queued_requests=spec.max_queued_requests,
         ray_actor_options={"num_cpus": spec.num_cpus},
+        logging_config=serve_logging_config(
+            settings.observability.logging,
+            enable_access_log=False,
+        ),
     )(ingress_class)
     return deployment.bind()

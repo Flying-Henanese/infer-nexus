@@ -13,7 +13,8 @@ set -euo pipefail
 # - The container image is expected to already include the required Python
 #   dependencies for Infer Nexus on Ascend.
 #
-# Logs:   .infer-nexus/logs/{ray,serve_runtime}.log
+# Logs:   .infer-nexus/logs/{ray_bootstrap,serve_runtime}.log
+# Ray:    .infer-nexus/ray/session_latest/logs/
 # PIDs:   .infer-nexus/pids/{serve_runtime}.pid
 # Status: .infer-nexus/STATUS
 
@@ -22,6 +23,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STATE_DIR="${ROOT_DIR}/.infer-nexus"
 LOG_DIR="${STATE_DIR}/logs"
 PID_DIR="${STATE_DIR}/pids"
+RAY_TEMP_DIR="${STATE_DIR}/ray"
 RAY_STATE_FILE="${STATE_DIR}/ray_state.env"
 
 SETTINGS="config/settings.yaml"
@@ -65,10 +67,23 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-mkdir -p "${LOG_DIR}" "${PID_DIR}"
+mkdir -p "${LOG_DIR}" "${PID_DIR}" "${RAY_TEMP_DIR}"
 rm -f "${RAY_STATE_FILE}"
 
 cd "${ROOT_DIR}"
+
+# Bound Ray's rotating component logs and keep C++ system records structured.
+RAY_LOGGING_CONFIG_ENCODING_DEFAULT=TEXT
+RAY_BACKEND_LOG_JSON_DEFAULT=0
+if [[ "${SETTINGS}" == *settings.compose.yaml ]] || [[ "${SETTINGS}" == *settings.ascend-compose.yaml ]]; then
+  RAY_LOGGING_CONFIG_ENCODING_DEFAULT=JSON
+  RAY_BACKEND_LOG_JSON_DEFAULT=1
+fi
+RAY_LOGGING_CONFIG_ENCODING="${RAY_LOGGING_CONFIG_ENCODING:-${RAY_LOGGING_CONFIG_ENCODING_DEFAULT}}"
+RAY_BACKEND_LOG_JSON="${RAY_BACKEND_LOG_JSON:-${RAY_BACKEND_LOG_JSON_DEFAULT}}"
+export RAY_LOGGING_CONFIG_ENCODING RAY_BACKEND_LOG_JSON
+export RAY_ROTATION_MAX_BYTES="${RAY_ROTATION_MAX_BYTES:-52428800}"
+export RAY_ROTATION_BACKUP_COUNT="${RAY_ROTATION_BACKUP_COUNT:-3}"
 
 # The repository uses a src/ layout. When running with the container's system
 # Python instead of an installed wheel/venv, make src importable explicitly.
@@ -153,10 +168,10 @@ EOF
 
   local resources
   resources="{\"NPU\": ${NUM_NPUS}}"
-  local args=(start --head --disable-usage-stats --resources "${resources}")
+  local args=(start --head --disable-usage-stats --resources "${resources}" --temp-dir "${RAY_TEMP_DIR}")
 
-  (ray "${args[@]}" >"${LOG_DIR}/ray.log" 2>&1) || {
-    echo "Failed to start Ray head. See ${LOG_DIR}/ray.log" >&2
+  (ray "${args[@]}" >"${LOG_DIR}/ray_bootstrap.log" 2>&1) || {
+    echo "Failed to start Ray head. See ${LOG_DIR}/ray_bootstrap.log" >&2
     exit 1
   }
 
@@ -174,7 +189,7 @@ EOF
     sleep 0.25
   done
 
-  echo "Ray did not become ready in time. See ${LOG_DIR}/ray.log" >&2
+  echo "Ray did not become ready in time. See ${LOG_DIR}/ray_bootstrap.log" >&2
   exit 1
 }
 
@@ -208,6 +223,22 @@ wait_for_pid_exit() {
 write_status() {
   local msg="$1"
   printf '%s\n' "${msg}" >"${STATE_DIR}/STATUS"
+}
+
+print_ray_session_log_path() {
+  local temp_root
+  for temp_root in "${RAY_TEMP_DIR}" "${RAY_TMPDIR:-}"; do
+    [[ -n "${temp_root}" ]] || continue
+    if [[ -d "${temp_root}/session_latest/logs" ]]; then
+      echo "Ray session logs: ${temp_root}/session_latest/logs"
+      return 0
+    fi
+  done
+  if [[ "${RAY_ADDRESS}" == "auto" && -d "/tmp/ray/session_latest/logs" ]]; then
+    echo "Ray session logs: /tmp/ray/session_latest/logs"
+    return 0
+  fi
+  echo "Ray session logs: no local session found (Ray may be externally managed)"
 }
 
 wait_for_serve_gateway_ready() {
@@ -264,6 +295,7 @@ echo "Started on Ascend NPU."
 echo "ASCEND_RT_VISIBLE_DEVICES=${ASCEND_RT_VISIBLE_DEVICES:-}"
 echo "Ray NPU resources: ${NUM_NPUS}"
 echo "Logs: ${LOG_DIR}"
+print_ray_session_log_path
 echo "PIDs: ${PID_DIR}"
 echo "Public API: Ray Serve Gateway ingress (HeadOnly proxy)"
 echo "Try:"

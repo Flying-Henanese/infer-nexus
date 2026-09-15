@@ -89,3 +89,29 @@ Check:
 - `tests/test_api.py` for gateway metrics exposure
 
 Live metric validation requires a running gateway/Ray Serve environment.
+
+## For Logging And Request-Correlation Changes
+
+- Check structured application logs with the local console profile and JSONL
+  profiles used by both Compose deployments.
+- Verify request-ID validation, generated IDs, the response `X-Request-ID`
+  header, streaming legacy-header compatibility, and propagation through a
+  fake Serve handle, replica context, and proxy header policy.
+- Through the real Ray Serve HTTP proxy, verify a missing, invalid, or duplicate
+  inbound `X-Request-ID` becomes exactly one canonical response header and the
+  same ID appears in both the Ray proxy and application request logs.
+- Confirm the installed Ray version satisfies the `serve` extra's `<2.58` cap;
+  `RequestIdProxyMiddleware` currently relies on `HTTPOptions.middlewares`.
+- Verify unary and streaming terminal events, stream error/cancellation
+  outcomes, single traceback ownership, sampling behavior, and sensitive-field
+  redaction. Keep request IDs out of Prometheus labels.
+- For local runs, inspect `.infer-nexus/logs/ray_bootstrap.log`,
+  `.infer-nexus/logs/serve_runtime.log`, and
+  `.infer-nexus/ray/session_latest/logs/`.
+- For Compose, inspect each service's `/tmp/ray/session_latest/logs/` from
+  `ray-head`, `ray-worker`, and `serve-deployer`; these paths are backed by
+  separate named volumes. Check `docker compose logs` separately because
+  container stdout/stderr rotation is distinct from Ray file rotation.
+Use `docs/RAY_SERVE_VLLM_MONITORING.md` for operator commands and example
+queries. A configuration render or unit test does not verify a live collector,
+Ray log rotation, or real inference lifecycle.

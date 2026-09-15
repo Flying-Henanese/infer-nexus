@@ -16,7 +16,9 @@ Use this file to orient yourself before tracing request behavior. Verify details
 
 1. `docker-compose.yml` starts `ray-head`.
 2. `ray-worker` joins the Ray cluster and registers the accelerator budget exposed by the Compose/runtime environment.
-3. `serve-deployer` runs `scripts/run_serve_runtime.py --settings config/settings.compose.yaml`, submits Ray Serve apps, waits for readiness, and exits.
+3. `serve-deployer` runs `scripts/run_serve_runtime.py --settings config/settings.compose.yaml`;
+   the runner installs `RequestIdProxyMiddleware` in Ray HTTP options before
+   submitting Serve apps, waits for readiness, and exits.
 4. `serve-deployer` deploys the CPU-only `infer-nexus-gateway` application after all model applications are healthy.
 5. `ray-head:8000` exposes the Serve HTTP proxy; Gateway ingress reaches local models through cached Ray Serve deployment handles.
 
@@ -55,15 +57,23 @@ Use this file to orient yourself before tracing request behavior. Verify details
 
 ## `/v1/chat/completions`
 
-1. `WorkerAdmissionMiddleware` may acquire a process-local gateway slot for the inference path.
-2. `api/openai_routes.py:create_chat_completion()` receives a `ChatCompletionsRequest`.
-3. The route resolves `request.model` through `ModelRegistry` and requires `task: chat`.
+1. On the Ray Serve HTTP path, `RequestIdProxyMiddleware` validates or replaces
+   inbound `X-Request-ID` before Ray's built-in middleware captures it.
+   `RequestLoggingMiddleware` then uses the same proxy-owned ID outside worker
+   admission. Direct Uvicorn runs validate or create the ID in
+   `RequestLoggingMiddleware`.
+2. `WorkerAdmissionMiddleware` may acquire a process-local gateway slot. If full, it emits `admission.rejected`; the outer lifecycle still records the 503 request terminal event and request ID.
+3. `api/openai_routes.py:create_chat_completion()` receives a `ChatCompletionsRequest`, resolves `request.model` through `ModelRegistry`, and requires `task: chat`.
 4. `_check_model_ready()` validates local model artifacts for non-proxy models and runs admission checks.
-5. `RuntimeDispatcher.dispatch_chat()` resolves a `RuntimeTarget`.
-6. `RuntimeExecutor.execute_chat()` chooses proxy, Serve-handle, or local/stub behavior. A runtime-worker protocol exists, but no client is injected by `main.py`, so that isolation path is inactive.
-7. For local serve mode, the executor gets a cached Ray Serve deployment handle and calls `chat_completion.remote(...)` or `chat_completion_stream.remote(...)`.
-8. For proxy mode, the executor rewrites only the model field and forwards to the configured upstream OpenAI-compatible endpoint.
-9. Route-level metrics record request status, errors, inflight state, and token usage when available.
+5. `RuntimeDispatcher.dispatch_chat()` resolves a `RuntimeTarget`; `RuntimeExecutor.execute_chat()` chooses proxy, Serve-handle, or local/stub behavior. The runtime-worker protocol exists, but no client is injected by `main.py`, so that isolation path is inactive.
+6. For local Serve mode, the executor passes a serializable allowlisted `RequestContext` beside the request payload to the cached Ray Serve deployment handle. The model replica binds the same request ID and model/deployment fields while executing.
+7. For proxy mode, the executor rewrites the model field and forwards `X-Request-ID` when `headers_policy.pass_request_id` is enabled.
+8. The outer lifecycle finalizes request metrics after the full response body ends, including streamed responses. Every request has one `request.completed` or `request.failed` terminal event; streamed responses additionally have one `stream.completed`, `stream.failed`, or `stream.cancelled` event. Successful health, readiness, and metrics events are suppressed.
+
+The same outer request lifecycle and context propagation apply to embeddings and
+rerank requests. Do not emit prompts, request bodies, per-token or per-chunk
+records; see `docs/RAY_SERVE_VLLM_MONITORING.md` for log discovery and incident
+queries.
 
 ## `/v1/embeddings`
 
@@ -72,7 +82,7 @@ Use this file to orient yourself before tracing request behavior. Verify details
 3. `_check_model_ready()` validates local artifacts for non-proxy models and runs admission checks.
 4. `RuntimeDispatcher.dispatch_embedding()` resolves a `RuntimeTarget`.
 5. `RuntimeExecutor.execute_embedding()` chooses proxy or local/serve execution.
-6. Route-level metrics record request status, errors, inflight state, and token usage when available.
+6. The outer request lifecycle records request status, errors, inflight state, and token usage when available, after the body completes.
 
 ## `/v1/rerank` And `/rerank`
 
@@ -81,7 +91,7 @@ Use this file to orient yourself before tracing request behavior. Verify details
 3. `_check_model_ready()` validates local artifacts for non-proxy models and runs admission checks.
 4. `RuntimeDispatcher.dispatch_rerank()` resolves a `RuntimeTarget`.
 5. `RuntimeExecutor.execute_rerank()` chooses proxy or local/serve execution.
-6. Route-level metrics use the actual HTTP path when available.
+6. The outer request lifecycle records metrics after the body completes and uses the actual HTTP path when available.
 
 ## Platform Catalog APIs
 

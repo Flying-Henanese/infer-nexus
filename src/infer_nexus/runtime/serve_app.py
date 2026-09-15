@@ -5,7 +5,7 @@ from typing import Any
 
 from infer_nexus.backends.vllm import VLLMBackend
 from infer_nexus.catalog.registry import ModelRegistry
-from infer_nexus.core.config import Settings
+from infer_nexus.core.config import LoggingSettings, Settings
 from infer_nexus.core.enums import BackendType
 from infer_nexus.model_store import LocalModelStore
 from infer_nexus.runtime.deployments import (
@@ -28,12 +28,16 @@ class ServeApplicationBuilder:
         backend_init_mode: str = "stub",
         service_name: str = "infer-nexus",
         deployment_factory: DeploymentFactory | None = None,
+        logging_settings: LoggingSettings | None = None,
     ) -> None:
         """初始化对象并保存运行时依赖。"""
         self.model_store = model_store
         self.backend_init_mode = backend_init_mode
         self.service_name = service_name
-        self.deployment_factory = deployment_factory or DeploymentFactory()
+        self.logging_settings = logging_settings or LoggingSettings()
+        self.deployment_factory = deployment_factory or DeploymentFactory(
+            logging_settings=self.logging_settings
+        )
         self.backend = VLLMBackend({})
 
     def build_specs(self, registry: ModelRegistry) -> list[DeploymentSpec]:
@@ -130,6 +134,7 @@ class ServeApplicationBuilder:
             "deployment_name": self.deployment_factory.build_deployment_name(model),
             "resolved_model_path": str(model_reference),
             "runtime_spec": runtime_spec,
+            "logging_settings": self.logging_settings.model_dump(mode="json"),
         }
         self.backend.validate_runtime_spec(runtime_spec, runtime_context)
         return runtime_context

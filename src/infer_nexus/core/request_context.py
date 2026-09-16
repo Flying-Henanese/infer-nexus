@@ -54,6 +54,7 @@ class RequestLifecycleState:
     status_code: int | None = None
     upstream_status: int | None = None
     error_code: str | None = None
+    admission_rejected: bool = False
     token_usage: Any = None
     exception: BaseException | None = None
     outcome: str | None = None

@@ -7,7 +7,7 @@ from typing import Final
 
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from infer_nexus.api.request_logging_middleware import mark_request_error
+from infer_nexus.api.request_logging_middleware import mark_admission_rejection
 from infer_nexus.control.worker_admission import (
     WorkerAdmissionController,
     WorkerOverloadedError,
@@ -65,7 +65,7 @@ class WorkerAdmissionMiddleware:
         try:
             await controller.acquire()
         except WorkerOverloadedError:
-            mark_request_error("gateway_worker_overloaded")
+            mark_admission_rejection("gateway_worker_overloaded")
             self.logger.warning(
                 "admission.rejected",
                 reason="gateway_worker_overloaded",

@@ -17,6 +17,7 @@ from infer_nexus.api.deps import (
     get_registry,
     get_runtime_dispatcher,
 )
+from infer_nexus.api.request_logging_middleware import mark_admission_rejection
 from infer_nexus.catalog.models import ModelConfig
 from infer_nexus.catalog.registry import ModelRegistry
 from infer_nexus.control.admission import AdmissionController
@@ -217,6 +218,7 @@ def _runtime_error_response(exc: Exception, *, operation: str, request_model: st
             code="model_artifact_missing",
         )
     if isinstance(exc, AdmissionRejectedError):
+        mark_admission_rejection(exc.code)
         return openai_error_response(
             429,
             str(exc),

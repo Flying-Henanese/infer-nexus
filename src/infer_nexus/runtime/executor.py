@@ -139,10 +139,6 @@ class _ServeDeploymentGuard:
             model=self.model_label,
             reason=code,
         )
-        GATEWAY_METRICS.observe_admission_rejection(
-            model=self.model_label,
-            reason=code,
-        )
         logger.warning(
             "admission.rejected",
             model=self.model_label,

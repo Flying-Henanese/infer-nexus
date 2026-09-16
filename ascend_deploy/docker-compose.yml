@@ -105,13 +105,13 @@ services:
             echo "ASCEND_RT_VISIBLE_DEVICES must define the infer-nexus NPU pool, for example: 0,1,2,3." >&2;
             exit 1;
           fi;
-          DERIVED_NUM_NPUS=$$(python -c "import os; v=os.environ.get('ASCEND_RT_VISIBLE_DEVICES',''); print(len([x for x in v.split(',') if x.strip()]))");
+          DERIVED_NUM_NPUS=$$(python -c "import os; v=os.environ.get(\"ASCEND_RT_VISIBLE_DEVICES\",\"\"); print(len([x for x in v.split(\",\") if x.strip()]))");
           if [ "$${DERIVED_NUM_NPUS}" -le 0 ]; then
             echo "ASCEND_RT_VISIBLE_DEVICES must contain at least one device id." >&2;
             exit 1;
           fi;
           RESOURCE_ARGS="--resources={\"NPU\":$${DERIVED_NUM_NPUS}}";
-          RAY_HEAD_IP=$$(python -c "import socket; print(socket.gethostbyname('ray-head'))");
+          RAY_HEAD_IP=$$(python -c "import socket; print(socket.gethostbyname(\"ray-head\"))");
           RAY_ADDRESS="$${RAY_HEAD_IP}:6379";
           exec ray start --address="$${RAY_ADDRESS}" \
           --node-ip-address=$$(hostname -i) \
@@ -172,7 +172,7 @@ services:
         exec sh /app/scripts/container/run_with_log.sh /var/log/infer-nexus/container.log --
         bash -ec '
           trap "ray stop --force >/dev/null 2>&1 || true" EXIT;
-          RAY_HEAD_IP=$$(python -c "import socket; print(socket.gethostbyname('ray-head'))");
+          RAY_HEAD_IP=$$(python -c "import socket; print(socket.gethostbyname(\"ray-head\"))");
           RAY_ADDRESS="$${INFER_NEXUS_RAY_ADDRESS:-$${RAY_HEAD_IP}:6379}";
           ray start --address="$${RAY_ADDRESS}" \
           --node-ip-address=$$(hostname -i) \

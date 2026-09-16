@@ -62,13 +62,14 @@ Use this file to orient yourself before tracing request behavior. Verify details
    `RequestLoggingMiddleware` then uses the same proxy-owned ID outside worker
    admission. Direct Uvicorn runs validate or create the ID in
    `RequestLoggingMiddleware`.
-2. `WorkerAdmissionMiddleware` may acquire a process-local gateway slot. If full, it emits `admission.rejected`; the outer lifecycle still records the 503 request terminal event and request ID.
+2. `WorkerAdmissionMiddleware` may acquire a process-local gateway slot. If full, it marks the active lifecycle as an admission rejection with code `gateway_worker_overloaded`, emits `admission.rejected`, and returns 503 with the request ID.
 3. `api/openai_routes.py:create_chat_completion()` receives a `ChatCompletionsRequest`, resolves `request.model` through `ModelRegistry`, and requires `task: chat`.
 4. `_check_model_ready()` validates local model artifacts for non-proxy models and runs admission checks.
 5. `RuntimeDispatcher.dispatch_chat()` resolves a `RuntimeTarget`; `RuntimeExecutor.execute_chat()` chooses proxy, Serve-handle, or local/stub behavior. The runtime-worker protocol exists, but no client is injected by `main.py`, so that isolation path is inactive.
 6. For local Serve mode, the executor passes a serializable allowlisted `RequestContext` beside the request payload to the cached Ray Serve deployment handle. The model replica binds the same request ID and model/deployment fields while executing.
 7. For proxy mode, the executor rewrites the model field and forwards `X-Request-ID` when `headers_policy.pass_request_id` is enabled.
-8. The outer lifecycle finalizes request metrics after the full response body ends, including streamed responses. Every request has one `request.completed` or `request.failed` terminal event; streamed responses additionally have one `stream.completed`, `stream.failed`, or `stream.cancelled` event. Successful health, readiness, and metrics events are suppressed.
+8. A model admission check or `_ServeDeploymentGuard` may raise `AdmissionRejectedError`. The OpenAI route marks the active lifecycle as an admission rejection before returning the OpenAI-compatible overload response. The runtime guard records only its layer-specific `runtime_guard_rejections_total` metric.
+9. The outer lifecycle finalizes request metrics after the full response body ends, including streamed responses. It is the sole owner of `admission_rejections_total`: each explicitly marked rejection increments it once, alongside `requests_total{status="rejected"}` and the stable error counter. Every request has one `request.completed` or `request.failed` terminal event; streamed responses additionally have one `stream.completed`, `stream.failed`, or `stream.cancelled` event. Successful health, readiness, and metrics events are suppressed.
 
 The same outer request lifecycle and context propagation apply to embeddings and
 rerank requests. Do not emit prompts, request bodies, per-token or per-chunk

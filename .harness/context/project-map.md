@@ -29,6 +29,8 @@ Use this file to choose the first source files to inspect. It is a navigation ma
   - `health_routes.py`: `/healthz` and `/readyz`.
   - `metrics_routes.py`: `/metrics`.
   - `deps.py`: FastAPI dependency accessors for `app.state`.
+  - `request_logging_middleware.py`: outer ASGI request identity, terminal-log,
+    request-metric, and admission-rejection lifecycle ownership.
   - `worker_admission_middleware.py`: process-local gateway worker admission middleware.
 
 - `src/infer_nexus/catalog/`

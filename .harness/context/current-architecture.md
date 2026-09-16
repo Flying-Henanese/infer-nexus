@@ -121,6 +121,14 @@ settings files rather than request-path code.
   payloads, bound in `ModelRuntimeReplica`, and forwarded upstream as
   `X-Request-ID` when a proxy model's `headers_policy.pass_request_id` is true.
   The request ID stays out of the OpenAI request body and metric labels.
+- Admission metrics have explicit ownership. An admission source marks the
+  active `RequestLifecycleState` with its stable error code; the outer
+  `RequestLoggingMiddleware` records exactly one
+  `admission_rejections_total` when that lifecycle finalizes. A
+  `_ServeDeploymentGuard` records only its layer-specific
+  `runtime_guard_rejections_total`, so the same rejection is not counted twice.
+  An unrelated HTTP 429 is not an admission rejection unless a source marks it
+  explicitly.
 - The Gateway lifecycle owns one `request.completed` or `request.failed` event
   per HTTP request. Streaming adds exactly one stream event
   (`stream.completed`, `stream.failed`, or `stream.cancelled`) after body

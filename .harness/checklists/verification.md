@@ -89,6 +89,14 @@ Check:
 - `tests/test_api.py` for gateway metrics exposure
 
 Live metric validation requires a running gateway/Ray Serve environment.
+For a gateway-local runtime admission change, capture metric deltas around a
+six-request concurrent chat burst against the active model. With a per-model
+limit of four and fail-fast queueing, expect four HTTP 200 responses and two
+HTTP 429 responses. The deltas for
+`requests_total{status="rejected"}`, `errors_total{code="gateway_overloaded"}`,
+`admission_rejections_total`, and `runtime_guard_rejections_total` must each
+be two. This is distinct from Ray Serve proxy queue saturation, which can
+reject before FastAPI metrics or worker admission run.
 
 ## For Logging And Request-Correlation Changes
 

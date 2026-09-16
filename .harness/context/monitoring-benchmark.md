@@ -30,6 +30,19 @@ Important metric groups:
 - stream completion status
 - token counters when response usage exists
 
+### Admission Metric Contract
+
+- `infer_nexus_requests_total{status="rejected"}` counts one HTTP request that
+  the lifecycle classified as an explicit admission rejection.
+- `infer_nexus_errors_total` records the same request's stable error code, such
+  as `gateway_overloaded`.
+- `infer_nexus_admission_rejections_total` is the cross-layer logical total and
+  is incremented only by the outer request lifecycle, once per marked request.
+- `infer_nexus_runtime_guard_rejections_total` is a layer-specific detail
+  counter incremented by the per-model runtime guard before Serve handle
+  routing. It can equal the generic admission total when that guard is the only
+  rejection source, but the two metrics have different ownership and meaning.
+
 ## Ray Serve And vLLM Metrics
 
 Current monitoring direction:

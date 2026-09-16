@@ -1067,7 +1067,7 @@ def test_dispatch_chat_rejects_when_gateway_inflight_limit_is_reached() -> None:
         )
         target = RuntimeTarget(
             model_name='qwen3-32b-instruct',
-            model_alias='qwen3-chat',
+            model_alias='gateway-admission-guard',
             backend=BackendType.VLLM,
             app_name='infer-nexus-model-qwen3-32b-instruct',
             deployment_name='model-qwen3-32b-instruct',
@@ -1082,6 +1082,15 @@ def test_dispatch_chat_rejects_when_gateway_inflight_limit_is_reached() -> None:
         await first_task
 
         assert exc_info.value.code == 'gateway_overloaded'
+        metrics = render_prometheus_metrics()[0].decode('utf-8')
+        assert (
+            'infer_nexus_runtime_guard_rejections_total{'
+            'model="gateway-admission-guard",reason="gateway_overloaded"} 1.0'
+        ) in metrics
+        assert (
+            'infer_nexus_admission_rejections_total{'
+            'model="gateway-admission-guard",reason="gateway_overloaded"}'
+        ) not in metrics
 
     asyncio.run(run_case())
 

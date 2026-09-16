@@ -385,7 +385,7 @@ def test_chat_completions_returns_429_when_admission_rejects(prepared_model_stor
     """准入控制拒绝时 chat 接口应返回 429。"""
     app = create_app()
     payload = {
-        'model': 'qwen3-chat',
+        'model': 'qwen3.5-9b',
         'messages': [{'role': 'user', 'content': 'hello'}],
     }
 
@@ -393,11 +393,17 @@ def test_chat_completions_returns_429_when_admission_rejects(prepared_model_stor
         def reject(_model):
             raise AdmissionRejectedError('overloaded', code='queue_full')
 
+        client.app.state.model_store.require_model_path = lambda _model: None
         client.app.state.admission.check_model_request = reject
         response = client.post('/v1/chat/completions', json=payload)
+        metrics = client.get('/metrics')
 
     assert response.status_code == 429
     assert response.json()['error']['code'] == 'queue_full'
+    assert (
+        'infer_nexus_admission_rejections_total{'
+        'model="qwen3.5-9b",reason="queue_full"} 1.0'
+    ) in metrics.text
 
 
 def test_chat_completions_returns_429_when_gateway_admission_rejects(

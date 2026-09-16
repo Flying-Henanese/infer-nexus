@@ -83,11 +83,12 @@ def _response_error_code(body: bytes) -> str | None:
     return code if isinstance(code, str) and code else None
 
 
-def mark_request_error(error_code: str) -> None:
-    """Attach a stable domain error code to the active request lifecycle."""
+def mark_admission_rejection(error_code: str) -> None:
+    """Mark the active request as an explicit admission rejection."""
     state = _current_state()
     if state is not None:
         state.error_code = error_code
+        state.admission_rejected = True
 
 
 def _current_state() -> RequestLifecycleState | None:
@@ -110,14 +111,11 @@ def _outcome(state: RequestLifecycleState) -> str:
         return "timeout" if state.error_code == "upstream_timeout" else "error"
     if not state.response_complete:
         return "error"
+    if state.admission_rejected:
+        return "rejected"
     if state.status_code is not None and state.status_code >= 500:
         return "timeout" if state.error_code == "upstream_timeout" else "error"
     if state.status_code is not None and state.status_code >= 400:
-        if state.status_code == 429 or state.error_code in {
-            "gateway_worker_overloaded",
-            "admission_rejected",
-        }:
-            return "rejected"
         return "error"
     return "success"
 
@@ -153,7 +151,7 @@ def _record_request_metrics(state: RequestLifecycleState, duration_seconds: floa
             task=context.task,
             code="invalid_request",
         )
-    if state.outcome == "rejected":
+    if state.admission_rejected:
         GATEWAY_METRICS.observe_admission_rejection(
             model=model,
             reason=state.error_code or "admission_rejected",

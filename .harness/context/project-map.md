@@ -122,6 +122,9 @@ Use this file to choose the first source files to inspect. It is a navigation ma
 
 ## Scripts
 
+- `scripts/prepare_compose_logs.py`
+  - Prepares host log directory permissions and persists `LOGS_HOST_PATH` in `.env` for both Compose profiles.
+
 - `scripts/run_gateway.py`
   - Starts the FastAPI app only for local/stub debugging.
 

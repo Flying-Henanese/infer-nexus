@@ -46,7 +46,8 @@ From the remote repository root, recreate the Compose services so their mounted
 source and configuration use the pulled revision:
 
 ```bash
-docker compose up -d --no-build --force-recreate
+python3 scripts/prepare_compose_logs.py
+docker compose --env-file .env up -d --no-build --force-recreate
 docker compose ps --all
 ```
 
@@ -88,7 +89,7 @@ Only report the change as deployed after recording:
 - the result of any change-specific smoke test
 
 If validation fails, collect only relevant read-only logs such as
-`tail -n 200 logs/<service>/container.log` and files below
-`logs/<service>/ray/session_latest/logs/`. Docker Compose logs remain a fallback
+`tail -n 200 ${LOGS_HOST_PATH}/<service>/container.log` and files below
+`${LOGS_HOST_PATH}/<service>/ray/session_latest/logs/`. Docker Compose logs remain a fallback
 for failures before the host log wrapper starts. Do not make destructive
 recovery changes without user approval.

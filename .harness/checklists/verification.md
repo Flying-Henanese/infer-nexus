@@ -117,9 +117,10 @@ reject before FastAPI metrics or worker admission run.
   `.infer-nexus/logs/serve_runtime.log`, and
   `.infer-nexus/ray/session_latest/logs/`.
 - For Compose, inspect host paths for every service: use
-  `logs/<service>/container.log` for command stdout/stderr and
-  `logs/<service>/ray/session_latest/logs/` for Ray files. Confirm `log-init`
-  completed successfully before diagnosing a missing directory.
+  `${LOGS_HOST_PATH}/<service>/container.log` for command stdout/stderr and
+  `${LOGS_HOST_PATH}/<service>/ray/session_latest/logs/` for Ray files. Run
+  `python3 scripts/prepare_compose_logs.py` before startup and confirm `.env`
+  points to the prepared absolute directory.
 Use `docs/RAY_SERVE_VLLM_MONITORING.md` for operator commands and example
 queries. A configuration render or unit test does not verify a live collector,
 Ray log rotation, or real inference lifecycle.

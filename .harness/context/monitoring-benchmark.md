@@ -71,7 +71,7 @@ Current monitoring direction:
 - Local bootstrap logs are under `.infer-nexus/logs/`; actual Ray session logs
   are under `.infer-nexus/ray/session_latest/logs/` (or the printed external
   `/tmp/ray/session_latest/logs/` path). Compose exports separate session
-  directories to `logs/<service>/ray/`; each sibling `container.log` contains
+  directories to `${LOGS_HOST_PATH}/<service>/ray/`; each sibling `container.log` contains
   that service command's stdout/stderr. Ray component files use 50 MiB × 3
   backups. `container.log` is append-only on the host and requires a host
   `logrotate` policy when retention is needed.

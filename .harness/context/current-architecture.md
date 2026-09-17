@@ -141,9 +141,10 @@ settings files rather than request-path code.
 - Local Ray files live under `.infer-nexus/ray/session_latest/logs/`, apart from
   CLI/bootstrap output at `.infer-nexus/logs/ray_bootstrap.log` and
   `.infer-nexus/logs/serve_runtime.log`. Compose exports runtime files to
-  `logs/<service>/`: `container.log` contains service-command stdout/stderr
-  and `ray/` is the service's `/tmp/ray` root. A one-shot `log-init` service
-  creates these host paths before non-root runtime services start.
+  `${LOGS_HOST_PATH}/<service>/`: `container.log` contains service-command stdout/stderr
+  and `ray/` is the service's `/tmp/ray` root. The host script
+  `scripts/prepare_compose_logs.py` prepares these paths and persists the
+  absolute log root in `.env` before non-root runtime services start.
 
 ## Known Checked-in Integration Gaps
 

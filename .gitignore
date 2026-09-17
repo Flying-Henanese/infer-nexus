@@ -78,3 +78,6 @@ src/infer_nexus/artifacts/**/*.pyc
 .dmypy.json
 dmypy.json
 benchmark-results/
+
+# Host runtime logs
+/logs/

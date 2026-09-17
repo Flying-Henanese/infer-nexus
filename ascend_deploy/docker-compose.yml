@@ -15,35 +15,10 @@ x-infer-nexus-image: &infer-nexus-image
       APP_GID: ${APP_GID:-10001}
 
 services:
-  log-init:
-    <<: *infer-nexus-image
-    user: "0:0"
-    logging: *container-log-rotation
-    environment:
-      APP_UID: ${APP_UID:-10001}
-      APP_GID: ${APP_GID:-10001}
-    command:
-      - bash
-      - -ec
-      - >
-        install -d -m 0755 /logs/log-init;
-        exec >>/logs/log-init/container.log 2>&1;
-        for service in ray-head ray-worker serve-deployer; do
-          install -d -m 0755 -o "$${APP_UID}" -g "$${APP_GID}" "/logs/$${service}";
-          install -d -m 0755 -o "$${APP_UID}" -g "$${APP_GID}" "/logs/$${service}/ray";
-        done;
-        echo "Prepared host-visible Compose log directories."
-    volumes:
-      - ../logs:/logs
-    restart: "no"
-
   ray-head:
     <<: *infer-nexus-image
     user: infer-nexus
     logging: *container-log-rotation
-    depends_on:
-      log-init:
-        condition: service_completed_successfully
     command:
       - bash
       - -lc
@@ -71,8 +46,16 @@ services:
       - ../README.md:/app/README.md:ro
       - ../config:/app/config:ro
       - ${MODEL_STORE_HOST_PATH:-../models}:/models
-      - ../logs/ray-head:/var/log/infer-nexus
-      - ../logs/ray-head/ray:/tmp/ray
+      - type: bind
+        source: ${LOGS_HOST_PATH:?Run python3 scripts/prepare_compose_logs.py first}/ray-head
+        target: /var/log/infer-nexus
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${LOGS_HOST_PATH:?Run python3 scripts/prepare_compose_logs.py first}/ray-head/ray
+        target: /tmp/ray
+        bind:
+          create_host_path: false
     healthcheck:
       test: ["CMD-SHELL", "ray status --address=127.0.0.1:6379 >/dev/null 2>&1"]
       interval: 10s
@@ -90,8 +73,6 @@ services:
        - "${ASCEND_DEVICE_GID:-1003}"
     privileged: true
     depends_on:
-      log-init:
-        condition: service_completed_successfully
       ray-head:
         condition: service_healthy
     command:
@@ -138,8 +119,16 @@ services:
       - ../README.md:/app/README.md:ro
       - ../config:/app/config:ro
       - ${MODEL_STORE_HOST_PATH:-../models}:/models
-      - ../logs/ray-worker:/var/log/infer-nexus
-      - ../logs/ray-worker/ray:/tmp/ray
+      - type: bind
+        source: ${LOGS_HOST_PATH:?Run python3 scripts/prepare_compose_logs.py first}/ray-worker
+        target: /var/log/infer-nexus
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${LOGS_HOST_PATH:?Run python3 scripts/prepare_compose_logs.py first}/ray-worker/ray
+        target: /tmp/ray
+        bind:
+          create_host_path: false
       - /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro
       - /usr/local/dcmi:/usr/local/dcmi:ro
       - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro
@@ -159,8 +148,6 @@ services:
     logging: *container-log-rotation
     environment: *ray-logging-environment
     depends_on:
-      log-init:
-        condition: service_completed_successfully
       ray-head:
         condition: service_healthy
       ray-worker:
@@ -192,6 +179,14 @@ services:
       - ../README.md:/app/README.md:ro
       - ../config:/app/config:ro
       - ${MODEL_STORE_HOST_PATH:-../models}:/models
-      - ../logs/serve-deployer:/var/log/infer-nexus
-      - ../logs/serve-deployer/ray:/tmp/ray
+      - type: bind
+        source: ${LOGS_HOST_PATH:?Run python3 scripts/prepare_compose_logs.py first}/serve-deployer
+        target: /var/log/infer-nexus
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${LOGS_HOST_PATH:?Run python3 scripts/prepare_compose_logs.py first}/serve-deployer/ray
+        target: /tmp/ray
+        bind:
+          create_host_path: false
     restart: "no"

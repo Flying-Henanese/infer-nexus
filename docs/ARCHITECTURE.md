@@ -65,7 +65,7 @@ Implemented:
   request lifecycle middleware and return it in `X-Request-ID`.
 - Local scripts expose Ray session logs under `.infer-nexus/ray/`; Compose
   exports the head, worker, and deployer session directories to
-  `logs/<service>/ray/` and each service command's output to its sibling
+  `${LOGS_HOST_PATH}/<service>/ray/` and each service command's output to its sibling
   `container.log`.
 
 Skeleton or partial:
@@ -1101,11 +1101,13 @@ Current implementation status:
   Ray component and worker logs are under
   `.infer-nexus/ray/session_latest/logs/`; for an externally managed Ray
   session, the startup script may report `/tmp/ray/session_latest/logs/`.
-- Compose exports runtime logs to the repository-root `logs/` tree. Each
-  service owns `logs/<service>/container.log` for its command stdout/stderr and
-  `logs/<service>/ray/` for its `/tmp/ray` session files. A one-shot root-only
-  `log-init` service prepares these host directories before non-root runtime
-  services start. Ray's component rotation remains 50 MiB with three backups.
+- Compose exports runtime logs to the absolute `LOGS_HOST_PATH` configured in `.env`. Each
+  service owns `${LOGS_HOST_PATH}/<service>/container.log` for its command stdout/stderr and
+  `${LOGS_HOST_PATH}/<service>/ray/` for its `/tmp/ray` session files. The host script
+  `scripts/prepare_compose_logs.py` prepares directory ownership before non-root
+  runtime services start. Without configuration it creates a sibling
+  `infer-nexus-logs` directory and persists its absolute path in `.env`.
+  Compose rejects missing bind-mount directories instead of creating them. Ray's component rotation remains 50 MiB with three backups.
   `container.log` is append-only on the host and should use a host `logrotate`
   policy where retention is required.
 

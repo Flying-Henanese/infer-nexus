@@ -87,8 +87,9 @@ The first-stage Compose deployment keeps the current infer-nexus runtime archite
 Basic startup flow:
 
 ```bash
-docker compose build
-docker compose up
+python3 scripts/prepare_compose_logs.py
+docker compose --env-file .env build
+docker compose --env-file .env up
 ```
 
 Useful deployment variables:
@@ -109,11 +110,18 @@ Containers run as the `infer-nexus` non-root user created in the image. Make sur
 
 ### Host-visible Compose logs
 
-Compose creates a host-side `logs/` tree before starting the runtime services.
+Run `python3 scripts/prepare_compose_logs.py` before Compose startup. It uses
+`LOGS_HOST_PATH` from the repository `.env`; when unset, it creates a sibling
+`infer-nexus-logs` directory and writes its absolute path to `.env`. If `.env`
+does not exist, it starts from `.env.template`. To select another directory:
+
+```bash
+python3 scripts/prepare_compose_logs.py --logs-dir /data/infer-nexus-logs
+```
 Both CUDA and Ascend Compose profiles use the same service-first layout:
 
 ```text
-logs/
+${LOGS_HOST_PATH}/
   ray-head/
     container.log          # container command stdout and stderr
     ray/session_latest/logs/  # Ray Serve, Gateway, replica, and vLLM files
@@ -125,14 +133,24 @@ logs/
     ray/session_latest/logs/
 ```
 
-The one-shot `log-init` service creates these directories and grants the
-non-root container user write access, so no manual `mkdir` or `chown` is
-needed. View a service's startup output directly from the host, for example:
+The script grants service directories to `.env`'s `APP_UID:APP_GID` (or
+`10001:10001` when absent), matching the built image. It invokes `sudo` only
+when ownership preparation needs it; run the script as your normal host user.
+Changing these IDs requires rebuilding the image. Existing files are preserved
+and are not recursively chowned: migrated logs must already be writable by
+the container user. Compose fails if the prepared directories are missing.
+Both profiles should be launched from the repository root with `--env-file .env`:
 
 ```bash
-tail -F logs/ray-head/container.log
-find logs/ray-worker/ray/session_latest/logs -type f
-rg 'model.replica.failed' logs
+docker compose --env-file .env -f ascend_deploy/docker-compose.yml up -d
+```
+
+View startup output using the absolute path printed by the script, for example:
+
+```bash
+tail -F /path/to/infer-nexus-logs/ray-head/container.log
+find /path/to/infer-nexus-logs/ray-worker/ray/session_latest/logs -type f
+rg 'model.replica.failed' /path/to/infer-nexus-logs
 ```
 
 Ray component logs retain their Ray-managed 50 MiB × three-file rotation.

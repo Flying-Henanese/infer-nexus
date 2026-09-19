@@ -1,148 +1,75 @@
 # Request Flows
 
-Use this file to orient yourself before tracing request behavior. Verify details in source before changing code.
+Use this map for cross-component behavior. Verify the details in source before
+changing a route, middleware, deployment, or backend.
 
-## App Startup
+## Startup Modes
 
-1. `scripts/run_gateway.py` can start the FastAPI app from `src/infer_nexus/main.py` for local or standalone Ray-connected runs. It is not part of the current Compose entrypoint: in Compose Serve mode, `InferNexusGatewayIngress` owns the same FastAPI app inside a Serve replica.
-2. `lifespan()` loads the selected settings file: `config/settings.yaml` by default, `config/settings.compose.yaml` in the root CUDA Compose flow, or `config/settings.ascend-compose.yaml` in the Ascend Compose flow.
-3. `load_model_catalog(settings.catalog.models_path)` loads `config/models.yaml`.
-4. `ModelRegistry` indexes model names, aliases, and served model names.
-5. `LocalModelStore`, `ServeApplicationBuilder`, `RuntimeExecutor`, `WorkerAdmissionController`, and `RuntimeDispatcher` are created.
-6. These objects are attached to `app.state`.
-7. `create_app()` registers health, metrics, OpenAI-compatible, compatibility, and platform routers.
+- `src/infer_nexus/main.py` loads the selected settings and the single model
+  catalog, builds the registry, model store, Serve builder, executor, worker
+  admission controller, and dispatcher, then attaches them to `app.state`.
+- `scripts/run_gateway.py` starts FastAPI for local or standalone debugging.
+  In Compose Serve mode, the same app runs inside
+  `InferNexusGatewayIngress`; there is no separate Uvicorn gateway service.
+- Both Compose profiles start `ray-head`, `ray-worker`, and one-shot
+  `serve-deployer`. `scripts/run_serve_runtime.py` submits one Serve
+  application per local `backend: vllm` model, waits for them, then submits
+  the CPU-only Gateway application at `/`. The public HTTP proxy is on
+  `ray-head:8000`.
+- Root Compose selects `config/settings.compose.yaml` and GPU resources.
+  Ascend Compose selects `config/settings.ascend-compose.yaml` and custom
+  Ray `NPU` resources. The local `scripts/start_minimal_ascend.sh` still
+  defaults to `config/settings.yaml`; pass
+  `--settings config/settings.ascend-compose.yaml` for an Ascend launch.
 
-## Root CUDA Compose Runtime Startup
+## Shared Inference Path
 
-1. `docker-compose.yml` starts `ray-head`.
-2. `ray-worker` joins the Ray cluster and registers the accelerator budget exposed by the Compose/runtime environment.
-3. `serve-deployer` runs `scripts/run_serve_runtime.py --settings config/settings.compose.yaml`;
-   the runner installs `RequestIdProxyMiddleware` in Ray HTTP options before
-   submitting Serve apps, waits for readiness, and exits.
-4. `serve-deployer` deploys the CPU-only `infer-nexus-gateway` application after all model applications are healthy.
-5. `ray-head:8000` exposes the Serve HTTP proxy; Gateway ingress reaches local models through cached Ray Serve deployment handles.
+1. In Serve mode, `RequestIdProxyMiddleware` normalizes inbound
+   `X-Request-ID` before Ray captures it. Direct Uvicorn runs resolve the ID
+   in `RequestLoggingMiddleware` instead.
+2. The Serve proxy forwards to `InferNexusGatewayIngress`, whose FastAPI app
+   runs request logging outside process-local worker admission. A full
+   Gateway worker guard can reject with HTTP 503 before a route runs.
+3. An OpenAI-compatible route resolves the requested model through
+   `ModelRegistry`, checks its task type, validates local artifacts where
+   applicable, and calls the model-level admission hook.
+4. `RuntimeDispatcher` selects a target. `RuntimeExecutor` applies its
+   per-model guards and chooses a local Serve handle, configured upstream
+   proxy, or local/stub path. The runtime-worker client protocol exists but
+   is not injected by `main.py`; it is not an active isolation path.
+5. A local Serve handle passes an allowlisted `RequestContext` to
+   `ModelRuntimeReplica` and its replica-local vLLM backend. Proxy execution
+   rewrites the model field and forwards the request ID according to
+   `headers_policy.pass_request_id`.
+6. The outer request lifecycle records one terminal request event and
+   finalizes gateway metrics after the response body ends. Streaming also
+   emits one stream terminal event. Explicit admission rejections increment
+   the cross-layer admission metric once; the runtime guard separately
+   records its layer-specific counter.
 
-## Ascend Compose Runtime Startup
+Ray Serve can reject a saturated public Gateway queue with HTTP 503 before
+FastAPI middleware or gateway metrics run. Inspect
+`serve_deployment_queued_queries` for that outer pressure.
 
-1. `ascend_deploy/docker-compose.yml` starts `ray-head` using the Ascend-specific image.
-2. `ray-worker` derives an NPU count from `ASCEND_RT_VISIBLE_DEVICES` and registers matching custom Ray `NPU` resources.
-3. `serve-deployer` runs `scripts/run_serve_runtime.py --settings config/settings.ascend-compose.yaml`, submits Ray Serve apps, waits for readiness, and exits.
-4. `serve-deployer` deploys the CPU-only `infer-nexus-gateway` application after all model applications are healthy.
-5. `ray-head:8000` exposes the Serve HTTP proxy; Gateway ingress reaches local models through cached Ray Serve deployment handles.
+## Endpoint Differences
 
-## Local Script Startup Caveat
+| Endpoint | Distinction |
+| --- | --- |
+| `GET /v1/models` | Lists catalog model IDs, preferring served name then alias then canonical name; it does not check runtime readiness. |
+| `POST /v1/chat/completions` | Requires a chat model and supports unary or streaming execution. |
+| `POST /v1/embeddings` | Requires an embedding model. |
+| `POST /v1/rerank`, `POST /rerank` | Require a rerank model and share the same implementation. |
 
-- `scripts/start_minimal.sh` is CUDA-oriented, registers GPU resources, and
-  matches the CUDA default in `config/settings.yaml`.
-- `scripts/start_minimal_ascend.sh` registers custom NPU resources, but its
-  default settings argument is still `config/settings.yaml`. Invoke it with
-  `--settings config/settings.ascend-compose.yaml` on Ascend.
+## Platform, Metrics, And Health
 
-## Serve Runtime Startup
+- `api/platform_routes.py` exposes read-only catalog, model status, load,
+  and capacity views. Model status checks local artifacts but does not
+  connect to full runtime state; load is lightweight and capacity is stubbed.
+- `GET /metrics` returns Gateway Prometheus metrics. Ray Serve and embedded
+  vLLM metrics need their own metrics targets when available.
+- `GET /healthz` checks basic process liveness. In Serve mode,
+  `GET /readyz` returns 503 until every configured local model application
+  and deployment is healthy; local/stub mode returns a basic success response.
 
-1. `scripts/run_serve_runtime.py` loads settings and the model catalog.
-2. `ServeApplicationBuilder.build_serve_bindings()` builds one Ray Serve application binding per local `backend: vllm` model.
-3. `DeploymentFactory` maps each model to deployment kwargs and Ray actor options, including optional `deployment_config.request_router_config` such as a cache-affinity `request_router_class`.
-4. Each model Ray Serve app is submitted with `serve.run(..., route_prefix=None, blocking=False)`.
-5. The script waits for model applications, then submits the one Gateway application with route prefix `/`.
-6. Gateway ingress later reaches these apps through cached deployment handles.
-
-## `/v1/models`
-
-1. `api/openai_routes.py:list_models()` receives the request.
-2. FastAPI injects `ModelRegistry` through `api/deps.py:get_registry()`.
-3. The route iterates `registry.list_models()`.
-4. Response model ids prefer `served_model_name`, then `alias`, then canonical `name`.
-5. No runtime readiness or model artifact check is performed on this path.
-
-## `/v1/chat/completions`
-
-1. On the Ray Serve HTTP path, `RequestIdProxyMiddleware` validates or replaces
-   inbound `X-Request-ID` before Ray's built-in middleware captures it.
-   `RequestLoggingMiddleware` then uses the same proxy-owned ID outside worker
-   admission. Direct Uvicorn runs validate or create the ID in
-   `RequestLoggingMiddleware`.
-2. `WorkerAdmissionMiddleware` may acquire a process-local gateway slot. If full, it marks the active lifecycle as an admission rejection with code `gateway_worker_overloaded`, emits `admission.rejected`, and returns 503 with the request ID.
-3. `api/openai_routes.py:create_chat_completion()` receives a `ChatCompletionsRequest`, resolves `request.model` through `ModelRegistry`, and requires `task: chat`.
-4. `_check_model_ready()` validates local model artifacts for non-proxy models and runs admission checks.
-5. `RuntimeDispatcher.dispatch_chat()` resolves a `RuntimeTarget`; `RuntimeExecutor.execute_chat()` chooses proxy, Serve-handle, or local/stub behavior. The runtime-worker protocol exists, but no client is injected by `main.py`, so that isolation path is inactive.
-6. For local Serve mode, the executor passes a serializable allowlisted `RequestContext` beside the request payload to the cached Ray Serve deployment handle. The model replica binds the same request ID and model/deployment fields while executing.
-7. For proxy mode, the executor rewrites the model field and forwards `X-Request-ID` when `headers_policy.pass_request_id` is enabled.
-8. A model admission check or `_ServeDeploymentGuard` may raise `AdmissionRejectedError`. The OpenAI route marks the active lifecycle as an admission rejection before returning the OpenAI-compatible overload response. The runtime guard records only its layer-specific `runtime_guard_rejections_total` metric.
-9. The outer lifecycle finalizes request metrics after the full response body ends, including streamed responses. It is the sole owner of `admission_rejections_total`: each explicitly marked rejection increments it once, alongside `requests_total{status="rejected"}` and the stable error counter. Every request has one `request.completed` or `request.failed` terminal event; streamed responses additionally have one `stream.completed`, `stream.failed`, or `stream.cancelled` event. Successful health, readiness, and metrics events are suppressed.
-
-The same outer request lifecycle and context propagation apply to embeddings and
-rerank requests. Do not emit prompts, request bodies, per-token or per-chunk
-records; see `docs/RAY_SERVE_VLLM_MONITORING.md` for log discovery and incident
-queries.
-
-## `/v1/embeddings`
-
-1. `api/openai_routes.py:create_embedding()` receives an `EmbeddingRequest`.
-2. The route resolves `request.model` through `ModelRegistry` and requires `task: embedding`.
-3. `_check_model_ready()` validates local artifacts for non-proxy models and runs admission checks.
-4. `RuntimeDispatcher.dispatch_embedding()` resolves a `RuntimeTarget`.
-5. `RuntimeExecutor.execute_embedding()` chooses proxy or local/serve execution.
-6. The outer request lifecycle records request status, errors, inflight state, and token usage when available, after the body completes.
-
-## `/v1/rerank` And `/rerank`
-
-1. Both paths use `api/openai_routes.py:create_rerank()`.
-2. `_create_rerank_impl()` resolves `request.model` and requires `task: rerank`.
-3. `_check_model_ready()` validates local artifacts for non-proxy models and runs admission checks.
-4. `RuntimeDispatcher.dispatch_rerank()` resolves a `RuntimeTarget`.
-5. `RuntimeExecutor.execute_rerank()` chooses proxy or local/serve execution.
-6. The outer request lifecycle records metrics after the body completes and uses the actual HTTP path when available.
-
-## Platform Catalog APIs
-
-### `/api/catalog/models`
-
-1. `api/platform_routes.py:list_catalog_models()` receives the request.
-2. FastAPI injects `ModelRegistry`.
-3. The route returns all loaded catalog entries as `CatalogModelResponse`.
-4. This is a read-only catalog view, not a deployment control API.
-
-### `/api/catalog/models/{model_name}`
-
-1. The route resolves `model_name` through canonical name, alias, or served model name.
-2. Missing models return 404.
-3. Matching catalog config is returned without invoking runtime inference.
-
-### `/api/models/{model_name}/status`
-
-1. The route resolves `model_name` through the registry.
-2. `LocalModelStore` checks local artifact availability.
-3. Missing artifacts return a degraded status.
-4. Present artifacts return catalog status plus a message that runtime status is not connected.
-
-## Cluster View APIs
-
-### `/api/cluster/load`
-
-1. The route injects `ModelRegistry` and `LoadInspector`.
-2. `LoadInspector.snapshot(registry)` returns a lightweight current snapshot.
-3. This is not a full scheduler, quota, or Ray capacity view.
-
-### `/api/cluster/capacity`
-
-1. The route returns a stub capacity response.
-2. It includes the number of registered models.
-3. No real capacity backend is connected.
-
-## `/metrics`
-
-1. `api/metrics_routes.py:metrics()` receives the request.
-2. It calls `observability.metrics.render_prometheus_metrics()`.
-3. It returns Prometheus text format directly from the gateway process.
-4. Ray Serve and embedded vLLM metrics should be scraped from their own metrics targets when available.
-
-## `/healthz` And `/readyz`
-
-1. `/healthz` returns a basic process-liveness `HealthResponse`.
-2. In stub/local-debug mode, `/readyz` returns the same successful response.
-3. In Serve mode, `/readyz` asks the replica's cached handle resolver for
-   `serve.status()` and returns 503 unless every configured local model
-   application is running and its deployment is healthy.
-4. The public Gateway's finite Serve queue rejects before FastAPI with HTTP
-   503; scrape Ray's `serve_deployment_queued_queries` for that outer pressure.
+See `.harness/context/monitoring-benchmark.md` for metric ownership and
+`.harness/checklists/verification.md` for live validation boundaries.

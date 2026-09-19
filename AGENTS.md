@@ -20,28 +20,25 @@ It exists to replace ad hoc per-user model deployments on shared servers with a 
 
 ## Source of Truth
 
-When there is ambiguity, use these priorities:
-1. `docs/ARCHITECTURE.md`
-2. this `AGENTS.md`
-3. relevant files under `.harness/`
-4. local code and configuration conventions introduced in this repository
+Use the source that matches the question:
+- For intended architecture and durable design constraints, use
+  `docs/ARCHITECTURE.md`. This file and `.harness/rules/` route and apply those
+  constraints to development tasks.
+- For current checked-in behavior, inspect source code, configuration, and
+  tests. `.harness/context/` summarizes the implementation, while
+  `.harness/context/docs-map.md` identifies which long-form documents describe
+  current behavior or future designs. Verify status claims against source.
+- `.harness/plans/` describes future work. A plan does not change current
+  behavior or guardrails before its implementation is complete.
 
 Do not invent architecture that conflicts with `docs/ARCHITECTURE.md`.
 
 ## Harness Routing
 
-This repository uses `.harness/` as a Codex collaboration workspace. Read only the files that match the task:
-
-- `.harness/rules/implementation-rules.md`: routing index for detailed implementation guardrails.
-- `.harness/context/current-architecture.md`: current implemented gateway/catalog/runtime/backend shape.
-- `.harness/context/project-map.md`: source tree and test navigation map before editing code.
-- `.harness/context/docs-map.md`: which long-form docs are current, future-only, or superseded.
-- `.harness/context/request-flows.md`: startup, inference, platform, metrics, health, and readiness flows.
-- `.harness/context/model-config.md`: model catalog and `config/models.yaml` rules.
-- `.harness/context/monitoring-benchmark.md`: monitoring and benchmark baseline.
-- `.harness/checklists/verification.md`: verification checklist before claiming completion.
-
-For complex design, refactor, debugging, or review tasks, start with the relevant `.harness/` context or rules file instead of loading every document.
+This repository uses `.harness/` as a Codex collaboration workspace. Use
+`.harness/README.md` to find the context, rules, plan, checklist, or workflow
+that matches the task. Read only the relevant files, then verify current
+behavior against source before changing code.
 
 ## Always-On Guardrails
 
@@ -65,9 +62,14 @@ When making changes:
 - avoid speculative abstractions unless they clearly preserve known extension paths
 - document any intentional deviation from `docs/ARCHITECTURE.md`
 - update `docs/ARCHITECTURE.md`, this file, and relevant `.harness/` files if a user-approved design change alters repository expectations
+- when a task explicitly implements a user-approved design change, update those
+  documents alongside the implementation; the plan alone does not replace
+  current guardrails
 
 ## When in Doubt
 
 If an implementation choice would trade away architecture clarity for short-term convenience, prefer architecture clarity.
 
-If a requested change conflicts with `docs/ARCHITECTURE.md`, stop and surface the conflict explicitly before proceeding.
+If a requested change conflicts with `docs/ARCHITECTURE.md` and is not an
+explicitly requested, user-approved design change, stop and surface the
+conflict before proceeding.

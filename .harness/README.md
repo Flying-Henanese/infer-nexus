@@ -12,16 +12,36 @@ Do not store secrets, large logs, model artifacts, or generated benchmark output
 
 Files under `context/` describe the checked-in implementation and configuration as they exist now. Files under `rules/` are normative guardrails and may describe required target behavior that is still only partial or stubbed. Do not infer that a rule is already implemented without checking the matching context file and source.
 
-## Current Entry Points
+Files under `plans/` describe future execution sequences. They are not evidence
+that the planned behavior has been implemented; confirm completion against
+source, tests, and the matching `context/` files.
 
-- `context/current-architecture.md`: current implemented architecture baseline.
-- `context/docs-map.md`: status map for architecture-related documents.
-- `context/project-map.md`: source tree and test navigation map.
-- `context/request-flows.md`: common startup, inference, platform, metrics, and health request flows.
-- `context/model-config.md`: current model catalog and config rules.
-- `context/monitoring-benchmark.md`: current monitoring and benchmark baseline.
-- `rules/implementation-rules.md`: routing index for detailed implementation guardrails.
-- `rules/architecture-rules.md`: architecture and runtime guardrails.
-- `rules/interface-rules.md`: config, API, metrics, and error rules.
-- `rules/delivery-rules.md`: implementation sequence and acceptance criteria.
-- `checklists/verification.md`: practical verification checklist for Codex work.
+## Read By Task
+
+| Task | Start with |
+| --- | --- |
+| Architecture, Ray Serve runtime, backend, scaling, or admission | `rules/architecture-rules.md` and `context/current-architecture.md` |
+| API, configuration, metrics, logging, or error behavior | `rules/interface-rules.md`, then the matching context file below |
+| Source and test navigation | `context/project-map.md` |
+| Startup, inference, platform, metrics, or health request paths | `context/request-flows.md` |
+| Model catalog or `config/models.yaml` | `context/model-config.md` |
+| Monitoring or benchmarking | `context/monitoring-benchmark.md` |
+| Choosing a long-form design or operations document | `context/docs-map.md` |
+| Completion checks | `checklists/verification.md` |
+| Shared accelerator deployment and live validation | `workflows/remote-deploy-and-validate.md` |
+
+Read the smallest set of files needed for the task. The current implementation
+is summarized in `context/`; confirm details against source before editing.
+
+## Active Plans
+
+- `plans/logging-storage-query-redesign-plan.md`: ready-to-execute Compose
+  stdout restoration, process-isolated event files, unified local queries,
+  retention controls, and documentation updates.
+
+## Historical Plans
+
+- `plans/logging-management-execution-plan.md`: structured JSONL logging,
+  request correlation, and framework adapters. Its application-layer work is
+  substantially implemented; use the active plan for remaining storage and
+  query work.

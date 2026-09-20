@@ -25,7 +25,7 @@ services:
       - sh
       - -lc
       - >
-        exec sh /app/scripts/container/run_with_log.sh /var/log/infer-nexus/container.log --
+        exec
         ray start --head
         --node-ip-address=$$(hostname -i)
         --port=6379
@@ -36,11 +36,13 @@ services:
     ports:
       - "8265:8265"
       - "8000:8000"
-    environment: &ray-logging-environment
+    environment:
       RAY_LOGGING_CONFIG_ENCODING: JSON
       RAY_BACKEND_LOG_JSON: "1"
       RAY_ROTATION_MAX_BYTES: "52428800"
       RAY_ROTATION_BACKUP_COUNT: "3"
+      INFER_NEXUS_EVENT_LOG_DIR: /var/log/infer-nexus
+      INFER_NEXUS_PHYSICAL_SERVICE: ray-head
     volumes:
       - ./src:/app/src:ro
       - ./scripts:/app/scripts:ro
@@ -84,7 +86,7 @@ services:
       - sh
       - -lc
       - >
-        exec sh /app/scripts/container/run_with_log.sh /var/log/infer-nexus/container.log --
+        exec
         sh -ec '
           if [ -z "$${CUDA_VISIBLE_DEVICES:-}" ]; then
             echo "CUDA_VISIBLE_DEVICES must define the infer-nexus GPU pool, for example: 0,1,2,3." >&2;
@@ -111,6 +113,8 @@ services:
       RAY_BACKEND_LOG_JSON: "1"
       RAY_ROTATION_MAX_BYTES: "52428800"
       RAY_ROTATION_BACKUP_COUNT: "3"
+      INFER_NEXUS_EVENT_LOG_DIR: /var/log/infer-nexus
+      INFER_NEXUS_PHYSICAL_SERVICE: ray-worker
     volumes:
       - ./src:/app/src:ro
       - ./scripts:/app/scripts:ro
@@ -140,7 +144,13 @@ services:
     image: infer-nexus:runtime
     user: infer-nexus
     logging: *container-log-rotation
-    environment: *ray-logging-environment
+    environment:
+      RAY_LOGGING_CONFIG_ENCODING: JSON
+      RAY_BACKEND_LOG_JSON: "1"
+      RAY_ROTATION_MAX_BYTES: "52428800"
+      RAY_ROTATION_BACKUP_COUNT: "3"
+      INFER_NEXUS_EVENT_LOG_DIR: /var/log/infer-nexus
+      INFER_NEXUS_PHYSICAL_SERVICE: serve-deployer
     depends_on:
       ray-head:
         condition: service_healthy
@@ -150,7 +160,7 @@ services:
       - sh
       - -lc
       - >
-        exec sh /app/scripts/container/run_with_log.sh /var/log/infer-nexus/container.log --
+        exec
         sh -ec '
           trap "ray stop --force >/dev/null 2>&1 || true" EXIT;
           RAY_HEAD_IP=$$(python -c "import socket; print(socket.gethostbyname(\"ray-head\"))");

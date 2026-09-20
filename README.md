@@ -123,13 +123,13 @@ Both CUDA and Ascend Compose profiles use the same service-first layout:
 ```text
 ${LOGS_HOST_PATH}/
   ray-head/
-    container.log          # container command stdout and stderr
-    ray/session_latest/logs/  # Ray Serve, Gateway, replica, and vLLM files
+    events-*.jsonl*         # structured infer-nexus application events
+    ray/session_latest/logs/ # raw Ray/Serve/vLLM files
   ray-worker/
-    container.log
+    events-*.jsonl*
     ray/session_latest/logs/
   serve-deployer/
-    container.log
+    events-*.jsonl*
     ray/session_latest/logs/
 ```
 
@@ -145,18 +145,25 @@ Both profiles should be launched from the repository root with `--env-file .env`
 docker compose --env-file .env -f ascend_deploy/docker-compose.yml up -d
 ```
 
-View startup output using the absolute path printed by the script, for example:
+View startup output through Docker, and query the host-mounted event/Ray trees
+with the absolute path printed by the preparation script:
 
 ```bash
-tail -F /path/to/infer-nexus-logs/ray-head/container.log
-find /path/to/infer-nexus-logs/ray-worker/ray/session_latest/logs -type f
-rg 'model.replica.failed' /path/to/infer-nexus-logs
+docker compose --env-file .env logs --no-color --tail=100 ray-head ray-worker serve-deployer
+python3 scripts/logs.py --env-file .env
+python3 scripts/logs.py --env-file .env --request-id REQUEST_ID
+python3 scripts/logs.py --env-file .env --infra --service ray-worker
+python3 scripts/logs.py --env-file .env --raw --infra --all-sessions
+python3 scripts/logs.py --env-file .env --stats
 ```
 
-Ray component logs retain their Ray-managed 50 MiB × three-file rotation.
-`container.log` is an append-only host file so that its full command output is
-available without Docker's private log directory; use the host's normal
-`logrotate` policy if a deployment needs a retention limit for that file.
+`events-*.jsonl*` is the authoritative structured application-event source and
+is rotated per writing process at 10 MiB × five files by default. Docker's
+`json-file` output is the startup/container view and Ray's `ray/` tree is the
+raw infrastructure view; do not merge those copies when counting application
+events. Ray component logs retain their Ray-managed 50 MiB × three-file
+rotation. `--stats` reports file counts and bytes only; it does not perform
+cleanup or infer logging health from absent records.
 
 
 For development, use the root Compose file directly. It already mounts the source tree portions needed by the runtime, so source, script, docs, and config edits are visible without rebuilding the image:

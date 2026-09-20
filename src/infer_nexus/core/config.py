@@ -33,6 +33,12 @@ class LoggingSettings(BaseModel):
     slow_request_ms: int = Field(default=10_000, ge=0)
     include_traceback: bool = True
     access_log: bool = True
+    # Local development keeps the event sink disabled. Compose enables it with
+    # the in-container directory mounted by each physical service.
+    event_log_dir: str | None = None
+    event_max_bytes: int = Field(default=10 * 1024 * 1024, gt=0)
+    event_backup_count: int = Field(default=5, gt=0)
+    event_writer_error_interval_seconds: float = Field(default=60.0, gt=0)
     named_levels: dict[str, str] = Field(
         default_factory=lambda: {
             "ray": "INFO",
@@ -191,6 +197,7 @@ def _apply_logging_env_overrides(raw: dict) -> dict:
     overrides = {
         "format": os.getenv("INFER_NEXUS_LOG_FORMAT"),
         "level": os.getenv("INFER_NEXUS_LOG_LEVEL"),
+        "event_log_dir": os.getenv("INFER_NEXUS_EVENT_LOG_DIR"),
     }
     if all(value is None for value in overrides.values()):
         return raw
@@ -199,9 +206,9 @@ def _apply_logging_env_overrides(raw: dict) -> dict:
     normalized = dict(raw)
     observability = dict(normalized.get("observability") or {})
     logging_settings = dict(observability.get("logging") or {})
-    logging_settings.update(
-        {key: value for key, value in overrides.items() if value is not None}
-    )
+    for key, value in overrides.items():
+        if value is not None:
+            logging_settings[key] = value or None
     level_override = overrides["level"]
     if level_override is not None:
         named_levels = dict(logging_settings.get("named_levels") or {})

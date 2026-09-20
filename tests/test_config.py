@@ -11,6 +11,7 @@ from infer_nexus.core.config import load_settings
 def clear_logging_environment_overrides(monkeypatch) -> None:
     monkeypatch.delenv("INFER_NEXUS_LOG_FORMAT", raising=False)
     monkeypatch.delenv("INFER_NEXUS_LOG_LEVEL", raising=False)
+    monkeypatch.delenv("INFER_NEXUS_EVENT_LOG_DIR", raising=False)
 
 
 def test_load_settings_applies_ray_address_env_override(
@@ -164,6 +165,22 @@ def test_logging_level_environment_override_replaces_default_app_logger_level(
     assert settings.observability.logging.named_levels["infer_nexus"] == "DEBUG"
 
 
+def test_logging_event_directory_environment_override_is_typed(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    settings_path = tmp_path / "settings.yaml"
+    settings_path.write_text(
+        "observability:\n  logging:\n    event_log_dir: /from-yaml\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("INFER_NEXUS_EVENT_LOG_DIR", str(tmp_path / "events"))
+
+    settings = load_settings(settings_path)
+
+    assert settings.observability.logging.event_log_dir == str(tmp_path / "events")
+
+
 @pytest.mark.parametrize(
     ("setting", "value"),
     [
@@ -171,6 +188,9 @@ def test_logging_level_environment_override_replaces_default_app_logger_level(
         ("level", "TRACE"),
         ("success_sample_rate", "1.1"),
         ("slow_request_ms", "-1"),
+        ("event_max_bytes", "0"),
+        ("event_backup_count", "0"),
+        ("event_writer_error_interval_seconds", "0"),
     ],
 )
 def test_load_settings_rejects_invalid_logging_values(
@@ -208,4 +228,7 @@ def test_load_settings_rejects_an_invalid_named_logger_level(tmp_path: Path) -> 
     ],
 )
 def test_deployment_settings_select_logging_profile(path: str, expected_format: str) -> None:
-    assert load_settings(path).observability.logging.format == expected_format
+    settings = load_settings(path)
+    assert settings.observability.logging.format == expected_format
+    if expected_format == "json":
+        assert settings.observability.logging.event_log_dir == "/var/log/infer-nexus"

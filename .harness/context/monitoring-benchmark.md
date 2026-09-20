@@ -70,11 +70,17 @@ Current monitoring direction:
   events are emitted by the component that owns those state transitions.
 - Local bootstrap logs are under `.infer-nexus/logs/`; actual Ray session logs
   are under `.infer-nexus/ray/session_latest/logs/` (or the printed external
-  `/tmp/ray/session_latest/logs/` path). Compose exports separate session
-  directories to `${LOGS_HOST_PATH}/<service>/ray/`; each sibling `container.log` contains
-  that service command's stdout/stderr. Ray component files use 50 MiB × 3
-  backups. `container.log` is append-only on the host and requires a host
-  `logrotate` policy when retention is needed.
+  `/tmp/ray/session_latest/logs/` path). Compose exports separate
+  `events-*.jsonl*` and Ray session directories to
+  `${LOGS_HOST_PATH}/<service>/`; Docker owns service stdout/stderr with
+  10 MiB × 5 `json-file` rotation. Application events use independent
+  10 MiB × 5 process-owned rotation, and Ray component files use 50 MiB × 3
+  backups. Use `scripts/logs.py` for structured events and Ray source-aware
+  queries; do not merge Docker copies into application-event counts.
+- `infer_nexus_event_writer_failures_total{physical_service,process_role}` is
+  a per-process writer-health signal. `--stats` reports counts and bytes for
+  events, current Ray logs, other current-session contents, and historical
+  sessions; it does not perform cleanup or claim completeness.
 ## Benchmark Runner
 
 The benchmark runner foundation lives under `src/infer_nexus/benchmark/` with CLI wrapper `scripts/run_benchmark.py`.

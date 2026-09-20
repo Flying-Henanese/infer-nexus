@@ -90,7 +90,7 @@ class GatewayMetrics:
         )
         self.request_latency_seconds = Histogram(
             "infer_nexus_request_latency_seconds",
-            "Gateway request latency before the response object is returned.",
+            "Gateway request latency through response-body completion.",
             ("model", "task", "endpoint"),
             buckets=LATENCY_BUCKETS,
         )
@@ -205,6 +205,11 @@ class GatewayMetrics:
             "Serve circuit breaker state for a model, where 1 means open.",
             ("model",),
         )
+        self.event_writer_failures_total = Counter(
+            "infer_nexus_event_writer_failures_total",
+            "Application event-file write/open failures observed by this process.",
+            ("physical_service", "process_role"),
+        )
 
     def inc_inflight(self, *, model: str, task: str, endpoint: str) -> None:
         """记录一个正在处理的请求。"""
@@ -316,6 +321,18 @@ class GatewayMetrics:
     def set_serve_circuit_state(self, *, model: str, open: bool) -> None:
         """Record whether a model-level Serve circuit breaker is open."""
         self.serve_circuit_state.labels(model=model).set(1 if open else 0)
+
+    def observe_event_writer_failure(
+        self,
+        *,
+        physical_service: str,
+        process_role: str,
+    ) -> None:
+        """Record a writer failure with only bounded process ownership labels."""
+        self.event_writer_failures_total.labels(
+            physical_service=physical_service,
+            process_role=process_role,
+        ).inc()
 
     def observe_token_usage(self, *, model: str, task: str, usage: Any) -> None:
         """在响应包含 usage 时记录输入和输出 token。"""

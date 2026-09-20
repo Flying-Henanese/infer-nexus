@@ -117,6 +117,8 @@ def observe_openai_request(task: TaskType, *, endpoint: str | None = None) -> Ca
                     state.status_code = getattr(response, "status_code", 200)
                     state.error_code = state.error_code or _error_code_from_response(response)
                     state.token_usage = getattr(response, "usage", None)
+                    if state.token_usage is not None:
+                        state.usage_source = "response"
                     if isinstance(response, StreamingResponse):
                         state.context.stream = True
                 return response
@@ -124,6 +126,7 @@ def observe_openai_request(task: TaskType, *, endpoint: str | None = None) -> Ca
                 if state is not None:
                     state.exception = exc
                     state.error_code = state.error_code or "unhandled_exception"
+                    state.failure_stage = state.failure_stage or "unknown"
                 raise
 
         return wrapper  # type: ignore[return-value]
@@ -176,6 +179,9 @@ def _resolve_model_for_task(
     try:
         model = registry.get(request_model)
     except ModelNotFoundError:
+        state = current_request_state()
+        if state is not None:
+            state.failure_stage = "catalog_lookup"
         return openai_error_response(
             404,
             f"The model '{request_model}' does not exist.",
@@ -186,6 +192,9 @@ def _resolve_model_for_task(
 
     _observe_resolved_model(model)
     if model.task is not expected_task:
+        state = current_request_state()
+        if state is not None:
+            state.failure_stage = "request_validation"
         return openai_error_response(
             400,
             unsupported_message,
@@ -210,7 +219,10 @@ def _check_model_ready(
 
 def _runtime_error_response(exc: Exception, *, operation: str, request_model: str) -> JSONResponse:
     """把运行前/运行时异常转换为 OpenAI 风格错误响应。"""
+    state = current_request_state()
     if isinstance(exc, ModelArtifactMissingError):
+        if state is not None:
+            state.failure_stage = "catalog_lookup"
         return openai_error_response(
             503,
             str(exc),
@@ -226,6 +238,10 @@ def _runtime_error_response(exc: Exception, *, operation: str, request_model: st
             code=exc.code,
         )
     if isinstance(exc, RuntimeNotConnectedError):
+        if state is not None:
+            state.failure_stage = state.failure_stage or "serve_handle"
+            if exc.code == "upstream_timeout":
+                state.timeout_kind = state.timeout_kind or "serve_handle"
         status_code, error_type = runtime_not_connected_status(exc.code)
         return openai_error_response(
             status_code,
@@ -234,9 +250,9 @@ def _runtime_error_response(exc: Exception, *, operation: str, request_model: st
             code=exc.code,
         )
     if isinstance(exc, RuntimeExecutionError):
-        state = current_request_state()
         if state is not None:
             state.error_code = exc.code
+            state.failure_stage = state.failure_stage or "model_backend"
             if exc.code not in {
                 "unsupported_parameter",
                 "unsupported_message_content",
@@ -251,6 +267,8 @@ def _runtime_error_response(exc: Exception, *, operation: str, request_model: st
             code=exc.code,
         )
     if isinstance(exc, BackendRequestValidationError):
+        if state is not None:
+            state.failure_stage = state.failure_stage or "request_validation"
         return openai_error_response(
             400,
             str(exc),

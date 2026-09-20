@@ -139,6 +139,14 @@ class _ServeDeploymentGuard:
             model=self.model_label,
             reason=code,
         )
+        state = current_request_state()
+        if state is not None:
+            state.error_code = code
+            state.admission_rejected = True
+            state.failure_stage = "model_admission"
+            state.admission_layer = "serve_handle"
+            if code == "gateway_queue_timeout":
+                state.timeout_kind = "admission_wait"
         logger.warning(
             "admission.rejected",
             model=self.model_label,
@@ -650,8 +658,11 @@ class RuntimeExecutor:
         released = False
         try:
             guard = self._get_guard(target, stream=False)
-            await guard.acquire()
+            admission_wait = await guard.acquire()
             guard_acquired = True
+            state = current_request_state()
+            if state is not None:
+                state.admission_wait_ms = round(max(admission_wait, 0.0) * 1000, 3)
             response = remote_method.remote(
                 request_payload=payload,
                 **self._active_request_context_kwargs(
@@ -666,6 +677,10 @@ class RuntimeExecutor:
             except TimeoutError as exc:
                 guard.record_failure()
                 call_status = "timeout"
+                state = current_request_state()
+                if state is not None:
+                    state.failure_stage = "serve_handle"
+                    state.timeout_kind = "serve_handle"
                 GATEWAY_METRICS.observe_serve_handle_timeout(
                     model=model_label,
                     method=method_name,
@@ -682,6 +697,12 @@ class RuntimeExecutor:
                 if guard_acquired:
                     await guard.release()
                 released = True
+                state = current_request_state()
+                if state is not None:
+                    state.serve_handle_ms = round(
+                        max(perf_counter() - call_start, 0.0) * 1000,
+                        3,
+                    )
                 GATEWAY_METRICS.observe_serve_handle_call(
                     model=model_label,
                     method=method_name,
@@ -780,8 +801,11 @@ class RuntimeExecutor:
         guard_acquired = False
         try:
             guard = self._get_guard(target, stream=True)
-            await guard.acquire()
+            admission_wait = await guard.acquire()
             guard_acquired = True
+            state = current_request_state()
+            if state is not None:
+                state.admission_wait_ms = round(max(admission_wait, 0.0) * 1000, 3)
             options_method = getattr(handle, "options", None)
             if not callable(options_method):
                 raise RuntimeNotConnectedError(
@@ -813,6 +837,12 @@ class RuntimeExecutor:
                     request_context or self._request_context(target, stream=True)
                 ),
             )
+            state = current_request_state()
+            if state is not None:
+                state.serve_handle_ms = round(
+                    max(perf_counter() - call_start, 0.0) * 1000,
+                    3,
+                )
             GATEWAY_METRICS.observe_serve_handle_call(
                 model=model_label,
                 method=method_name,
@@ -907,6 +937,10 @@ class RuntimeExecutor:
                     )
                     if remaining_lifetime <= 0:
                         guard.record_failure()
+                        state = current_request_state()
+                        if state is not None:
+                            state.failure_stage = "response_stream"
+                            state.timeout_kind = "stream_lifetime"
                         GATEWAY_METRICS.observe_serve_handle_timeout(
                             model=model_label,
                             method=method_name,
@@ -941,6 +975,10 @@ class RuntimeExecutor:
                     return
                 except TimeoutError as exc:
                     guard.record_failure()
+                    state = current_request_state()
+                    if state is not None:
+                        state.failure_stage = "response_stream"
+                        state.timeout_kind = "stream_idle"
                     GATEWAY_METRICS.observe_serve_handle_timeout(
                         model=model_label,
                         method=method_name,
@@ -956,6 +994,9 @@ class RuntimeExecutor:
         except asyncio.CancelledError:
             raise
         except RuntimeNotConnectedError as exc:
+            state = current_request_state()
+            if state is not None:
+                state.failure_stage = state.failure_stage or "response_stream"
             self._log_runtime_call_failure(
                 target,
                 method_name=method_name,
@@ -1101,6 +1142,7 @@ class RuntimeExecutor:
         if state is not None:
             state.error_code = state.error_code or error_code
             state.stream_terminal_logged = True
+            state.failure_stage = state.failure_stage or "response_stream"
         log_fields: dict[str, Any] = {
             "model": model_label,
             "outcome": "error",
@@ -1153,6 +1195,8 @@ class RuntimeExecutor:
         *,
         error_code: str,
         status_code: int | None = None,
+        attempt_count: int | None = None,
+        failure_class: str | None = None,
     ) -> None:
         """Log safe upstream metadata without credentials, paths, or payloads."""
         upstream_host = urlsplit(proxy_config.upstream_base_url).hostname
@@ -1165,8 +1209,21 @@ class RuntimeExecutor:
                 fields["model"] = state.context.model
             if status_code is not None:
                 state.upstream_status = status_code
+            state.failure_stage = "proxy_upstream"
+            if attempt_count is not None:
+                state.proxy_attempt_count = attempt_count
+            if failure_class is not None:
+                state.proxy_failure_class = failure_class
+                if failure_class == "connect":
+                    state.timeout_kind = "upstream_connect"
+                elif failure_class == "read_timeout":
+                    state.timeout_kind = "upstream_read"
         if status_code is not None:
             fields["upstream_status"] = status_code
+        if attempt_count is not None:
+            fields["attempt_count"] = attempt_count
+        if failure_class is not None:
+            fields["failure_class"] = failure_class
         logger.warning("proxy.request.failed", **fields)
 
     async def _request_proxy(
@@ -1190,12 +1247,14 @@ class RuntimeExecutor:
         attempts = max(1, proxy_config.retry.max_attempts)
         backoff = proxy_config.retry.backoff_ms / 1000.0
         last_exc: Exception | None = None
+        last_failure_class = "unknown"
 
         for attempt in range(1, attempts + 1):
             try:
                 async with httpx.AsyncClient(timeout=timeout) as client:
                     response = await client.post(url, json=payload, headers=headers)
                 if attempt < attempts and response.status_code in proxy_config.retry.retry_on_status:
+                    last_failure_class = "status"
                     if backoff > 0:
                         await asyncio.sleep(backoff * attempt)
                     continue
@@ -1204,16 +1263,31 @@ class RuntimeExecutor:
                         proxy_config,
                         error_code=f"upstream_http_{response.status_code}",
                         status_code=response.status_code,
+                        attempt_count=attempt,
+                        failure_class="status",
                     )
                 return response
-            except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout) as exc:
+            except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
                 last_exc = exc
+                last_failure_class = "connect"
+                if attempt >= attempts:
+                    break
+                if backoff > 0:
+                    await asyncio.sleep(backoff * attempt)
+            except httpx.ReadTimeout as exc:
+                last_exc = exc
+                last_failure_class = "read_timeout"
                 if attempt >= attempts:
                     break
                 if backoff > 0:
                     await asyncio.sleep(backoff * attempt)
 
-        self._log_proxy_failure(proxy_config, error_code="upstream_timeout")
+        self._log_proxy_failure(
+            proxy_config,
+            error_code="upstream_timeout",
+            attempt_count=attempts,
+            failure_class=last_failure_class,
+        )
         upstream_host = urlsplit(proxy_config.upstream_base_url).hostname or "unknown"
         raise RuntimeNotConnectedError(
             f"proxy upstream request to '{upstream_host}' failed: {type(last_exc).__name__}",
@@ -1307,7 +1381,14 @@ class RuntimeExecutor:
             response = await client.send(request, stream=True)
         except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout) as exc:
             await client.aclose()
-            self._log_proxy_failure(proxy_config, error_code="upstream_timeout")
+            self._log_proxy_failure(
+                proxy_config,
+                error_code="upstream_timeout",
+                attempt_count=1,
+                failure_class=(
+                    "read_timeout" if isinstance(exc, httpx.ReadTimeout) else "connect"
+                ),
+            )
             upstream_host = urlsplit(proxy_config.upstream_base_url).hostname or "unknown"
             raise RuntimeNotConnectedError(
                 f"proxy upstream request to '{upstream_host}' failed: {type(exc).__name__}",
@@ -1318,6 +1399,8 @@ class RuntimeExecutor:
                 proxy_config,
                 error_code=f"upstream_http_{response.status_code}",
                 status_code=response.status_code,
+                attempt_count=1,
+                failure_class="status",
             )
             await response.aread()
             await response.aclose()
@@ -1329,10 +1412,14 @@ class RuntimeExecutor:
             try:
                 async for chunk in response.aiter_bytes():
                     yield chunk
-            except Exception:
+            except Exception as exc:
                 self._log_proxy_failure(
                     proxy_config,
                     error_code="upstream_stream_failed",
+                    attempt_count=1,
+                    failure_class=(
+                        "read_timeout" if isinstance(exc, httpx.ReadTimeout) else "protocol"
+                    ),
                 )
                 raise
             finally:
@@ -1538,6 +1625,9 @@ class RuntimeExecutor:
         """记录流式首块延迟或相邻块间隔，并返回当前输出时间。"""
         now = perf_counter()
         if previous_emit_time is None:
+            state = current_request_state()
+            if state is not None:
+                state.ttft_ms = round(max(now - stream_start_time, 0.0) * 1000, 3)
             GATEWAY_METRICS.observe_stream_ttft(
                 model=model_label,
                 seconds=now - stream_start_time,
@@ -1565,6 +1655,11 @@ class RuntimeExecutor:
             if state is not None:
                 state.stream_terminal_logged = True
 
+        def observe_chunk() -> None:
+            state = current_request_state()
+            if state is not None:
+                state.emitted_chunk_count += 1
+
         def terminal_fields(*, outcome: str, error_code: str | None = None) -> dict[str, Any]:
             fields: dict[str, Any] = {
                 "model": model_label,
@@ -1573,6 +1668,16 @@ class RuntimeExecutor:
             }
             if error_code:
                 fields["error_code"] = error_code
+            state = current_request_state()
+            if state is not None:
+                fields["emitted_chunk_count"] = max(state.emitted_chunk_count, 0)
+                fields["response_headers_sent"] = state.response_headers_sent
+                if state.ttft_ms is not None:
+                    fields["ttft_ms"] = state.ttft_ms
+                if state.failure_stage is not None:
+                    fields["failure_stage"] = state.failure_stage
+                if state.timeout_kind is not None:
+                    fields["timeout_kind"] = state.timeout_kind
             return fields
 
         def record_cancelled() -> None:
@@ -1590,6 +1695,7 @@ class RuntimeExecutor:
                     stream_start_time=stream_start_time,
                     previous_emit_time=previous_emit_time,
                 )
+                observe_chunk()
                 yield chunk
         except (asyncio.CancelledError, GeneratorExit):
             record_cancelled()
@@ -1604,6 +1710,7 @@ class RuntimeExecutor:
             if state is not None:
                 state.error_code = state.error_code or error_code or "stream_failed"
                 state.stream_terminal_logged = True
+                state.failure_stage = state.failure_stage or "response_stream"
             terminal_error_code = error_code or "stream_failed"
             log_fields = terminal_fields(
                 outcome="error",

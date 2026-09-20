@@ -1,6 +1,11 @@
 # 日志系统改造建议
 
-状态：讨论稿，未实施。日期：2026-09-18。
+状态：历史讨论稿，已由 `logging-storage-query-redesign-plan.md` 和当前
+`docs/ARCHITECTURE.md` supersede。日期：2026-09-18。
+
+本文保留早期取舍证据；其中 `container.log`、wrapper 和“尚未实施”的
+描述不是当前运行或运维契约。当前实现使用 Docker stdout/stderr、进程隔离
+`events-*.jsonl*` 以及服务级 `ray/` 原始目录。
 
 依据：[现有架构](ARCHITECTURE.md#application-logs-and-request-correlation)、[官方资料调研](LOGGING_MANAGEMENT_RESEARCH_2026-09-18.md)及当前三服务 Compose 实现。
 

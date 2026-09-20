@@ -65,8 +65,9 @@ Implemented:
   request lifecycle middleware and return it in `X-Request-ID`.
 - Local scripts expose Ray session logs under `.infer-nexus/ray/`; Compose
   exports the head, worker, and deployer session directories to
-  `${LOGS_HOST_PATH}/<service>/ray/` and each service command's output to its sibling
-  `container.log`.
+  `${LOGS_HOST_PATH}/<service>/ray/`. Compose sends service stdout/stderr to
+  Docker's bounded `json-file` logging driver and writes structured application
+  events directly to `${LOGS_HOST_PATH}/<service>/events-*.jsonl*`.
 
 Skeleton or partial:
 - `AdmissionController` exists as a gateway integration point, but capacity- and
@@ -1052,12 +1053,16 @@ Current implementation status:
 - `config/settings.yaml` selects the human-readable `console` profile for local
   development. The CUDA and Ascend Compose settings select `json`, producing
   one JSON object per line.
-- Application records include UTC timestamp, level, stable `event`, logger,
-  service/build/environment/process identity, and `source`. Request events add
+- Application records include `schema_version: 1`, UTC timestamp, level, stable
+  `event`, logger, logical service/build/environment/process identity, physical
+  Compose service/node, and `source`. Each process owns one startup-unique
+  `events-<process-role>-<process-instance>.jsonl` file with 10 MiB × 5
+  rotation defaults. Request events add
   allowlisted fields such as `request_id`, route template, model, task, backend,
   Serve app/deployment, outcome, status, duration, and stable error code. The
   formatter redacts known sensitive field names and serializes exceptions
-  inside a single record.
+  inside a single record. The event handler accepts only structured
+  `infer_nexus` records; framework records remain on stdout/Ray raw sources.
 - In Serve mode, `RequestIdProxyMiddleware` runs before Ray's built-in
   `RequestIdMiddleware`; it validates a single inbound `X-Request-ID` or
   replaces a missing, invalid, or duplicated value with a UUID. Ray then owns
@@ -1087,6 +1092,13 @@ Current implementation status:
   `model.replica.failed`; process bootstrap emits `app.starting`, `app.ready`,
   and `app.shutdown`. Do not log prompts, message bodies, embeddings, rerank
   documents, tokens, credentials, or per-chunk stream data.
+- Request terminal events carry bounded `failure_stage` and `timeout_kind`
+  values when the owning branch knows them, plus `admission_layer`, reliable
+  admission/Serve-handle/TTFT timings, stream chunk/header state, and response
+  usage counts only when those measurements exist. Model startup failures carry
+  `startup_stage` (`config`, `artifact`, `backend`, `engine`, or `unknown`).
+  The request event remains the one HTTP terminal owner; stream events do not
+  create a second request terminal event.
 - `serve.start()` receives a Ray logging config, and Gateway/model Serve
   deployments receive deployment-level configs. The public Serve proxy keeps
   its edge access log controlled by `observability.logging.access_log`, while
@@ -1101,15 +1113,27 @@ Current implementation status:
   Ray component and worker logs are under
   `.infer-nexus/ray/session_latest/logs/`; for an externally managed Ray
   session, the startup script may report `/tmp/ray/session_latest/logs/`.
-- Compose exports runtime logs to the absolute `LOGS_HOST_PATH` configured in `.env`. Each
-  service owns `${LOGS_HOST_PATH}/<service>/container.log` for its command stdout/stderr and
-  `${LOGS_HOST_PATH}/<service>/ray/` for its `/tmp/ray` session files. The host script
-  `scripts/prepare_compose_logs.py` prepares directory ownership before non-root
-  runtime services start. Without configuration it creates a sibling
-  `infer-nexus-logs` directory and persists its absolute path in `.env`.
-  Compose rejects missing bind-mount directories instead of creating them. Ray's component rotation remains 50 MiB with three backups.
-  `container.log` is append-only on the host and should use a host `logrotate`
-  policy where retention is required.
+- Compose exports runtime logs to the absolute `LOGS_HOST_PATH` configured in
+  `.env`. Each service owns `events-*.jsonl*` for structured application events
+  and `ray/` for its `/tmp/ray` session files. Service stdout/stderr stays in
+  Docker and is viewed with `docker compose logs`; Docker uses 10 MiB × 5
+  rotation, while application event files use their own 10 MiB × 5
+  process-owned rotation. `scripts/prepare_compose_logs.py` prepares directory
+  ownership before non-root runtime services start. Without configuration it
+  creates a sibling `infer-nexus-logs` directory and persists its absolute path
+  in `.env`. Compose rejects missing bind-mount directories instead of creating
+  them. Ray's component rotation remains 50 MiB with three backups.
+- `scripts/logs.py` reads only validated service roots. Default mode summarizes
+  important application lifecycle events; request/model/service/error-stage
+  filters, `--infra`, `--raw`, `--follow`, and `--stats` preserve the distinction
+  between authoritative application events, Docker output, and raw Ray files.
+  A future collector must ingest `events-*.jsonl*` separately from Ray and
+  Docker copies to prevent duplicate application-event counting.
+- Event-file open/write/rotation failures emit a rate-limited stderr diagnostic
+  and increment `infer_nexus_event_writer_failures_total` with only bounded
+  `physical_service` and `process_role` labels. No cleanup command is provided;
+  `--stats` reports coverage and bytes without implying that missing records are
+  healthy.
 
 ## 14. Error Model
 

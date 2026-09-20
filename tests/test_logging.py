@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+from pathlib import Path
 from types import SimpleNamespace
 
 import cloudpickle
@@ -10,7 +11,12 @@ import pytest
 
 from infer_nexus.api.request_logging_middleware import RequestLoggingMiddleware
 from infer_nexus.core.config import LoggingSettings
-from infer_nexus.observability.logging import bind_log_context, configure_logging, get_logger
+from infer_nexus.observability.logging import (
+    bind_log_context,
+    configure_logging,
+    event_writer_stats,
+    get_logger,
+)
 
 
 @pytest.fixture
@@ -147,6 +153,83 @@ def test_standard_library_records_keep_their_message(
     assert record["event"] == "log.record"
     assert record["message"] == "ordinary Serve warning"
     assert record["source"] == "ray_serve"
+
+
+def test_event_file_is_process_owned_and_excludes_framework_records(
+    isolated_root_logger: None,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    configure_logging(
+        LoggingSettings(format="json", event_log_dir=str(tmp_path)),
+        {
+            "service": "infer-nexus",
+            "environment": "test",
+            "process_role": "gateway",
+            "physical_service": "serve-deployer",
+        },
+    )
+
+    get_logger("infer_nexus.test").info(
+        "request.completed",
+        request_id="req-event",
+        outcome="success",
+    )
+    logging.getLogger("ray.serve").warning("ordinary framework warning")
+
+    event_files = sorted(tmp_path.glob("events-gateway-*.jsonl"))
+    assert len(event_files) == 1
+    records = [json.loads(line) for line in event_files[0].read_text().splitlines()]
+    assert len(records) == 1
+    record = records[0]
+    assert record["schema_version"] == 1
+    assert record["physical_service"] == "serve-deployer"
+    assert record["process_role"] == "gateway"
+    assert record["process_instance"]
+    assert record["pid"] > 0
+    assert record["source"] == "infer_nexus"
+    assert record["request_id"] == "req-event"
+    assert "framework warning" not in event_files[0].read_text()
+    assert "ordinary framework warning" in capsys.readouterr().out
+
+
+def test_repeated_logging_configuration_does_not_duplicate_event_records(
+    isolated_root_logger: None,
+    tmp_path: Path,
+) -> None:
+    settings = LoggingSettings(format="json", event_log_dir=str(tmp_path))
+    identity = {"process_role": "gateway", "physical_service": "ray-head"}
+    configure_logging(settings, identity)
+    get_logger("infer_nexus.test").info("first.event")
+    configure_logging(settings, identity)
+    get_logger("infer_nexus.test").info("second.event")
+
+    event_files = sorted(tmp_path.glob("events-gateway-*.jsonl"))
+    assert len(event_files) == 1
+    records = [json.loads(line) for line in event_files[0].read_text().splitlines()]
+    assert [record["event"] for record in records] == ["first.event", "second.event"]
+    assert len({record["process_instance"] for record in records}) == 1
+
+
+def test_event_writer_failure_falls_back_to_stderr_without_recursion(
+    isolated_root_logger: None,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    blocked_path = tmp_path / "not-a-directory"
+    blocked_path.write_text("sentinel")
+    before = event_writer_stats()["failures"]
+
+    configure_logging(
+        LoggingSettings(format="json", event_log_dir=str(blocked_path)),
+        {"process_role": "gateway", "physical_service": "ray-head"},
+    )
+    get_logger("infer_nexus.test").error("event.writer.probe", error_code="probe")
+
+    captured = capsys.readouterr()
+    assert "event writer failed" in captured.err
+    assert event_writer_stats()["failures"] > before
+    assert json.loads(captured.out)["event"] == "event.writer.probe"
 
 
 def test_request_logging_middleware_can_be_cloudpickled() -> None:

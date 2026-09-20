@@ -8,7 +8,8 @@ Target implementation start: 2026-09-15
 > Do not execute this plan from the beginning. Verify current source first.
 > The remaining Compose stdout, application event-file, local query, retention,
 > and documentation work is specified in
-> `logging-storage-query-redesign-plan.md`.
+> `logging-storage-query-redesign-plan.md`; the old `container.log` storage
+> design is superseded by Docker stdout plus process-isolated event files.
 
 ## Objective
 

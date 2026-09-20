@@ -31,6 +31,10 @@ navigation map; verify behavior in code before changing it.
   `tests/test_logging.py`, `tests/test_ray_logging.py`,
   `tests/test_request_id_proxy_middleware.py`, and
   `tests/test_compose_logging.py`.
+- Structured event queries: `src/infer_nexus/observability/log_query.py` and
+  `scripts/logs.py`. Start with `tests/test_log_query.py`; it covers safe
+  service/path discovery, request correlation, Ray session ownership, malformed
+  and partial JSONL, rotation/follow, and storage stats.
 - Benchmarking: `src/infer_nexus/benchmark/` and
   `scripts/run_benchmark.py`; start with `tests/test_benchmark_*.py`.
 

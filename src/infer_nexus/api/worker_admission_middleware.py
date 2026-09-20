@@ -65,7 +65,10 @@ class WorkerAdmissionMiddleware:
         try:
             await controller.acquire()
         except WorkerOverloadedError:
-            mark_admission_rejection("gateway_worker_overloaded")
+            mark_admission_rejection(
+                "gateway_worker_overloaded",
+                admission_layer="gateway_worker",
+            )
             self.logger.warning(
                 "admission.rejected",
                 reason="gateway_worker_overloaded",

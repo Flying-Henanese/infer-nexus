@@ -116,11 +116,17 @@ reject before FastAPI metrics or worker admission run.
 - For local runs, inspect `.infer-nexus/logs/ray_bootstrap.log`,
   `.infer-nexus/logs/serve_runtime.log`, and
   `.infer-nexus/ray/session_latest/logs/`.
-- For Compose, inspect host paths for every service: use
-  `${LOGS_HOST_PATH}/<service>/container.log` for command stdout/stderr and
-  `${LOGS_HOST_PATH}/<service>/ray/session_latest/logs/` for Ray files. Run
-  `python3 scripts/prepare_compose_logs.py` before startup and confirm `.env`
-  points to the prepared absolute directory.
+- For Compose, run `python3 scripts/prepare_compose_logs.py` before startup and
+  confirm `.env` points to the prepared absolute directory. Inspect service
+  stdout/stderr with `docker compose logs`; inspect structured application
+  events with `python3 scripts/logs.py --env-file .env`, and inspect Ray files
+  with `--infra`/`--raw`. Confirm every service has
+  `${LOGS_HOST_PATH}/<service>/events-*.jsonl*` and
+  `${LOGS_HOST_PATH}/<service>/ray/session_latest/logs/` as applicable.
+- For this redesign, verify the event writer schema/identity, third-party
+  filtering, idempotent configuration, open/write failure stderr fallback,
+  request/stream diagnostic fields, startup stage, query rotation/partial-line
+  behavior, symlink/path safety, and `--stats` category separation.
 Use `docs/RAY_SERVE_VLLM_MONITORING.md` for operator commands and example
 queries. A configuration render or unit test does not verify a live collector,
 Ray log rotation, or real inference lifecycle.

@@ -89,7 +89,9 @@ Only report the change as deployed after recording:
 - the result of any change-specific smoke test
 
 If validation fails, collect only relevant read-only logs such as
-`tail -n 200 ${LOGS_HOST_PATH}/<service>/container.log` and files below
-`${LOGS_HOST_PATH}/<service>/ray/session_latest/logs/`. Docker Compose logs remain a fallback
-for failures before the host log wrapper starts. Do not make destructive
-recovery changes without user approval.
+`docker compose logs --no-color --tail=200 <service>`, event records from
+`python3 scripts/logs.py --env-file .env --all`, and files below
+`${LOGS_HOST_PATH}/<service>/ray/session_latest/logs/`. Docker Compose logs are
+the authoritative container/bootstrap view; event files are the structured
+application view; Ray files are the raw framework/actor view. Do not make
+destructive recovery changes without user approval.

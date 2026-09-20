@@ -35,9 +35,11 @@ is summarized in `context/`; confirm details against source before editing.
 
 ## Active Plans
 
-- `plans/logging-storage-query-redesign-plan.md`: ready-to-execute Compose
-  stdout restoration, process-isolated event files, unified local queries,
-  retention controls, and documentation updates.
+- `plans/logging-storage-query-redesign-plan.md`: implementation source for the
+  Compose stdout restoration, process-isolated event files, unified local
+  queries, storage controls, and documentation updates. Its acceptance boxes
+  remain the checklist until remote validation evidence is recorded in
+  `docs/LOGGING_STORAGE_QUERY_IMPLEMENTATION.md`.
 
 ## Historical Plans
 

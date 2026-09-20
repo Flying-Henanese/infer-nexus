@@ -10,6 +10,32 @@ from time import perf_counter
 from typing import Any
 
 
+FAILURE_STAGES = frozenset(
+    {
+        "request_validation",
+        "catalog_lookup",
+        "gateway_admission",
+        "model_admission",
+        "serve_handle",
+        "model_backend",
+        "proxy_upstream",
+        "response_stream",
+        "unknown",
+    }
+)
+TIMEOUT_KINDS = frozenset(
+    {
+        "admission_wait",
+        "serve_handle",
+        "stream_idle",
+        "stream_lifetime",
+        "upstream_connect",
+        "upstream_read",
+        "unknown",
+    }
+)
+
+
 @dataclass(slots=True)
 class RequestContext:
     """Serializable request identity and low-cardinality routing metadata."""
@@ -62,6 +88,17 @@ class RequestLifecycleState:
     inflight_started: bool = False
     stream_terminal_logged: bool = False
     finalized: bool = False
+    failure_stage: str | None = None
+    timeout_kind: str | None = None
+    admission_layer: str | None = None
+    admission_wait_ms: float | None = None
+    serve_handle_ms: float | None = None
+    ttft_ms: float | None = None
+    emitted_chunk_count: int = 0
+    response_headers_sent: bool = False
+    proxy_attempt_count: int | None = None
+    proxy_failure_class: str | None = None
+    usage_source: str | None = None
 
 
 _CURRENT_REQUEST: ContextVar[RequestLifecycleState | None] = ContextVar(

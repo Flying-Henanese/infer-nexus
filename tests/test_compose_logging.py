@@ -55,18 +55,20 @@ def test_compose_exports_each_service_log_tree_to_the_host(
         assert _volume_sources(service, "/tmp/ray") == [
             f"{log_root}/{service_name}/ray"
         ]
-        assert (
-            "sh /app/scripts/container/run_with_log.sh "
-            "/var/log/infer-nexus/container.log --"
-        ) in command
+        assert "run_with_log.sh" not in command
+        assert "container.log" not in command
+        assert "exec " in command
+        assert service["environment"]["INFER_NEXUS_EVENT_LOG_DIR"] == "/var/log/infer-nexus"
+        assert service["environment"]["INFER_NEXUS_PHYSICAL_SERVICE"] == service_name
 
         if service_name == "ray-head":
+            assert "exec\n        ray start" in command or "exec ray start" in command
             continue
 
-        marker = f" -- {nested_shell} -ec '"
         nested_command = service["command"][-1]
-        nested_start = nested_command.index(marker) + len(marker)
-        nested_script = nested_command[nested_start:].rstrip().replace("$$", "$")
+        assert f"exec {nested_shell} -ec '" in nested_command
+        nested_script = nested_command.split(f"exec {nested_shell} -ec '", 1)[1]
+        nested_script = nested_script.rstrip().replace("$$", "$")
         assert nested_script.endswith("'")
         syntax_check = subprocess.run(
             [nested_shell, "-n", "-c", nested_script[:-1]],
@@ -77,26 +79,18 @@ def test_compose_exports_each_service_log_tree_to_the_host(
         assert syntax_check.returncode == 0, syntax_check.stderr
 
 
-def test_container_log_wrapper_writes_combined_output_to_the_host_log(tmp_path: Path) -> None:
-    """The wrapper preserves both streams in one host-mounted container log."""
-    log_path = tmp_path / "service" / "container.log"
+def test_compose_command_keeps_stdout_and_stderr_visible_to_docker() -> None:
+    """The command has no redirection, so Docker remains the combined console source."""
     result = subprocess.run(
-        [
-            "sh",
-            str(REPOSITORY_ROOT / "scripts/container/run_with_log.sh"),
-            str(log_path),
-            "--",
-            "sh",
-            "-c",
-            "printf stdout; printf stderr >&2",
-        ],
+        ["sh", "-c", "printf stdout; printf stderr >&2"],
         check=False,
         capture_output=True,
         text=True,
     )
 
     assert result.returncode == 0
-    assert log_path.read_text(encoding="utf-8") == "stdoutstderr"
+    assert result.stdout == "stdout"
+    assert result.stderr == "stderr"
 
 
 def test_host_log_preparation_persists_default_and_preserves_existing_files(tmp_path: Path) -> None:
@@ -116,13 +110,13 @@ def test_host_log_preparation_persists_default_and_preserves_existing_files(tmp_
         assert (log_root / service / "ray").is_dir()
     assert f"LOGS_HOST_PATH='{log_root}'" in env_file.read_text()
     assert "OTHER=value" in env_file.read_text()
-    log = log_root / "ray-head" / "container.log"
-    log.write_text("old log\n")
+    sentinel = log_root / "ray-head" / "operator-sentinel.txt"
+    sentinel.write_text("old sentinel\n")
     saved_env = env_file.read_text()
     result = subprocess.run(command, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert env_file.read_text() == saved_env
-    assert log.read_text() == "old log\n"
+    assert sentinel.read_text() == "old sentinel\n"
 
 
 def test_host_log_preparation_rejects_relative_paths_without_rewriting_env(tmp_path: Path) -> None:

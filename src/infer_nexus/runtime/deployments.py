@@ -79,12 +79,18 @@ class ModelRuntimeReplica:
             serve_app=identity.get("serve_app"),
             replica_id=identity.get("replica_id"),
         )
+        startup_stage = "unknown"
         try:
-            self.backend = backend or self._build_backend(runtime_context["runtime_spec"]["backend"])
+            startup_stage = "config"
+            runtime_spec = runtime_context["runtime_spec"]
+            startup_stage = "backend"
+            self.backend = backend or self._build_backend(runtime_spec["backend"])
+            startup_stage = "artifact"
             self.backend.validate_runtime_spec(
-                self.runtime_context["runtime_spec"],
+                runtime_spec,
                 self.runtime_context,
             )
+            startup_stage = "engine"
             self.backend.startup()
         except Exception:
             self.logger.exception(
@@ -94,6 +100,7 @@ class ModelRuntimeReplica:
                 serve_app=identity.get("serve_app"),
                 replica_id=identity.get("replica_id"),
                 error_code="backend_startup_failed",
+                startup_stage=startup_stage,
             )
             raise
         self.logger.info(

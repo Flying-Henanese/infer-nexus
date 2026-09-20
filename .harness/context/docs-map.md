@@ -28,7 +28,8 @@ against source before changing code.
   - Already separates implemented, partially implemented, and live-validation gaps.
 
 - `docs/RAY_SERVE_VLLM_MONITORING.md`
-  - Current runbook for gateway metrics plus Ray Serve hosted vLLM monitoring.
+  - Current runbook for gateway metrics, source-owned structured events, the
+    local query CLI, and Ray Serve hosted vLLM monitoring.
 
 - `docs/DEPLOYMENT_CHECKLIST.md`
   - Current reference for the Ray Serve bring-up sequence and endpoint checks.
@@ -39,8 +40,12 @@ against source before changing code.
 - `docs/ASCEND_DEPLOYMENT_CONFIGURATION.md`
   - Current deployment reference for `ascend_deploy/`, `pyproject.ascend.toml`, and `config/settings.ascend-compose.yaml`.
   - It documents `/models` as the Compose model-store mount. The active
-    Qwen3.5-9B catalog entry is relative to that mount; commented historical
-    entries still require path correction before they are enabled.
+  Qwen3.5-9B catalog entry is relative to that mount; commented historical
+  entries still require path correction before they are enabled.
+
+- `docs/LOGGING_STORAGE_QUERY_IMPLEMENTATION.md`
+  - Implementation report for the logging storage/query redesign, including
+    Phase 0 measurements, remote validation evidence, and explicit gaps.
 
 ## Current But Narrow
 
@@ -89,5 +94,10 @@ their main target capabilities.
 
 - `docs/DEBUG_REPORT_2026-05-20.md`
 - `docs/qwen3_reranker_vllm_notes.md`
+- `docs/LOGGING_MANAGEMENT_RESEARCH_2026-09-18.md`
+- `docs/LOGGING_REAL_WORLD_PATTERNS_2026-09-19.md`
+- `docs/LOGGING_REDESIGN_PROPOSAL.md`
 
-Use these for historical troubleshooting context, not as general architecture source of truth.
+Use these for historical troubleshooting/design context, not as general
+architecture source of truth. Their old `container.log` references describe
+the previous design and are not current operator instructions.

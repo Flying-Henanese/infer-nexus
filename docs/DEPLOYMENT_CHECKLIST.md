@@ -103,6 +103,12 @@ ray start --head --num-gpus=4
 
 ## 7. Preflight Tests Before Runtime Bring-Up
 
+- Prepare the host-visible event and Ray directories before Compose startup:
+
+```bash
+python3 scripts/prepare_compose_logs.py
+```
+
 - Run the local unit test suite:
 
 ```bash
@@ -113,7 +119,7 @@ uv run pytest -q
 - If local `uv`/lockfile state blocks pytest execution in your environment snapshot, run fallback syntax checks:
 
 ```bash
-python3 -m compileall src tests
+python3 -m compileall src scripts tests
 ```
 
 ## 8. Start Order
@@ -145,19 +151,33 @@ curl http://127.0.0.1:8000/v1/models
 curl http://127.0.0.1:8000/api/catalog/models
 ```
 
-- Required: run at least one chat request against an actually registered chat alias (for current default config, `qwen3.5-27b` works):
+- Required: run at least one chat request against an actually registered chat alias (for current default config, `qwen3.5-9b` works):
 
 ```bash
 curl -X POST http://127.0.0.1:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "qwen3.5-27b",
+    "model": "qwen3.5-9b",
     "messages": [{"role": "user", "content": "hello"}]
   }'
 ```
 
 - Optional: run embeddings only if an embedding model is enabled in `config/models.yaml`.
 - Optional: run rerank only if a rerank model is enabled in `config/models.yaml`.
+
+- Inspect the source that owns each diagnostic:
+
+```bash
+docker compose --env-file .env logs --no-color --tail=100 ray-head ray-worker serve-deployer
+python3 scripts/logs.py --env-file .env --request-id REQUEST_ID
+python3 scripts/logs.py --env-file .env --infra --service ray-worker
+python3 scripts/logs.py --env-file .env --stats
+```
+
+Application events come from `events-*.jsonl*`; pre-Gateway rejection and
+process/container death must be checked in Ray raw files, Docker logs, and
+container exit/OOM state. Do not invent an application terminal event when the
+request never reached the Gateway middleware.
 
 ## 10. Failure Interpretation
 
@@ -186,5 +206,9 @@ The first deployment is good enough to continue only if:
 - Gateway starts and stays healthy.
 - `/v1/models` returns the expected registered aliases.
 - At least one chat request succeeds.
+- A request ID from the smoke request can be found with `scripts/logs.py`, and
+  the result carries its service/process source attribution.
+- The service stdout/stderr is visible with `docker compose logs`, while Ray
+  session files remain under each service's `ray/` directory.
 - For each task type enabled in your catalog, at least one request for that task succeeds.
 - No request path falls back to unexpected `500` responses.

@@ -49,10 +49,13 @@ behavior against source before changing code.
 - Keep admission control explicit; do not hide readiness or overload behind generic timeouts.
 - Isolate vLLM-specific behavior behind backend/runtime adapters.
 - Keep Compose runtime logs host-visible under `${LOGS_HOST_PATH}/<service>/`:
-  `container.log` captures the service command and `ray/` is that service's
-  `/tmp/ray` tree. Prepare host directories with
+  Docker captures service stdout/stderr with its `json-file` rotation,
+  `events-*.jsonl*` contains structured infer-nexus application events, and
+  `ray/` is that service's `/tmp/ray` tree. Prepare host directories with
   `scripts/prepare_compose_logs.py` before Compose startup; runtime services
-  remain non-root and must not change host ownership.
+  remain non-root and must not change host ownership. Treat event files and
+  Ray raw files as separate source types; do not merge Docker copies into the
+  application-event dataset.
 - Do not add Web UI, tenant-specific isolation, dynamic registration, cross-cluster scheduling, or multi-backend coexistence unless explicitly requested.
 
 ## Change Discipline

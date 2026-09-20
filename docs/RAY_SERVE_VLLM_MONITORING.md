@@ -194,7 +194,8 @@ curl -sS http://127.0.0.1:8000/metrics
 Useful metrics:
 
 - `infer_nexus_requests_total`: OpenAI-compatible gateway request count.
-- `infer_nexus_request_latency_seconds`: gateway route latency histogram.
+- `infer_nexus_request_latency_seconds`: gateway request latency through
+  response-body completion (not merely response-object creation).
 - `infer_nexus_inflight_requests`: requests currently handled by the gateway.
 - `infer_nexus_errors_total`: gateway errors by stable code.
 - `infer_nexus_admission_rejections_total`: admission-control rejections.
@@ -208,6 +209,9 @@ Useful metrics:
   not currently connected to a reliable gateway-side queue-time source.
 - `infer_nexus_input_tokens_total` and `infer_nexus_output_tokens_total`: token
   counts when the backend response contains usage.
+- `infer_nexus_event_writer_failures_total`: per-process event-file open/write
+  failures labelled only by physical Compose service and process role. It is a
+  health signal for the writer process, not a cluster-wide completeness proof.
 
 ## Primary Ray Serve Signals
 
@@ -338,12 +342,15 @@ runtime events but do not replace aggregate counters, histograms, or Ray queue
 signals. Request IDs are intentionally not Prometheus labels.
 
 The checked-in profiles select human-readable console output in
-`config/settings.yaml` and JSONL in the CUDA and Ascend Compose settings. The
-Application records carry `event`, `request_id` when present, `model`, `task`,
-`backend`, Serve app/deployment,
-`outcome`, `status_code`, `duration_ms`, and stable `error_code` fields. Known
-sensitive fields are redacted. Prompt and message bodies, embeddings, rerank
-documents, credentials, and per-token/per-chunk records are excluded.
+`config/settings.yaml` and JSONL in the CUDA and Ascend Compose settings. Each
+Compose process writes `schema_version: 1` JSONL to its own rotated
+`events-<process-role>-<process-instance>.jsonl` file under the physical
+service directory. Records carry `event`, `request_id` when present, physical
+service/node identity, process identity, `model`, `task`, `backend`, Serve
+app/deployment, `outcome`, `status_code`, `duration_ms`, and stable
+`error_code` fields. Known sensitive fields are redacted. Prompt and message
+bodies, embeddings, rerank documents, credentials, and per-token/per-chunk
+records are excluded.
 
 The Gateway selects an inbound validated `X-Request-ID`, falls back to the Ray
 Serve request ID when available, then generates a UUID. Every response includes
@@ -363,6 +370,10 @@ proxy upstream failures emit `proxy.request.failed` with safe host/status fields
 The request terminal event includes `upstream_status` when a proxy returns an
 HTTP error. Successful `/healthz`, `/readyz`, and `/metrics` events are
 suppressed; ordinary successful request events follow `success_sample_rate`.
+When the owning branch knows the cause, terminal records also carry bounded
+`failure_stage` and `timeout_kind` values, with `admission_layer` and reliable
+timing fields. Replica startup failures carry `startup_stage`. Missing usage
+or timing is omitted rather than filled with zero.
 
 ## Log File Discovery
 
@@ -385,40 +396,35 @@ rg 'incident-2026-09-15-42' .infer-nexus/logs .infer-nexus/ray/session_latest/lo
 
 ### Docker Compose
 
-CUDA and Ascend Compose export every service's logs into the repository-root
-`logs/` directory. The first level is the Compose service; the final level
-separates the container command log from Ray's session files:
+CUDA and Ascend Compose export every service's event and Ray trees to the
+configured `LOGS_HOST_PATH`. Docker owns the service stdout/stderr stream and
+its `json-file` rotation; it is the startup/container view rather than a second
+application-event dataset:
 
 ```text
-logs/<service>/container.log
-logs/<service>/ray/session_latest/logs/
+${LOGS_HOST_PATH}/<service>/events-*.jsonl*
+${LOGS_HOST_PATH}/<service>/ray/session_latest/logs/
 ```
 
-The one-shot `log-init` service creates the directories and grants the
-non-root runtime user write access before `ray-head`, `ray-worker`, or
-`serve-deployer` starts. Inspect service logs directly from the host with:
+Run the preparation script before startup and inspect the three source types
+with:
 
 ```bash
-tail -F logs/ray-head/container.log
-find logs/ray-worker/ray/session_latest/logs -maxdepth 2 -type f -print
-rg 'incident-2026-09-15-42' logs
+python3 scripts/prepare_compose_logs.py
+docker compose --env-file .env logs --no-color --tail=100 ray-head ray-worker serve-deployer
+python3 scripts/logs.py --env-file .env --request-id incident-2026-09-15-42
+python3 scripts/logs.py --env-file .env --infra --service ray-worker
+python3 scripts/logs.py --env-file .env --raw --infra --all-sessions
+python3 scripts/logs.py --env-file .env --stats
 ```
 
 Use `docker compose -f ascend_deploy/docker-compose.yml ...` for Ascend Compose
-commands. `container.log` combines the service command's stdout and stderr and
-is append-only on the host. Docker's `json-file` rotation remains a fallback
-for early container failures, while Ray component files use 50 MiB rotation
-with three backups. Configure the host's `logrotate` if `container.log` needs a
-retention limit.
-
-For JSONL application records copied from a process log, filter using the
-stable fields:
-
-```bash
-jq -c 'select(.request_id == "incident-2026-09-15-42")' gateway.jsonl
-jq -c 'select(.event == "admission.rejected")' gateway.jsonl
-jq -c 'select(.event == "model.replica.failed")' ray-worker.jsonl
-```
+commands. Application events are authoritative in `events-*.jsonl*`; raw Ray
+files are authoritative for framework/actor diagnostics; Docker output is the
+container bootstrap and signal/exit view. Do not count the same application
+event from both Docker output and the event files. Application and Ray files
+use independent rotation: 10 MiB × 5 per process for events and 50 MiB × 3
+for Ray components.
 
 Ray and vLLM framework records may use different JSON schemas. Do not assume
 every third-party line has infer-nexus's `event` or request fields.

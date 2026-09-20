@@ -95,6 +95,10 @@ observability:
     slow_request_ms: 10000
     include_traceback: true
     access_log: true
+    event_log_dir: null
+    event_max_bytes: 10485760
+    event_backup_count: 5
+    event_writer_error_interval_seconds: 60
     named_levels:
       ray: INFO
       ray.serve: INFO

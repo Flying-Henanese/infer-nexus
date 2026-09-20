@@ -16,8 +16,10 @@ from infer_nexus.core.request_ids import (
     validate_request_id,
 )
 from infer_nexus.core.request_context import (
+    FAILURE_STAGES,
     RequestContext,
     RequestLifecycleState,
+    TIMEOUT_KINDS,
     bind_request_state,
 )
 from infer_nexus.observability.logging import bind_log_context, get_logger
@@ -27,6 +29,19 @@ logger = get_logger(__name__)
 _LEGACY_REQUEST_ID_HEADER = b"x-infer-nexus-request-id"
 _REQUEST_ID_HEADER = REQUEST_ID_HEADER
 _SUPPRESSED_SUCCESS_PATHS = frozenset({"/healthz", "/readyz", "/metrics"})
+
+
+def _set_failure_stage(state: RequestLifecycleState, stage: str) -> None:
+    """Set only a documented low-cardinality diagnostic stage."""
+    if stage in FAILURE_STAGES:
+        state.failure_stage = stage
+
+
+def _set_timeout_kind(state: RequestLifecycleState, timeout_kind: str) -> None:
+    """Set only a documented timeout classification."""
+    if timeout_kind in TIMEOUT_KINDS:
+        state.timeout_kind = timeout_kind
+
 
 def _client_request_id(scope: Scope) -> str | None:
     for name, value in scope.get("headers", []):
@@ -83,12 +98,20 @@ def _response_error_code(body: bytes) -> str | None:
     return code if isinstance(code, str) and code else None
 
 
-def mark_admission_rejection(error_code: str) -> None:
+def mark_admission_rejection(
+    error_code: str,
+    *,
+    admission_layer: str = "gateway",
+    failure_stage: str = "gateway_admission",
+) -> None:
     """Mark the active request as an explicit admission rejection."""
     state = _current_state()
     if state is not None:
         state.error_code = error_code
         state.admission_rejected = True
+        state.admission_layer = state.admission_layer or admission_layer
+        if state.failure_stage is None:
+            _set_failure_stage(state, failure_stage)
 
 
 def _current_state() -> RequestLifecycleState | None:
@@ -169,12 +192,38 @@ def _record_request_metrics(state: RequestLifecycleState, duration_seconds: floa
         )
 
 
+def _usage_fields(state: RequestLifecycleState) -> dict[str, Any]:
+    """Copy trustworthy response usage counts without filling unknowns with zero."""
+    usage = state.token_usage
+    if usage is None:
+        return {}
+    if isinstance(usage, dict):
+        get_value = usage.get
+    else:
+        get_value = lambda key, default=None: getattr(usage, key, default)
+    fields: dict[str, Any] = {}
+    for source_name, output_name in (
+        ("prompt_tokens", "input_tokens"),
+        ("completion_tokens", "output_tokens"),
+    ):
+        value = get_value(source_name)
+        if isinstance(value, int) and value >= 0:
+            fields[output_name] = value
+    if fields:
+        fields["usage_source"] = state.usage_source or "response"
+    return fields
+
+
 def _finalize(state: RequestLifecycleState, settings: Any) -> None:
     if state.finalized:
         return
     state.finalized = True
     duration_seconds = max(0.0, perf_counter() - state.started_at)
     state.outcome = _outcome(state)
+    if state.outcome in {"error", "rejected", "timeout"} and state.failure_stage is None:
+        _set_failure_stage(state, "unknown")
+    if state.outcome == "timeout" and state.timeout_kind is None:
+        _set_timeout_kind(state, "unknown")
     context = state.context
     _record_request_metrics(state, duration_seconds)
 
@@ -199,6 +248,27 @@ def _finalize(state: RequestLifecycleState, settings: Any) -> None:
         event_fields["error_code"] = state.error_code
     if state.upstream_status is not None:
         event_fields["upstream_status"] = state.upstream_status
+    if state.failure_stage is not None:
+        event_fields["failure_stage"] = state.failure_stage
+    if state.timeout_kind is not None:
+        event_fields["timeout_kind"] = state.timeout_kind
+    if state.admission_layer is not None:
+        event_fields["admission_layer"] = state.admission_layer
+    for field_name in (
+        "admission_wait_ms",
+        "serve_handle_ms",
+        "ttft_ms",
+        "proxy_attempt_count",
+    ):
+        value = getattr(state, field_name)
+        if value is not None:
+            event_fields[field_name] = value
+    if state.proxy_failure_class is not None:
+        event_fields["failure_class"] = state.proxy_failure_class
+    if context.stream:
+        event_fields["emitted_chunk_count"] = max(state.emitted_chunk_count, 0)
+        event_fields["response_headers_sent"] = state.response_headers_sent
+    event_fields.update(_usage_fields(state))
     if slow_request:
         event_fields["slow"] = True
 
@@ -263,6 +333,9 @@ class RequestLoggingMiddleware:
                         if name.lower() == b"content-type"
                     ),
                     b"",
+                )
+                state.response_headers_sent = state.context.stream or (
+                    b"text/event-stream" in content_type
                 )
                 json_error_response = (
                     state.status_code >= 400 and content_type == b"application/json"

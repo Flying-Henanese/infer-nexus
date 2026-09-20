@@ -9,12 +9,18 @@ from datetime import datetime, timezone
 from enum import Enum
 import json
 import logging
+from logging.handlers import RotatingFileHandler
 import math
 import os
+from pathlib import Path
+import re
+import socket
 import sys
 import threading
+import time
 import traceback
 from typing import Any
+from uuid import uuid4
 
 from infer_nexus.core.config import LoggingSettings
 
@@ -22,7 +28,9 @@ from infer_nexus.core.config import LoggingSettings
 _CONTEXT: ContextVar[dict[str, Any]] = ContextVar("infer_nexus_log_context", default={})
 _CONFIG_LOCK = threading.RLock()
 _PROCESS_IDENTITY: dict[str, Any] = {}
+_PROCESS_PID: int | None = None
 _INCLUDE_TRACEBACK = True
+_EVENT_WRITER_STATS = {"failures": 0}
 _SENSITIVE_KEYS = {
     "authorization",
     "api_key",
@@ -64,11 +72,15 @@ _RESERVED_FIELDS = {
     "service",
     "service_version",
     "environment",
+    "physical_service",
+    "node",
     "process_role",
+    "process_instance",
     "pid",
     "source",
     "exception",
     "request_id",
+    "schema_version",
 }
 _LOGGING_KWARGS = {"exc_info", "stack_info", "stacklevel"}
 
@@ -148,9 +160,10 @@ class _JsonFormatter(logging.Formatter):
             exception = {"stack_trace": record.stack_info}
 
         protected = {
+            "schema_version": 1,
             "timestamp": datetime.fromtimestamp(record.created, timezone.utc)
-            .isoformat(timespec="milliseconds")
-            .replace("+00:00", "Z"),
+                .isoformat(timespec="milliseconds")
+                .replace("+00:00", "Z"),
             "level": record.levelname,
             "event": str(event),
             "logger": record.name,
@@ -159,7 +172,11 @@ class _JsonFormatter(logging.Formatter):
                 for key, value in _PROCESS_IDENTITY.items()
                 if key in _RESERVED_FIELDS
             },
-            "source": _source_for_logger(record.name),
+            "source": (
+                "infer_nexus"
+                if getattr(record, "infer_nexus_event", False)
+                else _source_for_logger(record.name)
+            ),
         }
         request_id = _CONTEXT.get().get("request_id")
         if request_id is not None:
@@ -261,33 +278,196 @@ class _StructuredLogger(logging.LoggerAdapter):
                 "structured_event": event,
                 "structured_message": message,
                 "structured_fields": fields,
+                "infer_nexus_event": True,
             },
             stacklevel=stacklevel + 1,
             **logging_kwargs,
         )
 
 
+def _safe_filename_component(value: Any, default: str) -> str:
+    """Return a bounded filename component without exposing path separators."""
+    normalized = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "")).strip("._")
+    return normalized or default
+
+
+def _record_event_writer_failure(
+    *,
+    physical_service: str,
+    process_role: str,
+    path: str,
+    error: BaseException,
+) -> None:
+    """Report a file-writer failure without sending it through logging again."""
+    _EVENT_WRITER_STATS["failures"] += 1
+    try:
+        from infer_nexus.observability.metrics import GATEWAY_METRICS
+
+        GATEWAY_METRICS.observe_event_writer_failure(
+            physical_service=physical_service,
+            process_role=process_role,
+        )
+    except Exception:
+        # Metrics must never make the fallback stderr diagnostic disappear.
+        pass
+    try:
+        sys.stderr.write(
+            "infer-nexus event writer failed "
+            f"for {path!r} ({physical_service}/{process_role}): "
+            f"{type(error).__name__}\n"
+        )
+        sys.stderr.flush()
+    except Exception:
+        # A broken stderr stream is outside the logging module's recovery scope.
+        pass
+
+
+class _ApplicationEventFilter(logging.Filter):
+    """Keep arbitrary framework records out of the authoritative event files."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return bool(getattr(record, "infer_nexus_event", False))
+
+
+class _ProcessRotatingEventHandler(RotatingFileHandler):
+    """A synchronous, process-owned JSONL writer with fork detection."""
+
+    def __init__(
+        self,
+        directory: str | Path,
+        *,
+        max_bytes: int,
+        backup_count: int,
+        error_interval_seconds: float,
+    ) -> None:
+        self._directory = Path(directory)
+        self._owner_pid = os.getpid()
+        self._error_interval_seconds = error_interval_seconds
+        self._last_error_at = 0.0
+        self._infer_nexus_managed = True
+        self._directory.mkdir(parents=True, exist_ok=True)
+        super().__init__(
+            self._path_for_current_process(),
+            maxBytes=max_bytes,
+            backupCount=backup_count,
+            encoding="utf-8",
+            delay=True,
+        )
+
+    def _path_for_current_process(self) -> str:
+        role = _safe_filename_component(_PROCESS_IDENTITY.get("process_role"), "process")
+        instance = _safe_filename_component(
+            _PROCESS_IDENTITY.get("process_instance"), "unknown"
+        )
+        return str(self._directory / f"events-{role}-{instance}.jsonl")
+
+    def _switch_after_fork(self) -> None:
+        """Close an inherited stream and give the child a new process identity."""
+        global _PROCESS_IDENTITY, _PROCESS_PID
+        try:
+            super().close()
+        except Exception:
+            pass
+        identity = dict(_PROCESS_IDENTITY)
+        identity["pid"] = os.getpid()
+        identity["process_instance"] = uuid4().hex
+        identity["node"] = os.getenv("INFER_NEXUS_NODE_NAME", socket.gethostname())
+        _PROCESS_IDENTITY = identity
+        _PROCESS_PID = os.getpid()
+        self._owner_pid = os.getpid()
+        self.baseFilename = os.path.abspath(self._path_for_current_process())
+        self._closed = False
+        self._last_error_at = 0.0
+
+    def _report_failure(self, error: BaseException) -> None:
+        now = time.monotonic()
+        if now - self._last_error_at < self._error_interval_seconds:
+            return
+        self._last_error_at = now
+        _record_event_writer_failure(
+            physical_service=str(_PROCESS_IDENTITY.get("physical_service", "unknown")),
+            process_role=str(_PROCESS_IDENTITY.get("process_role", "unknown")),
+            path=self.baseFilename,
+            error=error,
+        )
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            if os.getpid() != self._owner_pid:
+                self._switch_after_fork()
+            super().emit(record)
+        except Exception as error:
+            self._report_failure(error)
+
+
+def event_writer_stats() -> dict[str, int]:
+    """Return process-local writer diagnostics for tests and operator probes."""
+    return dict(_EVENT_WRITER_STATS)
+
+
 def configure_logging(settings: LoggingSettings, process_identity: Mapping[str, Any]) -> None:
     """Configure one process's standard logging handlers and stable identity."""
-    global _INCLUDE_TRACEBACK, _PROCESS_IDENTITY
+    global _INCLUDE_TRACEBACK, _PROCESS_IDENTITY, _PROCESS_PID
     with _CONFIG_LOCK:
+        pid = os.getpid()
+        previous_instance = (
+            _PROCESS_IDENTITY.get("process_instance") if _PROCESS_PID == pid else None
+        )
         identity = dict(process_identity)
         identity.setdefault("service", "infer-nexus")
         identity.setdefault("service_version", "0.1.0")
         identity.setdefault("environment", os.getenv("INFER_NEXUS_ENVIRONMENT", "development"))
         identity.setdefault("process_role", "cli")
-        identity.setdefault("pid", os.getpid())
+        identity["pid"] = pid
+        identity.setdefault(
+            "physical_service",
+            os.getenv("INFER_NEXUS_PHYSICAL_SERVICE", "local"),
+        )
+        identity.setdefault(
+            "node",
+            os.getenv("INFER_NEXUS_NODE_NAME", socket.gethostname()),
+        )
+        identity["process_instance"] = (
+            previous_instance
+            or identity.get("process_instance")
+            or uuid4().hex
+        )
         _PROCESS_IDENTITY = identity
+        _PROCESS_PID = pid
         _INCLUDE_TRACEBACK = settings.include_traceback
 
         root = logging.getLogger()
         for handler in tuple(root.handlers):
             root.removeHandler(handler)
+            if getattr(handler, "_infer_nexus_managed", False):
+                handler.close()
         handler = logging.StreamHandler(sys.stdout)
+        handler._infer_nexus_managed = True  # type: ignore[attr-defined]
         handler.setFormatter(
             _JsonFormatter() if settings.format == "json" else _ConsoleFormatter()
         )
         root.addHandler(handler)
+
+        event_log_dir = settings.event_log_dir or os.getenv("INFER_NEXUS_EVENT_LOG_DIR")
+        if event_log_dir:
+            try:
+                event_handler = _ProcessRotatingEventHandler(
+                    event_log_dir,
+                    max_bytes=settings.event_max_bytes,
+                    backup_count=settings.event_backup_count,
+                    error_interval_seconds=settings.event_writer_error_interval_seconds,
+                )
+            except Exception as error:
+                _record_event_writer_failure(
+                    physical_service=str(identity.get("physical_service", "unknown")),
+                    process_role=str(identity.get("process_role", "unknown")),
+                    path=str(event_log_dir),
+                    error=error,
+                )
+            else:
+                event_handler.addFilter(_ApplicationEventFilter())
+                event_handler.setFormatter(_JsonFormatter())
+                root.addHandler(event_handler)
         root.setLevel(getattr(logging, settings.level))
 
         for logger_name, level_name in settings.named_levels.items():

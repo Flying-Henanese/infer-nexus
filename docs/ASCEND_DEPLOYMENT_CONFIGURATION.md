@@ -346,22 +346,26 @@ docker compose -f ascend_deploy/docker-compose.yml ps
 
 ### 9.2 查看日志
 
-所有 Compose 服务的日志都会直接落在宿主机仓库根目录的 `logs/`：
+服务标准输出和错误输出由 Docker 管理；结构化应用事件与 Ray 原始文件
+落在 `LOGS_HOST_PATH` 下：
 
-- `logs/<服务名>/container.log`：容器启动命令的标准输出和错误输出。
-- `logs/<服务名>/ray/session_latest/logs/`：Ray Serve、Gateway、模型副本与 vLLM 的日志。
+- `${LOGS_HOST_PATH}/<服务名>/events-*.jsonl*`：结构化 infer-nexus 应用事件。
+- `${LOGS_HOST_PATH}/<服务名>/ray/session_latest/logs/`：Ray Serve、Gateway、模型副本与 vLLM 的原始日志。
 
 例如：
 
 ~~~bash
-tail -F logs/ray-head/container.log
-find logs/ray-worker/ray/session_latest/logs -type f
-rg 'model.replica.failed' logs
+docker compose -f ascend_deploy/docker-compose.yml logs --no-color --tail=100 ray-head ray-worker serve-deployer
+python3 scripts/logs.py --env-file .env --request-id REQUEST_ID
+python3 scripts/logs.py --env-file .env --infra --service ray-worker
+python3 scripts/logs.py --env-file .env --stats
 ~~~
 
-`log-init` 会在其他服务启动前自动创建这些目录并赋予容器运行用户写入权限。
-重点检查 Ray 的 NPU 资源、模型目录、vLLM 初始化和 Serve 健康状态。`container.log`
-为宿主机上的追加文件；如需限制保留量，请在宿主机配置 `logrotate`。
+启动前先运行 `python3 scripts/prepare_compose_logs.py`，它会创建宿主机
+目录并保持运行时服务非 root。重点检查 Ray 的 NPU 资源、模型目录、vLLM
+初始化和 Serve 健康状态。应用事件文件是结构化事件的权威来源，Docker
+输出用于容器启动/退出诊断，Ray 目录用于框架与 actor 原始诊断；不要把同一
+事件从多个来源重复计数。
 
 ### 9.3 API 验证
 

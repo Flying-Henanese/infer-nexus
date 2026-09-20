@@ -141,10 +141,25 @@ settings files rather than request-path code.
 - Local Ray files live under `.infer-nexus/ray/session_latest/logs/`, apart from
   CLI/bootstrap output at `.infer-nexus/logs/ray_bootstrap.log` and
   `.infer-nexus/logs/serve_runtime.log`. Compose exports runtime files to
-  `${LOGS_HOST_PATH}/<service>/`: `container.log` contains service-command stdout/stderr
-  and `ray/` is the service's `/tmp/ray` root. The host script
-  `scripts/prepare_compose_logs.py` prepares these paths and persists the
-  absolute log root in `.env` before non-root runtime services start.
+  `${LOGS_HOST_PATH}/<service>/`: `events-*.jsonl*` contains process-isolated
+  structured application events, Docker owns service stdout/stderr through its
+  bounded `json-file` driver, and `ray/` is the service's `/tmp/ray` root. The
+  host script `scripts/prepare_compose_logs.py` prepares these paths and
+  persists the absolute log root in `.env` before non-root runtime services
+  start. The event files and Ray tree are separate source types.
+- `observability.logging` defaults to no event file locally and enables
+  `/var/log/infer-nexus` in both Compose profiles. Every configured process
+  writes only its structured infer-nexus events to
+  `events-<process-role>-<process-instance>.jsonl`, with schema version 1 and
+  10 MiB × 5 process-owned rotation. Writer failures fall back to rate-limited
+  stderr diagnostics and `infer_nexus_event_writer_failures_total`.
+- Request terminal events carry bounded failure stage/timeout kind and known
+  admission, Serve-handle, stream, proxy, startup, and usage fields. The
+  `scripts/logs.py` query layer reads event files, current or historical Ray
+  session text, and storage stats without merging duplicate source copies.
+- The logging/query redesign has not been claimed as runtime-validated until
+  the required remote A100 checks in `.harness/workflows/remote-deploy-and-validate.md`
+  are complete.
 
 ## Known Checked-in Integration Gaps
 

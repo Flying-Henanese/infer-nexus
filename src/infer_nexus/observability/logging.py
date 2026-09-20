@@ -178,7 +178,10 @@ class _JsonFormatter(logging.Formatter):
                 else _source_for_logger(record.name)
             ),
         }
-        request_id = _CONTEXT.get().get("request_id")
+        context = _CONTEXT.get()
+        request_id = context.get("request_id")
+        if request_id is None and isinstance(structured, Mapping):
+            request_id = structured.get("request_id")
         if request_id is not None:
             protected["request_id"] = request_id
         fields: dict[str, Any] = {}
@@ -190,6 +193,8 @@ class _JsonFormatter(logging.Formatter):
                 fields[context_field] = value
         if isinstance(structured, Mapping):
             for field_name, value in structured.items():
+                if field_name == "request_id":
+                    continue
                 if field_name not in _RESERVED_FIELDS:
                     fields[field_name] = value
         result = dict(fields)

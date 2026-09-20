@@ -74,9 +74,23 @@ class FileStats:
 
     files: int = 0
     bytes: int = 0
+    oldest: datetime | None = None
+    newest: datetime | None = None
 
-    def add(self, size: int) -> "FileStats":
-        return FileStats(files=self.files + 1, bytes=self.bytes + size)
+    def add(self, size: int, modified_at: datetime | None = None) -> "FileStats":
+        if modified_at is not None:
+            modified_at = modified_at.astimezone(timezone.utc)
+        oldest = self.oldest
+        newest = self.newest
+        if modified_at is not None:
+            oldest = modified_at if oldest is None else min(oldest, modified_at)
+            newest = modified_at if newest is None else max(newest, modified_at)
+        return FileStats(
+            files=self.files + 1,
+            bytes=self.bytes + size,
+            oldest=oldest,
+            newest=newest,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -465,7 +479,9 @@ def compute_stats(root: str | Path, service: str | None = None) -> LogStats:
     for _service_name, service_dir in _service_directories(root_path, service):
         for path in discover_event_files(root_path, _service_name):
             try:
-                events = events.add(path.stat().st_size)
+                stat = path.stat()
+                modified_at = datetime.fromtimestamp(stat.st_mtime, timezone.utc)
+                events = events.add(stat.st_size, modified_at)
             except OSError:
                 continue
         ray_dir = service_dir / "ray"
@@ -486,15 +502,17 @@ def compute_stats(root: str | Path, service: str | None = None) -> LogStats:
                 if not path.is_file() or path.is_symlink():
                     continue
                 try:
-                    size = path.stat().st_size
+                    stat = path.stat()
+                    size = stat.st_size
+                    modified_at = datetime.fromtimestamp(stat.st_mtime, timezone.utc)
                 except OSError:
                     continue
                 if category == "historical":
-                    historical = historical.add(size)
+                    historical = historical.add(size, modified_at)
                 elif "logs" in path.relative_to(session).parts:
-                    ray_logs = ray_logs.add(size)
+                    ray_logs = ray_logs.add(size, modified_at)
                 else:
-                    ray_other = ray_other.add(size)
+                    ray_other = ray_other.add(size, modified_at)
     return LogStats(
         events=events,
         ray_logs=ray_logs,
@@ -584,8 +602,18 @@ def render_stats(stats: LogStats) -> str:
         ("ray_other_session_contents", stats.ray_other),
         ("historical_sessions", stats.historical_sessions),
     )
+
+    def format_time(value: datetime | None) -> str:
+        if value is None:
+            return "-"
+        return value.astimezone(timezone.utc).isoformat(timespec="seconds").replace(
+            "+00:00", "Z"
+        )
+
     return "\n".join(
-        f"{name}: files={value.files} bytes={value.bytes}" for name, value in rows
+        f"{name}: files={value.files} bytes={value.bytes} "
+        f"oldest={format_time(value.oldest)} newest={format_time(value.newest)}"
+        for name, value in rows
     ) + "\n"
 
 

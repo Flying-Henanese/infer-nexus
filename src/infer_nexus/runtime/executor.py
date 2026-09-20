@@ -653,6 +653,7 @@ class RuntimeExecutor:
 
         model_label = self._metric_model(target)
         call_start = perf_counter()
+        handle_start = call_start
         call_status = "error"
         guard_acquired = False
         released = False
@@ -660,6 +661,7 @@ class RuntimeExecutor:
             guard = self._get_guard(target, stream=False)
             admission_wait = await guard.acquire()
             guard_acquired = True
+            handle_start = perf_counter()
             state = current_request_state()
             if state is not None:
                 state.admission_wait_ms = round(max(admission_wait, 0.0) * 1000, 3)
@@ -700,7 +702,7 @@ class RuntimeExecutor:
                 state = current_request_state()
                 if state is not None:
                     state.serve_handle_ms = round(
-                        max(perf_counter() - call_start, 0.0) * 1000,
+                        max(perf_counter() - handle_start, 0.0) * 1000,
                         3,
                     )
                 GATEWAY_METRICS.observe_serve_handle_call(
@@ -798,11 +800,13 @@ class RuntimeExecutor:
 
         model_label = self._metric_model(target)
         call_start = perf_counter()
+        handle_start = call_start
         guard_acquired = False
         try:
             guard = self._get_guard(target, stream=True)
             admission_wait = await guard.acquire()
             guard_acquired = True
+            handle_start = perf_counter()
             state = current_request_state()
             if state is not None:
                 state.admission_wait_ms = round(max(admission_wait, 0.0) * 1000, 3)
@@ -840,7 +844,7 @@ class RuntimeExecutor:
             state = current_request_state()
             if state is not None:
                 state.serve_handle_ms = round(
-                    max(perf_counter() - call_start, 0.0) * 1000,
+                    max(perf_counter() - handle_start, 0.0) * 1000,
                     3,
                 )
             GATEWAY_METRICS.observe_serve_handle_call(

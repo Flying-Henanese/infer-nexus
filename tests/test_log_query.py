@@ -151,6 +151,8 @@ def test_infra_current_session_excludes_latest_alias_and_stats_separate_categori
     assert stats.ray_logs.files == 1
     assert stats.ray_other.files == 1
     assert stats.historical_sessions.files == 1
+    assert stats.events.oldest is not None
+    assert stats.events.newest is not None
 
     historical = discover_infra_files(tmp_path, service="ray-head", all_sessions=True)
     assert [line.text for line in historical] == ["raylet historical", "raylet current"]

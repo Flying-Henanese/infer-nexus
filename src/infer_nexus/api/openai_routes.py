@@ -239,9 +239,13 @@ def _runtime_error_response(exc: Exception, *, operation: str, request_model: st
         )
     if isinstance(exc, RuntimeNotConnectedError):
         if state is not None:
-            state.failure_stage = state.failure_stage or "serve_handle"
-            if exc.code == "upstream_timeout":
-                state.timeout_kind = state.timeout_kind or "serve_handle"
+            stage_by_code = {
+                "backend_misconfigured": "model_backend",
+                "runtime_circuit_open": "model_admission",
+                "streaming_unavailable": "serve_handle",
+            }
+            if state.failure_stage is None:
+                state.failure_stage = stage_by_code.get(exc.code, "unknown")
         status_code, error_type = runtime_not_connected_status(exc.code)
         return openai_error_response(
             status_code,
@@ -252,7 +256,15 @@ def _runtime_error_response(exc: Exception, *, operation: str, request_model: st
     if isinstance(exc, RuntimeExecutionError):
         if state is not None:
             state.error_code = exc.code
-            state.failure_stage = state.failure_stage or "model_backend"
+            stage_by_code = {
+                "unsupported_parameter": "request_validation",
+                "unsupported_message_content": "request_validation",
+                "invalid_input": "request_validation",
+                "backend_misconfigured": "model_backend",
+                "runtime_execution_failed": "model_backend",
+            }
+            if state.failure_stage is None:
+                state.failure_stage = stage_by_code.get(exc.code, "unknown")
             if exc.code not in {
                 "unsupported_parameter",
                 "unsupported_message_content",

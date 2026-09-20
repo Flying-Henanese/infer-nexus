@@ -42,6 +42,13 @@ Implemented:
   `local_best_effort`.
 - Gateway-local runtime guards, bounded queues, stream timeouts, circuit breaker
   accounting, and related metrics.
+- In Serve mode, `/readyz` checks the configured local model applications and
+  deployments through Ray Serve status. Direct Uvicorn mode returns a basic
+  readiness response.
+- The deployment factory passes per-model replica bounds and optional
+  `autoscaling_config` overrides to Ray Serve. Ray Serve owns any resulting
+  automatic replica scaling; scaling behavior has not been validated across
+  the configured replica range in a live deployment.
 - A CPU-only `InferNexusGatewayIngress` Ray Serve application provides the
   production HTTP/SSE entrypoint. It reuses the FastAPI routes and resolves
   per-model handles from inside the Serve data plane; standalone Uvicorn remains
@@ -79,12 +86,13 @@ Skeleton or partial:
   the public routes.
 
 Not implemented:
-- Dependency-aware readiness checks.
+- Readiness checks covering all dependencies, including proxy upstreams.
 - Dynamic model registration.
 - Full runtime-state enrichment in platform model APIs.
 - Proxy hardening such as upstream allowlist enforcement, request body size
   limits, and full client `Authorization` forwarding policy.
-- Automatic replica scaling or deployment reconciliation loops.
+- An infer-nexus inference-aware scaling policy or deployment reconciliation
+  loop.
 
 ## 2. Design Principles
 
@@ -918,9 +926,12 @@ This is preferable to accepting every request and failing later with long timeou
 Phase 1 scaling should be driven by inference-oriented metrics, not just low-level infrastructure metrics.
 
 Current implementation status:
-- scaling controller logic: `待实现`
-- automatic replica adjustment wiring: `待实现`
-- threshold configuration fields exist, but policy execution is not connected yet
+- per-model `min_replicas`, `max_replicas`, and optional
+  `deployment_config.autoscaling_config` are passed to Ray Serve; live scaling
+  across the configured range has not been validated
+- infer-nexus inference-aware scaling controller logic: `待实现`
+- threshold configuration fields exist, but infer-nexus policy execution is not
+  connected yet
 
 ### Primary scaling signals
 - `queue_length`

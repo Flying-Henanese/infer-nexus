@@ -1,6 +1,13 @@
 # Logging Storage And Query Redesign Execution Plan
 
-Status: ready for implementation, not implemented
+Status: mostly implemented; diagnostic coverage and capacity/runtime-overhead
+validation remain open (see Definition Of Done below)
+
+The target language, design-time observations, and implementation phases below
+are retained as the execution record. For current behavior, use
+`.harness/context/current-architecture.md`; for remaining work, use the
+unchecked Definition Of Done items and
+`docs/LOGGING_STORAGE_QUERY_IMPLEMENTATION.md`.
 
 Prepared: 2026-09-19; diagnostic coverage refined 2026-09-20
 Scope: single-host CUDA and Ascend Docker Compose deployments
@@ -53,9 +60,9 @@ The conversation leading to this plan approved these design changes:
 7. Keep the schema and directory layout compatible with later ELK/Loki file
    collection, but do not deploy a collector or backend now.
 
-These decisions intentionally replace the current repository requirement that
+These decisions replaced the former repository requirement that
 every service command append to `${LOGS_HOST_PATH}/<service>/container.log`.
-The implementation must update `docs/ARCHITECTURE.md`, `AGENTS.md`, relevant
+The implementation updated `docs/ARCHITECTURE.md`, `AGENTS.md`, relevant
 harness files, Compose files, tests, README, deployment documentation, and
 operator workflows so the repository has one consistent contract.
 
@@ -644,7 +651,7 @@ Update at least:
 - `.harness/README.md`
   - mark this plan implemented only after all acceptance criteria pass
 - the old `.harness/plans/logging-management-execution-plan.md`
-  - mark its implemented portions and point remaining storage/query work here;
+  - mark its implemented portions and point remaining validation work here;
     do not leave its stale baseline presented as current
 
 The research documents remain design evidence, not current-behavior manuals:

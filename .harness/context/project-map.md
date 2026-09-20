@@ -6,6 +6,7 @@ navigation map; verify behavior in code before changing it.
 ## Source And Tests
 
 - Gateway app and HTTP APIs: `src/infer_nexus/main.py` builds the FastAPI app;
+  `src/infer_nexus/gateway_runtime.py` constructs and attaches its dependencies;
   `src/infer_nexus/api/` owns OpenAI-compatible, platform, health, and metrics
   routes plus request and worker-admission middleware. Start with
   `tests/test_main.py`, `tests/test_api.py`, and `tests/test_gateway_ingress.py`.

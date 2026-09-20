@@ -6,10 +6,15 @@ Prepared: 2026-09-14
 Target implementation start: 2026-09-15
 
 > Do not execute this plan from the beginning. Verify current source first.
-> The remaining Compose stdout, application event-file, local query, retention,
-> and documentation work is specified in
-> `logging-storage-query-redesign-plan.md`; the old `container.log` storage
-> design is superseded by Docker stdout plus process-isolated event files.
+> Compose stdout, application event files, local queries, and storage reporting
+> are implemented in `logging-storage-query-redesign-plan.md`. Use that plan's
+> unchecked acceptance items for remaining diagnostic and capacity validation.
+> The old `container.log` design is superseded by Docker stdout plus
+> process-isolated event files.
+> The baseline, implementation phases, and unchecked acceptance checklist below
+> preserve the 2026-09-14 planning snapshot; they do not describe the checked-in
+> runtime or the remaining work.
+> Use `.harness/context/current-architecture.md` for current behavior.
 
 ## Objective
 
@@ -46,7 +51,7 @@ It does not add:
 Metrics remain in Prometheus. Logs provide request-level explanation and
 diagnostic context; they must not duplicate time-series data at high volume.
 
-## Current Baseline
+## Baseline At Plan Preparation (2026-09-14)
 
 ### Configuration and bootstrap
 

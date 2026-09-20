@@ -12,9 +12,9 @@ Do not store secrets, large logs, model artifacts, or generated benchmark output
 
 Files under `context/` describe the checked-in implementation and configuration as they exist now. Files under `rules/` are normative guardrails and may describe required target behavior that is still only partial or stubbed. Do not infer that a rule is already implemented without checking the matching context file and source.
 
-Files under `plans/` describe future execution sequences. They are not evidence
-that the planned behavior has been implemented; confirm completion against
-source, tests, and the matching `context/` files.
+Files under `plans/` record execution sequences and their completion status.
+They are not evidence that a step has been implemented; confirm completion
+against source, tests, and the matching `context/` files.
 
 ## Read By Task
 
@@ -35,16 +35,15 @@ is summarized in `context/`; confirm details against source before editing.
 
 ## Active Plans
 
-- `plans/logging-storage-query-redesign-plan.md`: implementation source for the
-  Compose stdout restoration, process-isolated event files, unified local
-  queries, storage controls, and documentation updates. Its acceptance boxes
-  are checked against the remote evidence recorded in
-  `docs/LOGGING_STORAGE_QUERY_IMPLEMENTATION.md`; unchecked boxes are
-  explicitly unsafe or deferred validation gaps.
+- `plans/logging-storage-query-redesign-plan.md`: Compose stdout restoration,
+  process-isolated event files, local queries, storage reporting, and related
+  documentation are implemented. Its unchecked acceptance items track
+  diagnostic coverage and capacity/runtime-overhead validation gaps. Check
+  `docs/LOGGING_STORAGE_QUERY_IMPLEMENTATION.md` for remote evidence.
 
 ## Historical Plans
 
 - `plans/logging-management-execution-plan.md`: structured JSONL logging,
   request correlation, and framework adapters. Its application-layer work is
-  substantially implemented; use the active plan for remaining storage and
-  query work.
+  substantially implemented; use the active plan's unchecked items for
+  remaining validation.

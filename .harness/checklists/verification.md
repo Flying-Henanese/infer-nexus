@@ -73,7 +73,7 @@ Check the relevant unit tests around:
 For real Serve-mode validation, use the bring-up sequence in
 `docs/DEPLOYMENT_CHECKLIST.md` together with
 `.harness/workflows/remote-deploy-and-validate.md`. The deployment checklist's
-chat example names disabled `qwen3.5-27b`; use active alias `qwen3.5-9b`.
+chat example uses the active `qwen3.5-9b` alias.
 
 For Compose validation, distinguish these two levels in the report:
 

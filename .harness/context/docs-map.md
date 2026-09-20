@@ -33,9 +33,7 @@ against source before changing code.
 
 - `docs/DEPLOYMENT_CHECKLIST.md`
   - Current reference for the Ray Serve bring-up sequence and endpoint checks.
-  - Its chat example still names the disabled `qwen3.5-27b` catalog entry. For
-    the current validation catalog, use `qwen3.5-9b` instead, as specified in
-    `.harness/workflows/remote-deploy-and-validate.md`.
+  - Its chat example uses the currently enabled `qwen3.5-9b` alias.
 
 - `docs/ASCEND_DEPLOYMENT_CONFIGURATION.md`
   - Current deployment reference for `ascend_deploy/`, `pyproject.ascend.toml`, and `config/settings.ascend-compose.yaml`.

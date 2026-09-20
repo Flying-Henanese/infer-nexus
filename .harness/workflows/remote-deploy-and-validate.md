@@ -75,8 +75,8 @@ curl --fail --silent --show-error http://127.0.0.1:8000/v1/models
 ```
 
 For inference-path changes, run a minimal request against an enabled model
-alias. The active validation catalog exposes `qwen3.5-9b`; do not copy the
-disabled `qwen3.5-27b` example from `docs/DEPLOYMENT_CHECKLIST.md`.
+alias. The active validation catalog and `docs/DEPLOYMENT_CHECKLIST.md` use
+`qwen3.5-9b`.
 
 ## 5. Report Completion
 

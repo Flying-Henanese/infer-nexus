@@ -18,7 +18,9 @@ client
 -> local vllm / Ray Serve DeploymentHandle / vllm_openai_proxy
 ```
 
-`runtime/worker_client.py` defines a future runtime-worker isolation boundary, but `main.py` does not construct or inject a runtime-worker client. It is not an active execution path.
+`runtime/worker_client.py` defines a future runtime-worker isolation boundary,
+but `GatewayRuntime` does not construct or inject a runtime-worker client. It is
+not an active execution path.
 
 Local `backend: vllm` models use Ray Serve deployments in serve mode:
 
@@ -36,8 +38,8 @@ Proxy models use `backend: vllm_openai_proxy` and are forwarded to an upstream O
 ## Startup And State
 
 - `src/infer_nexus/main.py` loads the selected settings file: `config/settings.yaml` by default, `config/settings.compose.yaml` in the root CUDA Compose flow, or `config/settings.ascend-compose.yaml` in the Ascend Compose flow.
-- The catalog is loaded from one configured YAML file, currently `config/models.yaml`.
-- `ModelRegistry`, `LocalModelStore`, `ServeApplicationBuilder`, `RuntimeExecutor`, `WorkerAdmissionController`, and `RuntimeDispatcher` are attached to `app.state`.
+- `GatewayRuntime.create()` in `src/infer_nexus/gateway_runtime.py` loads the catalog from one configured YAML file, currently `config/models.yaml`, and constructs the gateway dependencies.
+- `GatewayRuntime.attach()` puts `ModelRegistry`, `LocalModelStore`, `ServeApplicationBuilder`, `RuntimeExecutor`, `WorkerAdmissionController`, and `RuntimeDispatcher` on `app.state`.
 - Platform APIs are currently read-only catalog/status/load/capacity views.
 - `control/reconciler.py` exists only as a skeleton.
 
@@ -86,6 +88,9 @@ settings files rather than request-path code.
 
 - `infer-nexus` owns public HTTP ingress, model lookup, request validation, admission checks, proxying, and app-level metrics.
 - Ray Serve owns local deployment lifecycle, replica placement, replica routing, and Serve-level metrics.
+- `DeploymentFactory` passes each local model's replica bounds and optional
+  autoscaling overrides to Ray Serve. The infer-nexus `Scaler` remains a
+  skeleton; live scale-out across the configured range has not been validated.
 - vLLM owns replica-local model execution for local models.
 - Cache affinity, when enabled, is configured through `config/models.yaml` deployment router settings such as `deployment_config.request_router_config.request_router_class`.
 - Upstream OpenAI-compatible servers own protocol behavior for proxy models.
@@ -177,11 +182,12 @@ settings files rather than request-path code.
   and `/nas_data/...`). Before re-enabling one, verify that its path matches
   the selected runtime's model-store root and mounts; do not assume every
   environment should use the Compose `/models` path.
-- Ascend starts the worker with
-  `RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1` by default for runtime
-  compatibility. A real Ascend run must prove that Ray actor allocation and
-  `ASCEND_RT_VISIBLE_DEVICES` agree before multi-replica autoscaling is relied
-  upon.
+- `scripts/start_minimal_ascend.sh` defaults
+  `RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1` for local startup. The
+  corresponding entry is commented out in `ascend_deploy/docker-compose.yml`,
+  so the Compose file does not set it on the worker. A real Ascend run must
+  prove that Ray actor allocation and `ASCEND_RT_VISIBLE_DEVICES` agree before
+  multi-replica autoscaling is relied upon.
 - `AdmissionController.check_model_request()` is a no-op integration hook. Active protection currently comes from task/model validation, artifact checks, process-local worker admission, and `RuntimeExecutor` guards; readiness- and cluster-capacity-aware admission are not implemented.
 - The full unit suite is not green against the current catalog. Many API, dispatcher, runtime, and script tests still expect the previous three-model fixture and old aliases. See `.harness/checklists/verification.md` before interpreting full-suite failures.
 

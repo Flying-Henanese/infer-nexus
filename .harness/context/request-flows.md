@@ -5,9 +5,11 @@ changing a route, middleware, deployment, or backend.
 
 ## Startup Modes
 
-- `src/infer_nexus/main.py` loads the selected settings and the single model
-  catalog, builds the registry, model store, Serve builder, executor, worker
-  admission controller, and dispatcher, then attaches them to `app.state`.
+- `src/infer_nexus/main.py` loads the selected settings and creates the FastAPI
+  app. `GatewayRuntime.create()` in `src/infer_nexus/gateway_runtime.py` loads
+  the single model catalog and builds the registry, model store, Serve builder,
+  executor, worker admission controller, and dispatcher. `GatewayRuntime.attach()`
+  puts them on `app.state`.
 - `scripts/run_gateway.py` starts FastAPI for local or standalone debugging.
   In Compose Serve mode, the same app runs inside
   `InferNexusGatewayIngress`; there is no separate Uvicorn gateway service.
@@ -36,7 +38,7 @@ changing a route, middleware, deployment, or backend.
 4. `RuntimeDispatcher` selects a target. `RuntimeExecutor` applies its
    per-model guards and chooses a local Serve handle, configured upstream
    proxy, or local/stub path. The runtime-worker client protocol exists but
-   is not injected by `main.py`; it is not an active isolation path.
+   is not injected by `GatewayRuntime`; it is not an active isolation path.
 5. A local Serve handle passes an allowlisted `RequestContext` to
    `ModelRuntimeReplica` and its replica-local vLLM backend. Proxy execution
    rewrites the model field and forwards the request ID according to

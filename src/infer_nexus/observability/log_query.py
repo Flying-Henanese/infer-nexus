@@ -392,9 +392,24 @@ def _record_sort_key(record: ApplicationRecord) -> tuple[int, datetime, str, int
 def _current_session(ray_dir: Path) -> Path | None:
     latest = ray_dir / "session_latest"
     if latest.is_symlink():
-        target = latest.resolve()
-        if target.is_dir() and target.parent == ray_dir and target.name.startswith("session_"):
-            return target
+        raw_target = Path(os.readlink(latest))
+        candidates = [
+            raw_target if raw_target.is_absolute() else latest.parent / raw_target
+        ]
+        # Ray writes an absolute /tmp/ray/session_* target inside containers.
+        # After the directory is bind-mounted to the host, resolve the target
+        # by its session name without ever reading outside this service root.
+        if raw_target.is_absolute():
+            candidates.append(ray_dir / raw_target.name)
+        ray_root = ray_dir.resolve()
+        for candidate in candidates:
+            target = candidate.resolve()
+            if (
+                target.is_dir()
+                and target.parent == ray_root
+                and target.name.startswith("session_")
+            ):
+                return target
         return None
     if latest.is_dir() and latest.name.startswith("session_"):
         return latest.resolve()

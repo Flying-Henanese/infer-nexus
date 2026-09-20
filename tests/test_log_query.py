@@ -97,7 +97,9 @@ def _write_fixture(root: Path) -> None:
     (current / "logs").mkdir(parents=True)
     (current / "logs" / "raylet.out").write_text("raylet current\n", encoding="utf-8")
     (current / "runtime.state").write_text("state\n", encoding="utf-8")
-    (root / "ray-head" / "ray" / "session_latest").symlink_to(current.name)
+    (root / "ray-head" / "ray" / "session_latest").symlink_to(
+        f"/tmp/ray/{current.name}"
+    )
     historical = root / "ray-head" / "ray" / "session_20260919_000000"
     (historical / "logs").mkdir(parents=True)
     (historical / "logs" / "raylet.out").write_text("raylet historical\n", encoding="utf-8")

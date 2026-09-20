@@ -698,14 +698,16 @@ No ELK code is required now. Preserve these contracts:
 
 ## Definition Of Done
 
-- [ ] Both Compose profiles send service command stdout/stderr to Docker.
-- [ ] `docker compose logs` shows useful startup and failure output.
-- [ ] `container.log` and `run_with_log.sh` have no active runtime, operator
+- [x] Both Compose profiles send service command stdout/stderr to Docker.
+- [x] `docker compose logs` shows useful startup and failure output.
+- [x] `container.log` and `run_with_log.sh` have no active runtime, operator
       manual, or current-harness references. Historical research may retain
-      them when clearly labeled as the previous design.
-- [ ] Every infer-nexus process writes a unique, rotated `events-*.jsonl` file
+      them when clearly labeled as the previous design. A pre-existing
+      2026-09-17 host `container.log` was preserved and is not written by the
+      current Compose run.
+- [x] Every infer-nexus process writes a unique, rotated `events-*.jsonl` file
       under its physical service directory in Compose.
-- [ ] Event files contain only structured infer-nexus events and preserve all
+- [x] Event files contain only structured infer-nexus events and preserve all
       existing redaction and correlation guarantees.
 - [ ] The P0 diagnostic coverage rows are validated, including bounded failure
       stages, startup failure stages when known, and the pre-Gateway Ray
@@ -713,23 +715,29 @@ No ELK code is required now. Preserve these contracts:
 - [ ] Phase 0 coverage worksheet names the owner and trustworthy source for
       every field; final examples show a success, rejection, stream failure,
       model startup failure, and a pre-Gateway failure with no app event.
-- [ ] Metrics and event fields retain their distinct meanings; no per-request
+- [x] Metrics and event fields retain their distinct meanings; no per-request
       identifiers enter Prometheus labels, and missing usage/timing data is
       never represented as zero.
-- [ ] Ray's complete per-service `/tmp/ray` tree remains host-visible.
-- [ ] The local query CLI supports default, request, model, service, infra, raw,
+- [x] Ray's complete per-service `/tmp/ray` tree remains host-visible.
+- [x] The local query CLI supports default, request, model, service, infra, raw,
       follow, and stats workflows.
-- [ ] Rotation, new files, malformed records, symlink aliases, restarts, and
+- [x] Rotation, new files, malformed records, symlink aliases, restarts, and
       write failures have meaningful coverage.
-- [ ] Source ownership prevents duplicate counting in the CLI and documents how
+- [x] Source ownership prevents duplicate counting in the CLI and documents how
       a future collector must do the same.
 - [ ] Capacity and runtime overhead are measured on a real deployment.
-- [ ] `docs/ARCHITECTURE.md`, `AGENTS.md`, README, monitoring/deployment docs,
+- [x] `docs/ARCHITECTURE.md`, `AGENTS.md`, README, monitoring/deployment docs,
       Compose tests, harness contexts, harness checklist, and remote deployment
       workflow all describe the implemented design.
-- [ ] CUDA runtime validation is reported accurately; Ascend is not claimed
+- [x] CUDA runtime validation is reported accurately; Ascend is not claimed
       without a real NPU run.
-- [ ] No collector, centralized backend, or KubeRay dependency was added.
+- [x] No collector, centralized backend, or KubeRay dependency was added.
+
+The two unchecked diagnostic rows and the capacity row are intentional: the
+shared A100 run did not induce overload, timeout, startup-failure, process-death,
+or pre-Gateway failure scenarios, and no performance-budget benchmark was part
+of this change. See `docs/LOGGING_STORAGE_QUERY_IMPLEMENTATION.md` for the
+observed evidence and safe deferred gaps.
 
 ## Stop Conditions
 

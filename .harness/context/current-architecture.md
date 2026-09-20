@@ -157,9 +157,13 @@ settings files rather than request-path code.
   admission, Serve-handle, stream, proxy, startup, and usage fields. The
   `scripts/logs.py` query layer reads event files, current or historical Ray
   session text, and storage stats without merging duplicate source copies.
-- The logging/query redesign has not been claimed as runtime-validated until
-  the required remote A100 checks in `.harness/workflows/remote-deploy-and-validate.md`
-  are complete.
+- The logging/query redesign was runtime-validated on A100 on 2026-09-20.
+  Focused Python 3.12/uv tests passed, the CUDA Compose deployment reached
+  healthy Ray services with a successful vLLM model replica, host health and
+  readiness checks passed, and non-streaming, streaming, rejection, event
+  query, infra query, and storage stats checks were recorded in
+  `docs/LOGGING_STORAGE_QUERY_IMPLEMENTATION.md`. Unsafe live overload,
+  timeout, process-death, and startup-failure injections remain explicit gaps.
 
 ## Known Checked-in Integration Gaps
 

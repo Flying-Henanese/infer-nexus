@@ -31,15 +31,25 @@ If `uv run --frozen` is blocked by local environment state, report that clearly 
 
 ## Current Repository Test Baseline
 
-As observed on 2026-09-04, `uv run --frozen pytest -q` completes but is not green:
-115 tests pass, 47 fail, and 2 are skipped.
+As observed on 2026-09-20 on A100 with Python 3.12.12, the focused logging,
+query, configuration, and Compose set passes 43 tests. The broader
+`pytest -q --ignore=tests/test_compose_logging.py` run reports 161 passed, 52
+failed, and 2 skipped; it is not green.
 
 Known contributors:
 
 - shared fixtures and many API/dispatcher/runtime/script tests still expect the
   previous multi-model catalog and aliases, while `config/models.yaml` now
   enables only Qwen3.5-9B for Compose validation
-- the installed `uv` warns that `tool.uv.extra-build-dependencies` is not recognized unless the relevant preview support/version is used
+- local installed `uv` versions may warn or reject the experimental
+  `tool.uv.extra-build-dependencies` option; the A100 `uv 0.9.28` run parsed it
+  with an experimental-feature warning
+
+The A100 run used `/home/mineru_dev/.local/bin/uv` 0.9.28 and successfully
+resolved Python 3.12.12. The remaining broad-suite failures are still the
+previous multi-model catalog/alias expectations, dependency-version-sensitive
+runtime mocks, and cross-test global-state effects; they are outside the
+focused logging/query validation.
 
 For unrelated work, run the smallest relevant tests and compare any full-suite failures with this baseline. Do not describe the repository as fully green, and do not treat every known baseline failure as caused by a documentation-only change.
 

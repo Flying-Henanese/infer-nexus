@@ -10,9 +10,9 @@ x-infer-nexus-image: &infer-nexus-image
     context: ..
     dockerfile: ascend_deploy/dockerfile
     args:
-      ASCEND_BASE_IMAGE: ${ASCEND_BASE_IMAGE:-mineru:npu-latest}
-      APP_UID: ${APP_UID:-10001}
-      APP_GID: ${APP_GID:-10001}
+      ASCEND_BASE_IMAGE: ${ASCEND_BASE_IMAGE:-quay.io/ascend/vllm-ascend:v0.23.0}
+      APP_UID: ${APP_UID:-1004}
+      APP_GID: ${APP_GID:-1005}
 
 services:
   ray-head:
@@ -32,7 +32,7 @@ services:
         --block
     ports:
       - "8265:8265"
-      - "8000:8000"
+      - "18000:8000"
     environment: &ray-logging-environment
       RAY_LOGGING_CONFIG_ENCODING: JSON
       RAY_BACKEND_LOG_JSON: "1"
@@ -44,7 +44,7 @@ services:
       - ../docs:/app/docs:ro
       - ../README.md:/app/README.md:ro
       - ../config:/app/config:ro
-      - ${MODEL_STORE_HOST_PATH:-../models}:/models
+      - ${MODEL_STORE_HOST_PATH:-/data1/models}:/models
       - ray-head-temp:/tmp/ray
     healthcheck:
       test: ["CMD-SHELL", "ray status --address=127.0.0.1:6379 >/dev/null 2>&1"]
@@ -90,7 +90,7 @@ services:
         $$RESOURCE_ARGS
         --block
     environment:
-      ASCEND_RT_VISIBLE_DEVICES: ${ASCEND_RT_VISIBLE_DEVICES:?ASCEND_RT_VISIBLE_DEVICES must define the infer-nexus NPU pool}
+      ASCEND_RT_VISIBLE_DEVICES: ${ASCEND_RT_VISIBLE_DEVICES:-4,5}
       # RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES: ${RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES:-1}
       RAY_LOGGING_CONFIG_ENCODING: JSON
       RAY_BACKEND_LOG_JSON: "1"
@@ -106,7 +106,7 @@ services:
       - ../docs:/app/docs:ro
       - ../README.md:/app/README.md:ro
       - ../config:/app/config:ro
-      - ${MODEL_STORE_HOST_PATH:-../models}:/models
+      - ${MODEL_STORE_HOST_PATH:-/data1/models}:/models
       - ray-worker-temp:/tmp/ray
       - /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro
       - /usr/local/dcmi:/usr/local/dcmi:ro
@@ -155,7 +155,7 @@ services:
       - ../docs:/app/docs:ro
       - ../README.md:/app/README.md:ro
       - ../config:/app/config:ro
-      - ${MODEL_STORE_HOST_PATH:-../models}:/models
+      - ${MODEL_STORE_HOST_PATH:-/data1/models}:/models
       - ray-deployer-temp:/tmp/ray
     restart: "no"
 

@@ -61,23 +61,25 @@ services:
     # 用户添加到设备组
     group_add:
        - "${ASCEND_DEVICE_GID:-1003}"
-    privileged: true
+    # 不使用 privileged：NPU 池边界由 ASCEND_RT_VISIBLE_DEVICES + 下方 devices 可见性共同定义，
+    # privileged 会让宿主机全部 davinci 设备可见，破坏池边界。
+    # /dev/shm 提升到 1g，避免 Ray 对象存储因默认 64MB 回退磁盘。
+    shm_size: "1g"
     depends_on:
       ray-head:
         condition: service_healthy
+    # NPU 资源计数从容器内可见的 /dev/davinci[0-9]+ 节点数推导（与 devices 暴露一致），
+    # 不再解析 ASCEND_RT_VISIBLE_DEVICES 字符串，避免池声明与实际可见性脱节。
     command:
       # 权限执行问题，由sh改为bash
       - bash
       - -lc
       - >
         set -eu;
-        if [ -z "$${ASCEND_RT_VISIBLE_DEVICES:-}" ]; then
-          echo "ASCEND_RT_VISIBLE_DEVICES must define the infer-nexus NPU pool, for example: 0,1,2,3." >&2;
-          exit 1;
-        fi;
-        DERIVED_NUM_NPUS=$$(python -c "import os; v=os.environ.get('ASCEND_RT_VISIBLE_DEVICES',''); print(len([x for x in v.split(',') if x.strip()]))");
+        unset ASCEND_RT_VISIBLE_DEVICES;
+        DERIVED_NUM_NPUS=$$(find /dev -maxdepth 1 -name 'davinci[0-9]*' 2>/dev/null | wc -l | tr -d ' ');
         if [ "$${DERIVED_NUM_NPUS}" -le 0 ]; then
-          echo "ASCEND_RT_VISIBLE_DEVICES must contain at least one device id." >&2;
+          echo "No /dev/davinci[0-9]+ devices visible in ray-worker; keep the devices list in sync with ASCEND_RT_VISIBLE_DEVICES." >&2;
           exit 1;
         fi;
         RESOURCE_ARGS="--resources={\"NPU\":$${DERIVED_NUM_NPUS}}";
@@ -90,13 +92,16 @@ services:
         $$RESOURCE_ARGS
         --block
     environment:
-      ASCEND_RT_VISIBLE_DEVICES: ${ASCEND_RT_VISIBLE_DEVICES:-4,5}
+      # ASCEND_RT_VISIBLE_DEVICES: ${ASCEND_RT_VISIBLE_DEVICES:-4,5}
       # RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES: ${RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES:-1}
       RAY_LOGGING_CONFIG_ENCODING: JSON
       RAY_BACKEND_LOG_JSON: "1"
       RAY_ROTATION_MAX_BYTES: "52428800"
       RAY_ROTATION_BACKUP_COUNT: "3"
     devices:
+      # NPU 池设备，需与 ASCEND_RT_VISIBLE_DEVICES（默认 4,5）保持一致；调整池时同步修改
+      - /dev/davinci4
+      - /dev/davinci5
       - /dev/davinci_manager
       - /dev/devmm_svm
       - /dev/hisi_hdc
@@ -113,6 +118,11 @@ services:
       - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro
       - /usr/local/sbin:/usr/local/sbin:ro
       - /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool:ro
+      # 非 root 枚举 NPU 必需：缺失时 HAL/dcmi 设备枚举 device_count=0，
+      # vLLM 模型自检子进程内 triton-ascend get_arch() 返回 NULL，
+      # 表现为 "Model architectures ['Qwen3_5ForConditionalGeneration'] failed to be inspected"。
+      - /var/dcmi:/var/dcmi
+      - /etc/ascend_install.info:/etc/ascend_install.info
     healthcheck:
       test: ["CMD-SHELL", "RAY_HEAD_IP=$$(python -c \"import socket; print(socket.gethostbyname('ray-head'))\"); ray status --address=$${RAY_HEAD_IP}:6379 >/dev/null 2>&1"]
       interval: 10s

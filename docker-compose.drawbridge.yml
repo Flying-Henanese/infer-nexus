@@ -1,0 +1,180 @@
+# drawbridge 专用 Compose 文件。
+# drawbridge 会把注册的 compose 原样扁平化到 <release>/ 根目录执行，且不改写相对路径；
+# 因此本文件的相对路径一律以仓库根为基准，与 ascend_deploy/docker-compose.yml（以 ascend_deploy/
+# 为基准）不可混用。手动使用时同样从仓库根执行：
+#   docker compose -f docker-compose.drawbridge.yml up
+x-container-log-rotation: &container-log-rotation
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+x-infer-nexus-image: &infer-nexus-image
+  image: infer-nexus:v6.1_vllm_0.23
+  build:
+    context: .
+    dockerfile: ascend_deploy/dockerfile
+    args:
+      ASCEND_BASE_IMAGE: ${ASCEND_BASE_IMAGE:-quay.io/ascend/vllm-ascend:v0.23.0}
+      APP_UID: ${APP_UID:-1004}
+      APP_GID: ${APP_GID:-1005}
+
+services:
+  ray-head:
+    <<: *infer-nexus-image
+    user: infer-nexus
+    logging: *container-log-rotation
+    command:
+      - bash
+      - -lc
+      - >
+        ray start --head
+        --node-ip-address=$$(hostname -i)
+        --port=6379
+        --dashboard-host=0.0.0.0
+        --disable-usage-stats
+        --temp-dir=/tmp/ray
+        --block
+    ports:
+      - "8265:8265"
+      - "18000:8000"
+    environment: &ray-logging-environment
+      RAY_LOGGING_CONFIG_ENCODING: JSON
+      RAY_BACKEND_LOG_JSON: "1"
+      RAY_ROTATION_MAX_BYTES: "52428800"
+      RAY_ROTATION_BACKUP_COUNT: "3"
+    volumes:
+      - ./src:/app/src:ro
+      - ./scripts:/app/scripts:ro
+      - ./docs:/app/docs:ro
+      - ./README.md:/app/README.md:ro
+      - ./config:/app/config:ro
+      - ${MODEL_STORE_HOST_PATH:-/data1/models}:/models
+      - ray-head-temp:/tmp/ray
+    healthcheck:
+      test: ["CMD-SHELL", "ray status --address=127.0.0.1:6379 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+
+  ray-worker:
+    <<: *infer-nexus-image
+    user: infer-nexus
+    logging: *container-log-rotation
+    # 用户添加到设备组
+    group_add:
+       - "${ASCEND_DEVICE_GID:-1003}"
+    # 不使用 privileged：NPU 池边界由 ASCEND_RT_VISIBLE_DEVICES + 下方 devices 可见性共同定义，
+    # privileged 会让宿主机全部 davinci 设备可见，破坏池边界。
+    # /dev/shm 提升到 1g，避免 Ray 对象存储因默认 64MB 回退磁盘。
+    shm_size: "1g"
+    depends_on:
+      ray-head:
+        condition: service_healthy
+    # NPU 资源计数从容器内可见的 /dev/davinci[0-9]+ 节点数推导（与 devices 暴露一致），
+    # 不再解析 ASCEND_RT_VISIBLE_DEVICES 字符串，避免池声明与实际可见性脱节。
+    command:
+      # 权限执行问题，由sh改为bash
+      - bash
+      - -lc
+      - >
+        set -eu;
+        unset ASCEND_RT_VISIBLE_DEVICES;
+        DERIVED_NUM_NPUS=$$(find /dev -maxdepth 1 -name 'davinci[0-9]*' 2>/dev/null | wc -l | tr -d ' ');
+        if [ "$${DERIVED_NUM_NPUS}" -le 0 ]; then
+          echo "No /dev/davinci[0-9]+ devices visible in ray-worker; keep the devices list in sync with ASCEND_RT_VISIBLE_DEVICES." >&2;
+          exit 1;
+        fi;
+        RESOURCE_ARGS="--resources={\"NPU\":$${DERIVED_NUM_NPUS}}";
+        RAY_HEAD_IP=$$(python -c "import socket; print(socket.gethostbyname('ray-head'))");
+        RAY_ADDRESS="$${RAY_HEAD_IP}:6379";
+        ray start --address="$${RAY_ADDRESS}"
+        --node-ip-address=$$(hostname -i)
+        --disable-usage-stats
+        --temp-dir=/tmp/ray
+        $$RESOURCE_ARGS
+        --block
+    environment:
+      # ASCEND_RT_VISIBLE_DEVICES: ${ASCEND_RT_VISIBLE_DEVICES:-4,5}
+      # RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES: ${RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES:-1}
+      RAY_LOGGING_CONFIG_ENCODING: JSON
+      RAY_BACKEND_LOG_JSON: "1"
+      RAY_ROTATION_MAX_BYTES: "52428800"
+      RAY_ROTATION_BACKUP_COUNT: "3"
+    devices:
+      # NPU 池设备，需与 ASCEND_RT_VISIBLE_DEVICES（默认 4,5）保持一致；调整池时同步修改
+      - /dev/davinci4
+      - /dev/davinci5
+      - /dev/davinci_manager
+      - /dev/devmm_svm
+      - /dev/hisi_hdc
+    volumes:
+      - ./src:/app/src:ro
+      - ./scripts:/app/scripts:ro
+      - ./docs:/app/docs:ro
+      - ./README.md:/app/README.md:ro
+      - ./config:/app/config:ro
+      - ${MODEL_STORE_HOST_PATH:-/data1/models}:/models
+      - ray-worker-temp:/tmp/ray
+      - /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro
+      - /usr/local/dcmi:/usr/local/dcmi:ro
+      - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro
+      - /usr/local/sbin:/usr/local/sbin:ro
+      - /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool:ro
+      # 非 root 枚举 NPU 必需：缺失时 HAL/dcmi 设备枚举 device_count=0，
+      # vLLM 模型自检子进程内 triton-ascend get_arch() 返回 NULL，
+      # 表现为 "Model architectures ['Qwen3_5ForConditionalGeneration'] failed to be inspected"。
+      - /var/dcmi:/var/dcmi
+      - /etc/ascend_install.info:/etc/ascend_install.info
+    healthcheck:
+      test: ["CMD-SHELL", "RAY_HEAD_IP=$$(python -c \"import socket; print(socket.gethostbyname('ray-head'))\"); ray status --address=$${RAY_HEAD_IP}:6379 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
+
+  serve-deployer:
+    <<: *infer-nexus-image
+    user: infer-nexus
+    logging: *container-log-rotation
+    environment: *ray-logging-environment
+    depends_on:
+      ray-head:
+        condition: service_healthy
+      ray-worker:
+        condition: service_healthy
+    command:
+      - bash
+      - -lc
+      - >
+        set -eu;
+        trap 'ray stop --force >/dev/null 2>&1 || true' EXIT;
+        RAY_HEAD_IP=$$(python -c "import socket; print(socket.gethostbyname('ray-head'))");
+        RAY_ADDRESS="$${INFER_NEXUS_RAY_ADDRESS:-$${RAY_HEAD_IP}:6379}";
+        ray start --address="$${RAY_ADDRESS}"
+        --node-ip-address=$$(hostname -i)
+        --temp-dir=/tmp/ray
+        --num-cpus=0
+        --disable-usage-stats;
+        python scripts/run_serve_runtime.py
+        --settings config/settings.ascend-compose.yaml
+        --ray-address "$${RAY_ADDRESS}"
+        --proxy-location HeadOnly
+        --ready-timeout-seconds ${SERVE_READY_TIMEOUT_SECONDS:-900}
+    volumes:
+      - ./src:/app/src:ro
+      - ./scripts:/app/scripts:ro
+      - ./docs:/app/docs:ro
+      - ./README.md:/app/README.md:ro
+      - ./config:/app/config:ro
+      - ${MODEL_STORE_HOST_PATH:-/data1/models}:/models
+      - ray-deployer-temp:/tmp/ray
+    restart: "no"
+
+volumes:
+  ray-head-temp:
+  ray-worker-temp:
+  ray-deployer-temp:

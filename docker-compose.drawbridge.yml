@@ -20,9 +20,30 @@ x-infer-nexus-image: &infer-nexus-image
       APP_GID: ${APP_GID:-1005}
 
 services:
+  # /tmp/ray 的命名卷只保留首次填充时的属主：镜像重建或 APP_UID/APP_GID 调整都
+  # 不会更新已有卷，root 调试容器写入的文件也会留在卷里。属主与 infer-nexus 不一致时，
+  # ray start 会在写 /tmp/ray/ray_current_cluster 时报 Permission denied。
+  # 该一次性 init 以 root 把三个卷的属主校正回镜像内的 infer-nexus 用户。
+  ray-tmp-init:
+    <<: *infer-nexus-image
+    user: "0"
+    logging: *container-log-rotation
+    restart: "no"
+    command:
+      - bash
+      - -lc
+      - chown -R infer-nexus:infer-nexus /fix/ray-head /fix/ray-worker /fix/ray-deployer
+    volumes:
+      - ray-head-temp:/fix/ray-head
+      - ray-worker-temp:/fix/ray-worker
+      - ray-deployer-temp:/fix/ray-deployer
+
   ray-head:
     <<: *infer-nexus-image
     user: infer-nexus
+    depends_on:
+      ray-tmp-init:
+        condition: service_completed_successfully
     logging: *container-log-rotation
     command:
       - bash

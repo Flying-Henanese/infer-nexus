@@ -5,9 +5,41 @@ x-container-log-rotation: &container-log-rotation
     max-file: "5"
 
 services:
+  # The /tmp/ray named volumes keep the ownership they were first populated
+  # with: image rebuilds and APP_UID/APP_GID changes never update an existing
+  # volume, and root debugging sessions leave root-owned files behind. When the
+  # volume owner differs from infer-nexus, `ray start` fails with
+  # "Permission denied: /tmp/ray/ray_current_cluster". This one-shot init
+  # re-aligns all three volumes to the image's infer-nexus user.
+  ray-tmp-init:
+    image: infer-nexus:runtime
+    user: "0"
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BUILDER_BASE_IMAGE: ${BUILDER_BASE_IMAGE:-nvidia/cuda:12.2.0-devel-ubuntu22.04}
+        RUNTIME_BASE_IMAGE: ${RUNTIME_BASE_IMAGE:-nvidia/cuda:12.2.0-runtime-ubuntu22.04}
+        PYTHON_VERSION: ${PYTHON_VERSION:-3.11}
+        APP_UID: ${APP_UID:-10001}
+        APP_GID: ${APP_GID:-10001}
+    logging: *container-log-rotation
+    restart: "no"
+    command:
+      - sh
+      - -lc
+      - chown -R infer-nexus:infer-nexus /fix/ray-head /fix/ray-worker /fix/ray-deployer
+    volumes:
+      - ray-head-temp:/fix/ray-head
+      - ray-worker-temp:/fix/ray-worker
+      - ray-deployer-temp:/fix/ray-deployer
+
   ray-head:
     image: infer-nexus:runtime
     user: infer-nexus
+    depends_on:
+      ray-tmp-init:
+        condition: service_completed_successfully
     build:
       context: .
       dockerfile: Dockerfile

@@ -43,8 +43,8 @@ models:
       serve_deployment_kwargs:
         max_queued_requests: 16
         # 副本独占 2 卡 NPU 池；并发上限需大于 2 才能让 vLLM continuous batching
-        # 吃到多条序列，否则压测显示吞吐在并发 4 即饱和且 TTFT 线性恶化
-        max_ongoing_requests: 8
+        # 吃到多条序列。8 时 c8 吞吐 77.7 tok/s 且 inflight 无排队，继续上探 16。
+        max_ongoing_requests: 16
     labels:
       - internal
       - llm

@@ -42,7 +42,9 @@ models:
     deployment_config:
       serve_deployment_kwargs:
         max_queued_requests: 16
-        max_ongoing_requests: 2
+        # 副本独占 2 卡 NPU 池；并发上限需大于 2 才能让 vLLM continuous batching
+        # 吃到多条序列，否则压测显示吞吐在并发 4 即饱和且 TTFT 线性恶化
+        max_ongoing_requests: 8
     labels:
       - internal
       - llm
@@ -57,9 +59,9 @@ models:
         compilation_config:
           cudagraph_mode: FULL_DECODE_ONLY
         # 对应 vllm serve --additional-config
-        # 这里是ascend平台的numa绑定配置，vllm在ascend平台上运行时需要开启
-        additional_config:
-          enable_cpu_binding: true
+        # enable_cpu_binding 已移除：容器未做 NUMA 对齐的 cpuset 时，
+        # 绑定会因 Cpus_allowed_list 与 NUMA 亲和冲突被静默跳过（仅产生告警）。
+        # 待 compose 侧为 ray-worker 配置对齐 NPU 所在 NUMA 节点的 cpuset 后再开启。
       openai_serving:
         enabled: true
 

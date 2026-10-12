@@ -387,6 +387,11 @@ rg 'incident-2026-09-15-42' .infer-nexus/logs .infer-nexus/ray/session_latest/lo
 
 CUDA and Ascend Compose give each Ray process a separate named volume mounted
 at `/tmp/ray`: `ray-head-temp`, `ray-worker-temp`, and `ray-deployer-temp`.
+Named volumes keep the ownership of their first population, so both Compose
+files run a one-shot root `ray-tmp-init` service that re-aligns the three
+volumes to the image's `infer-nexus` user before `ray-head` starts; if
+`ray-head` still reports `Permission denied: /tmp/ray/ray_current_cluster`,
+re-run `docker compose up -d` instead of exec-ing into the container as root.
 Inspect each service's current session files with:
 
 ```bash

@@ -42,9 +42,10 @@ models:
     deployment_config:
       serve_deployment_kwargs:
         max_queued_requests: 16
-        # 副本独占 2 卡 NPU 池；并发上限需大于 2 才能让 vLLM continuous batching
-        # 吃到多条序列。8 时 c8 吞吐 77.7 tok/s 且 inflight 无排队，继续上探 16。
-        max_ongoing_requests: 16
+        # 副本独占 2 卡 NPU 池。压测上探结论：8 为当前引擎配置（MTP 投机解码）
+        # 下的拐点——调到 16 后 c8/c16/c24 吞吐均无法超过 8 档的 ~78 tok/s，
+        # 且 TTFT/TPOT 恶化（投机解码验证开销随批量增长抵消批处理收益）。
+        max_ongoing_requests: 8
     labels:
       - internal
       - llm

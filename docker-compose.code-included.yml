@@ -1,7 +1,9 @@
 # 910B 平台归档变体 Compose（镜像 infer-nexus:v6.3_code_included）。
 # 以 docker-compose.drawbridge.yml 为参考：代码（src/scripts/docs/README/config）已由
-# ascend_deploy/dockerfile.code-included 打进镜像，运行时不再挂载代码，仅保留模型目录
-# （MODEL_STORE_HOST_PATH，默认 /data1/models）与 Ascend 驱动相关挂载。
+# ascend_deploy/dockerfile.code-included 打进镜像，运行时不再挂载代码；仅 config/ 例外，
+# 以只读挂载覆盖镜像内置副本，使 models.yaml 等目录配置变更免重建镜像（部署更新只需
+# 重跑 serve-deployer）。其余仅保留模型目录（MODEL_STORE_HOST_PATH，默认 /data1/models）
+# 与 Ascend 驱动相关挂载。
 # 相对路径一律以仓库根为基准，与 drawbridge 的扁平化执行方式兼容；手动使用同样从仓库根执行：
 #   docker compose -f docker-compose.code-included.yml up
 x-container-log-rotation: &container-log-rotation
@@ -66,6 +68,10 @@ services:
       RAY_ROTATION_MAX_BYTES: "52428800"
       RAY_ROTATION_BACKUP_COUNT: "3"
     volumes:
+      # config/ 只读挂载覆盖镜像内置副本（三个服务共用同一约束）：
+      # 宿主机发布目录必须携带完整 config/（settings.ascend-compose.yaml 等四个 yaml），
+      # 缺失时 docker 会创建空目录遮蔽镜像内置配置，导致启动失败。
+      - ./config:/app/config:ro
       - ${MODEL_STORE_HOST_PATH:-/data1/models}:/models
       - ray-head-temp:/tmp/ray
     healthcheck:
@@ -128,6 +134,7 @@ services:
       - /dev/devmm_svm
       - /dev/hisi_hdc
     volumes:
+      - ./config:/app/config:ro
       - ${MODEL_STORE_HOST_PATH:-/data1/models}:/models
       - ray-worker-temp:/tmp/ray
       - /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro
@@ -177,6 +184,7 @@ services:
         --proxy-location HeadOnly
         --ready-timeout-seconds ${SERVE_READY_TIMEOUT_SECONDS:-900}
     volumes:
+      - ./config:/app/config:ro
       - ${MODEL_STORE_HOST_PATH:-/data1/models}:/models
       - ray-deployer-temp:/tmp/ray
     restart: "no"

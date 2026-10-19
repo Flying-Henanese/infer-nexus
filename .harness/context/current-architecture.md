@@ -48,6 +48,18 @@ The repository has two current Compose entrypoints with the same service topolog
 - root `docker-compose.yml` + root `Dockerfile` + `config/settings.compose.yaml` for the CUDA path
 - `ascend_deploy/docker-compose.yml` + `ascend_deploy/dockerfile` + `config/settings.ascend-compose.yaml` for the Ascend NPU path
 
+Two repo-root Ascend variants exist for the drawbridge flow (paths relative to the
+repo root because drawbridge flattens the compose into `<release>/`):
+
+- `docker-compose.drawbridge.yml` bind-mounts `./src`, `./scripts`, and `./config`
+  from the release directory.
+- `docker-compose.code-included.yml` + `ascend_deploy/dockerfile.code-included`
+  bake code and config into the archive image, but still bind-mount `./config`
+  read-only over the baked copy on all three services, so catalog/settings edits
+  take effect by re-running `serve-deployer` without an image rebuild. The host
+  release directory must carry a complete `config/` directory or the mount
+  shadows the baked config with an empty/incomplete directory.
+
 Both use this runtime shape:
 
 ```text

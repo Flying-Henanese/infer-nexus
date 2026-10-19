@@ -39,6 +39,8 @@ models:
     gpu_memory_utilization: 0.95
     min_replicas: 1
     max_replicas: 1
+    # /v1/models 与平台 catalog 视图直接回显该静态声明；缺省为 unknown。
+    status: ready
     deployment_config:
       serve_deployment_kwargs:
         max_queued_requests: 16
@@ -59,6 +61,12 @@ models:
         # 对应 vllm serve --compilation-config
         compilation_config:
           cudagraph_mode: FULL_DECODE_ONLY
+        # 对应 vllm serve --enable-auto-tool-choice --tool-call-parser hermes。
+        # 二者为 OpenAI serving 层参数（不进入引擎构造），缺失时任何带 tools 的
+        # 请求都会被 vLLM 以 "auto" tool choice requires ... 拒绝（tool_choice
+        # 缺省按 auto 校验）。Qwen3 系列使用 hermes 解析器。
+        enable_auto_tool_choice: true
+        tool_call_parser: hermes
         # 对应 vllm serve --additional-config
         # enable_cpu_binding 已移除：容器未做 NUMA 对齐的 cpuset 时，
         # 绑定会因 Cpus_allowed_list 与 NUMA 亲和冲突被静默跳过（仅产生告警）。

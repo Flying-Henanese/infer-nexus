@@ -21,12 +21,16 @@ Use this file before editing `config/models.yaml`.
 
 ## Enabled Model Pattern
 
-The active catalog currently contains only the local `Qwen3.5-9B` `backend: vllm` entry for A100 Compose validation. The other declared local models are commented out and do not deploy. Do not assume that proxy models are active just because proxy support exists in code. Tests consume the active catalog directly; check `.harness/checklists/verification.md` for the current catalog-coupled test baseline.
+The active catalog contains the local `Qwen3.8-27B` `backend: vllm` entry for the Ascend drawbridge Compose runtime (TP=2, one replica owning the 2-NPU pool). Its `vllm.engine_kwargs` must keep `enable_auto_tool_choice: true` and `tool_call_parser: hermes`: these are OpenAI serving-layer keys consumed by the strict vLLM adapter, and without them vLLM rejects every chat request that carries `tools` (a missing `tool_choice` is validated as `auto`). The entry also declares `status: ready`, which `/v1/models` echoes verbatim; the schema default is `unknown`. The other declared local models, including the historical `Qwen3.5-9B` entry, are commented out and do not deploy. Do not assume that proxy models are active just because proxy support exists in code. Tests consume the active catalog directly; check `.harness/checklists/verification.md` for the current catalog-coupled test baseline.
 
 ## Placement Rules
 
 - Top-level fields describe infer-nexus identity, task, backend, resources, and deployment settings.
-- `vllm.engine_kwargs` holds vLLM engine construction options.
+- `vllm.engine_kwargs` holds vLLM engine construction options, except a small
+  serving-only allowlist (`enable_auto_tool_choice`, `tool_call_parser`) that
+  `VLLMBackend` strips before engine construction and forwards to the vLLM
+  OpenAI chat serving objects instead. Keep them in underscore key form; the
+  strict adapter reads those exact key names.
 - `vllm.request_defaults` holds default request values.
 - `vllm.request_policy` controls allowed OpenAI-style fields.
 - `vllm.openai_serving` controls native vLLM OpenAI serving adapter behavior.

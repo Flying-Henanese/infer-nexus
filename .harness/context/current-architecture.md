@@ -66,7 +66,8 @@ replica lifecycle after `serve-deployer` submits the applications.
 Uvicorn gateway service in Serve mode. Only `ray-head` and `ray-worker` remain
 running after the deployment job exits successfully. The CUDA worker registers
 GPU resources derived from `CUDA_VISIBLE_DEVICES`; the Ascend worker registers
-custom `NPU` resources derived from `ASCEND_RT_VISIBLE_DEVICES`.
+custom `NPU` resources derived from the `/dev/davinci` nodes that the host's
+ascend-docker-runtime mounts for the pool selected via `ASCEND_VISIBLE_DEVICES`.
 Platform-specific accelerator details stay in image, Compose, environment, and
 settings files rather than request-path code.
 
@@ -152,11 +153,15 @@ settings files rather than request-path code.
   and `/nas_data/...`). Before re-enabling one, verify that its path matches
   the selected runtime's model-store root and mounts; do not assume every
   environment should use the Compose `/models` path.
-- Ascend starts the worker with
-  `RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1` by default for runtime
-  compatibility. A real Ascend run must prove that Ray actor allocation and
-  `ASCEND_RT_VISIBLE_DEVICES` agree before multi-replica autoscaling is relied
-  upon.
+- Ascend device exposure is owned by the host's ascend-docker-runtime
+  (`runtime: ascend` + `ASCEND_VISIBLE_DEVICES` on ray-worker), which mounts
+  only the pooled NPU nodes plus driver paths and enforces device cgroup
+  isolation. The worker startup script keeps `unset ASCEND_RT_VISIBLE_DEVICES`
+  as a guard: on the validated 24.1.rc2 driver + CANN 9.1.0 stack that
+  variable itself zeroes non-root NPU enumeration, and newer Ray versions may
+  inject it into actor environments. A real Ascend run must prove that Ray
+  actor allocation and the runtime-mounted device set agree before
+  multi-replica autoscaling is relied upon.
 - `AdmissionController.check_model_request()` is a no-op integration hook. Active protection currently comes from task/model validation, artifact checks, process-local worker admission, and `RuntimeExecutor` guards; readiness- and cluster-capacity-aware admission are not implemented.
 - The full unit suite is not green against the current catalog. Many API, dispatcher, runtime, and script tests still expect the previous three-model fixture and old aliases. See `.harness/checklists/verification.md` before interpreting full-suite failures.
 

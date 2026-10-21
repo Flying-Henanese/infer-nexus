@@ -68,18 +68,22 @@ services:
     <<: *infer-nexus-image
     user: "0"
     logging: *container-log-rotation
-    # 用户添加到设备组（入口脚本降权时经 setpriv --keep-groups 保留）
+    # NPU 池边界由 ascend-docker-runtime 定义：按 ASCEND_VISIBLE_DEVICES 只挂载选中 NPU
+    # 的设备节点（/dev/davinci* + davinci_manager/devmm_svm/hisi_hdc）并注入宿主机驱动、
+    # /var/dcmi、/etc/ascend_install.info 等路径（此前手动维护的 devices 清单与驱动挂载已删除），
+    # 同时在宿主机配置 device cgroup 隔离。前置条件：宿主机已注册 ascend runtime。
+    runtime: ascend
+    # 设备组仍需保留：runtime 负责挂载节点，节点访问权限来自宿主机设备属组
+    # （入口脚本降权时经 setpriv --keep-groups 保留）。
     group_add:
        - "${ASCEND_DEVICE_GID:-1003}"
-    # 不使用 privileged：NPU 池边界由 ASCEND_RT_VISIBLE_DEVICES + 下方 devices 可见性共同定义，
-    # privileged 会让宿主机全部 davinci 设备可见，破坏池边界。
     # /dev/shm 提升到 1g，避免 Ray 对象存储因默认 64MB 回退磁盘。
     shm_size: "1g"
     depends_on:
       ray-head:
         condition: service_healthy
-    # NPU 资源计数从容器内可见的 /dev/davinci[0-9]+ 节点数推导（与 devices 暴露一致），
-    # 不再解析 ASCEND_RT_VISIBLE_DEVICES 字符串，避免池声明与实际可见性脱节。
+    # NPU 资源计数从容器内可见的 /dev/davinci[0-9]+ 节点数推导（与 runtime 挂载一致），
+    # 避免池声明与实际可见性脱节。
     command:
       # 权限执行问题，由sh改为bash
       - bash
@@ -89,7 +93,7 @@ services:
         unset ASCEND_RT_VISIBLE_DEVICES;
         DERIVED_NUM_NPUS=$$(find /dev -maxdepth 1 -name 'davinci[0-9]*' 2>/dev/null | wc -l | tr -d ' ');
         if [ "$${DERIVED_NUM_NPUS}" -le 0 ]; then
-          echo "No /dev/davinci[0-9]+ devices visible in ray-worker; keep the devices list in sync with ASCEND_RT_VISIBLE_DEVICES." >&2;
+          echo "No /dev/davinci[0-9]+ devices visible in ray-worker; check ASCEND_VISIBLE_DEVICES and the ascend runtime." >&2;
           exit 1;
         fi;
         RESOURCE_ARGS="--resources={\"NPU\":$${DERIVED_NUM_NPUS}}";
@@ -102,19 +106,14 @@ services:
         $$RESOURCE_ARGS
         --block
     environment:
-      # ASCEND_RT_VISIBLE_DEVICES: ${ASCEND_RT_VISIBLE_DEVICES:-4,5}
-      # RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES: ${RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES:-1}
+      # NPU 池选择，由 ascend-docker-runtime 接管。注意不是 ASCEND_RT_VISIBLE_DEVICES：
+      # 当前 24.1.rc2 驱动 + CANN 9.1.0 栈上该变量本身会导致非 root 枚举归零；runtime
+      # 不注入它，启动脚本中的 unset 防护 Ray 侧注入，二者共同保证它不出现在运行环境。
+      ASCEND_VISIBLE_DEVICES: ${ASCEND_VISIBLE_DEVICES:-4,5}
       RAY_LOGGING_CONFIG_ENCODING: JSON
       RAY_BACKEND_LOG_JSON: "1"
       RAY_ROTATION_MAX_BYTES: "52428800"
       RAY_ROTATION_BACKUP_COUNT: "3"
-    devices:
-      # NPU 池设备，需与 ASCEND_RT_VISIBLE_DEVICES（默认 4,5）保持一致；调整池时同步修改
-      - /dev/davinci4
-      - /dev/davinci5
-      - /dev/davinci_manager
-      - /dev/devmm_svm
-      - /dev/hisi_hdc
     volumes:
       - ../src:/app/src:ro
       - ../scripts:/app/scripts:ro
@@ -128,16 +127,6 @@ services:
           create_host_path: false
       - ${MODEL_STORE_HOST_PATH:-/data1/models}:/models
       - ray-worker-temp:/tmp/ray
-      - /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro
-      - /usr/local/dcmi:/usr/local/dcmi:ro
-      - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro
-      - /usr/local/sbin:/usr/local/sbin:ro
-      - /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool:ro
-      # 非 root 枚举 NPU 必需：缺失时 HAL/dcmi 设备枚举 device_count=0，
-      # vLLM 模型自检子进程内 triton-ascend get_arch() 返回 NULL，
-      # 表现为 "Model architectures ['Qwen3_5ForConditionalGeneration'] failed to be inspected"。
-      - /var/dcmi:/var/dcmi
-      - /etc/ascend_install.info:/etc/ascend_install.info
     healthcheck:
       test: ["CMD-SHELL", "RAY_HEAD_IP=$$(python -c \"import socket; print(socket.gethostbyname('ray-head'))\"); ray status --address=$${RAY_HEAD_IP}:6379 >/dev/null 2>&1"]
       interval: 10s

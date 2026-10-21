@@ -105,7 +105,7 @@ runtime:
 
 ~~~bash
 export ASCEND_BASE_IMAGE=mineru:npu-latest
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
+export ASCEND_VISIBLE_DEVICES=0,1,2,3
 export MODEL_STORE_HOST_PATH=/data/models
 export APP_UID=10001
 export APP_GID=10001
@@ -113,7 +113,7 @@ export GATEWAY_WORKERS=2
 export SERVE_READY_TIMEOUT_SECONDS=900
 ~~~
 
-其中 ASCEND_RT_VISIBLE_DEVICES 是必须提供的变量；其他变量可以使用 Compose 或 Dockerfile 中的默认值，但生产部署建议显式设置模型目录和基础镜像。
+其中 ASCEND_VISIBLE_DEVICES 是必须提供的变量；其他变量可以使用 Compose 或 Dockerfile 中的默认值，但生产部署建议显式设置模型目录和基础镜像。
 
 ### 4.1 必填配置
 
@@ -121,15 +121,15 @@ export SERVE_READY_TIMEOUT_SECONDS=900
 
 Ascend 基础镜像名称。如果更换镜像，必须确认其中已经包含兼容的 Python、PyTorch、torch-npu、vLLM 和 vllm-ascend。不要让项目依赖安装覆盖镜像内置的 NPU 运行时。
 
-#### ASCEND_RT_VISIBLE_DEVICES
+#### ASCEND_VISIBLE_DEVICES
 
 指定 infer-nexus 使用的 NPU 池：
 
 ~~~bash
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
+export ASCEND_VISIBLE_DEVICES=0,1,2,3
 ~~~
 
-该变量同时影响容器和 Ray 可见的 NPU、Ray 注册的 NPU 资源数量，以及模型副本是否能够被调度。Compose 缺少该变量时 ray-worker 会退出。
+该变量由宿主机的 ascend-docker-runtime 接管：runtime 只把选中 NPU 的设备节点和宿主机驱动路径挂载进 ray-worker，并在宿主机配置 device cgroup 隔离。它同时决定容器可见的 NPU、Ray 注册的 NPU 资源数量，以及模型副本是否能够被调度。Compose 缺少该变量时 ray-worker 会退出。前置条件：宿主机已安装 ascend-docker-runtime 且 `docker info` 的 Runtimes 中含 `ascend`。
 
 #### MODEL_STORE_HOST_PATH
 
@@ -157,7 +157,6 @@ export MODEL_STORE_HOST_PATH=/data/models
 export GATEWAY_WORKERS=2
 export SERVE_READY_TIMEOUT_SECONDS=900
 export INFER_NEXUS_RAY_ADDRESS=ray-head:6379
-export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
 ~~~
 
 通常不需要修改 INFER_NEXUS_RAY_ADDRESS，Compose 默认会通过 ray-head 服务名连接 Ray。
@@ -269,26 +268,11 @@ npu_per_replica: 1
 
 ## 六、Ascend 设备和 CANN 路径
 
-当前 Compose 使用以下设备节点：
+设备与驱动路径由宿主机的 ascend-docker-runtime 注入：ray-worker 声明 `runtime: ascend` 并通过 `ASCEND_VISIBLE_DEVICES` 指定 NPU 池，runtime 在容器启动前挂载选中 NPU 的 `/dev/davinci*`、`/dev/davinci_manager`、`/dev/devmm_svm`、`/dev/hisi_hdc` 节点，以及 `/var/dcmi`、`/etc/ascend_install.info`、`/usr/local/Ascend/driver` 等宿主机驱动路径，并配置 device cgroup 隔离。此前手动维护的 devices 清单与驱动挂载已删除。
 
-~~~text
-/dev/davinci_manager
-/dev/devmm_svm
-/dev/hisi_hdc
-/dev/davinci*
-~~~
+前置条件：宿主机安装 ascend-docker-runtime 且 Docker 已注册该 runtime；若 `docker info` 的 Runtimes 中没有 `ascend`，需要先从 MindCluster 发布件安装。
 
-并挂载以下宿主机路径：
-
-~~~text
-/usr/local/Ascend/driver
-/usr/local/dcmi
-/usr/local/bin/npu-smi
-/usr/local/sbin
-/usr/local/Ascend/driver/tools/hccn_tool
-~~~
-
-如果学生机器的 CANN 安装路径不同，需要同步调整 ascend_deploy/docker-compose.yml。ray-worker 当前使用 privileged: true，Docker 环境必须允许特权容器。
+注意不要设置 ASCEND_RT_VISIBLE_DEVICES：当前 24.1.rc2 驱动 + CANN 9.1.0 栈上该变量本身会导致非 root NPU 枚举归零。runtime 不注入该变量（设备选择走挂载命名空间），ray-worker 启动脚本中保留 `unset` 防护 Ray 侧注入。
 
 ## 七、Dockerfile 和依赖
 
@@ -375,7 +359,7 @@ python scripts/smoke_chat_remote.py --base-url http://127.0.0.1:8000/v1 --model 
 
 | 现象 | 优先检查 |
 | --- | --- |
-| 缺少 ASCEND_RT_VISIBLE_DEVICES | 是否已在当前 Shell 中 export ASCEND_RT_VISIBLE_DEVICES |
+| 缺少 ASCEND_VISIBLE_DEVICES | 是否已在当前 Shell 中 export ASCEND_VISIBLE_DEVICES；宿主机 `docker info` 的 Runtimes 是否含 `ascend` |
 | ray-worker 退出 | NPU 设备节点、CANN 路径和 npu-smi info |
 | model_artifact_missing | MODEL_STORE_HOST_PATH、/models 和 model_path |
 | Serve 资源不足 | NPU 可见数量、gpu_per_replica 和副本数 |

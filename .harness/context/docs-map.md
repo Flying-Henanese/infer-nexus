@@ -82,7 +82,8 @@ their main target capabilities.
     `gateway` service.
   - It is superseded for current runtime behavior by `docs/ARCHITECTURE.md`,
     `docs/DEPLOYMENT_CHECKLIST.md`, and the checked-in Compose files. Current
-    Compose has only `ray-head`, `ray-worker`, and one-shot `serve-deployer`;
+    Compose has four services: one-shot `log-init`, `ray-head`, `ray-worker`,
+    and one-shot `serve-deployer`. `log-init` prepares host log directories;
     the Gateway is a Ray Serve deployment behind `ray-head:8000`.
 
 ## Debug Records

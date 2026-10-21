@@ -18,7 +18,7 @@ client
 -> local vllm / Ray Serve DeploymentHandle / vllm_openai_proxy
 ```
 
-`runtime/worker_client.py` defines a future runtime-worker isolation boundary, but `main.py` does not construct or inject a runtime-worker client. It is not an active execution path.
+`runtime/worker_client.py` defines a future runtime-worker isolation boundary, but `GatewayRuntime.create()` does not construct or inject a runtime-worker client. It is not an active execution path.
 
 Local `backend: vllm` models use Ray Serve deployments in serve mode:
 
@@ -36,8 +36,8 @@ Proxy models use `backend: vllm_openai_proxy` and are forwarded to an upstream O
 ## Startup And State
 
 - `src/infer_nexus/main.py` loads the selected settings file: `config/settings.yaml` by default, `config/settings.compose.yaml` in the root CUDA Compose flow, or `config/settings.ascend-compose.yaml` in the Ascend Compose flow.
-- The catalog is loaded from one configured YAML file, currently `config/models.yaml`.
-- `ModelRegistry`, `LocalModelStore`, `ServeApplicationBuilder`, `RuntimeExecutor`, `WorkerAdmissionController`, and `RuntimeDispatcher` are attached to `app.state`.
+- `GatewayRuntime.create()` in `src/infer_nexus/gateway_runtime.py` assembles the shared gateway dependencies and loads the catalog from one configured YAML file, currently `config/models.yaml`.
+- `GatewayRuntime.attach()` attaches settings, registry, model store, admission, load inspector, Serve builder, executor, worker admission, dispatcher, and the target table to `app.state`. For a Serve ingress, it also attaches the model-application readiness checker.
 - Platform APIs are currently read-only catalog/status/load/capacity views.
 - `control/reconciler.py` exists only as a skeleton.
 
@@ -59,7 +59,9 @@ client
 -> replica-local vLLM runtime
 ```
 
-Compose owns `ray-head`, `ray-worker`, and the one-shot `serve-deployer`.
+Compose owns four services: one-shot `log-init`, `ray-head`, `ray-worker`, and
+one-shot `serve-deployer`. `log-init` prepares host log directory ownership
+before the non-root runtime services start.
 Ray Serve owns the CPU-only public Gateway ingress plus model deployment and
 replica lifecycle after `serve-deployer` submits the applications.
 `ray-head:8000` is the Compose public API port; there is no separate Compose
@@ -77,7 +79,7 @@ settings files rather than request-path code.
   `ray-head:8000`) reached the Serve HTTP proxy, Gateway ingress, a vLLM model
   replica, and the HTTP/SSE response path. `/healthz`, `/readyz`, `/v1/models`,
   non-streaming chat, and streaming chat were checked.
-- The Ascend Compose file has the same three-service topology and the same
+- The Ascend Compose file has the same four-service topology and the same
   Gateway deployment path. Its Compose rendering and NPU resource mapping have
   been checked locally, but it has not yet received an end-to-end run on an
   Ascend host.
@@ -86,12 +88,14 @@ settings files rather than request-path code.
 
 - `infer-nexus` owns public HTTP ingress, model lookup, request validation, admission checks, proxying, and app-level metrics.
 - Ray Serve owns local deployment lifecycle, replica placement, replica routing, and Serve-level metrics.
+- `DeploymentFactory` passes model replica bounds and optional `deployment_config.autoscaling_config` overrides to Ray Serve. Native Serve autoscaling is wired; the project's inference-metric-driven `Scaler` remains scaffolding.
 - vLLM owns replica-local model execution for local models.
 - Cache affinity, when enabled, is configured through `config/models.yaml` deployment router settings such as `deployment_config.request_router_config.request_router_class`.
 - Upstream OpenAI-compatible servers own protocol behavior for proxy models.
 
 ## Implemented Runtime Protections
 
+- For the public Serve ingress, `/readyz` calls `GatewayRuntime.is_ready()` and returns 503 if a configured local model application is missing or unhealthy. This checks Serve application/deployment status; proxy upstream health and readiness-aware per-request admission are not connected. Direct Uvicorn debugging has no model-application readiness checker attached.
 - Process-local gateway worker admission is wired through `WorkerAdmissionMiddleware`.
 - Runtime executor has per-model guards, bounded queue settings, handle timeouts, stream idle/lifetime timeouts, and optional circuit breaker settings.
 - Serve deployment handles are cached by `(app_name, deployment_name)`.
@@ -154,7 +158,7 @@ settings files rather than request-path code.
   compatibility. A real Ascend run must prove that Ray actor allocation and
   `ASCEND_RT_VISIBLE_DEVICES` agree before multi-replica autoscaling is relied
   upon.
-- `AdmissionController.check_model_request()` is a no-op integration hook. Active protection currently comes from task/model validation, artifact checks, process-local worker admission, and `RuntimeExecutor` guards; readiness- and cluster-capacity-aware admission are not implemented.
+- `AdmissionController.check_model_request()` is a no-op integration hook. Active protection currently comes from task/model validation, artifact checks, process-local worker admission, and `RuntimeExecutor` guards; readiness- and cluster-capacity-aware per-request admission are not implemented. The Serve ingress `/readyz` check is separate from this hook.
 - The full unit suite is not green against the current catalog. Many API, dispatcher, runtime, and script tests still expect the previous three-model fixture and old aliases. See `.harness/checklists/verification.md` before interpreting full-suite failures.
 
 ## Out Of Current Scope

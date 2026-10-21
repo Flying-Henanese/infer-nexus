@@ -20,13 +20,17 @@ It exists to replace ad hoc per-user model deployments on shared servers with a 
 
 ## Source of Truth
 
-When there is ambiguity, use these priorities:
+For architectural decisions and required behavior, use these priorities:
 1. `docs/ARCHITECTURE.md`
 2. this `AGENTS.md`
 3. relevant files under `.harness/`
 4. local code and configuration conventions introduced in this repository
 
 Do not invent architecture that conflicts with `docs/ARCHITECTURE.md`.
+
+For current implementation status, verify against source and configuration,
+using `.harness/context/` as a navigation aid. A planned requirement does not
+imply that its implementation is complete.
 
 ## Harness Routing
 
@@ -40,13 +44,14 @@ This repository uses `.harness/` as a Codex collaboration workspace. Read only t
 - `.harness/context/model-config.md`: model catalog and `config/models.yaml` rules.
 - `.harness/context/monitoring-benchmark.md`: monitoring and benchmark baseline.
 - `.harness/checklists/verification.md`: verification checklist before claiming completion.
+- `.harness/workflows/remote-deploy-and-validate.md`: remote deployment and validation, using CUDA by default or the Ascend Compose configuration when selected.
 
 For complex design, refactor, debugging, or review tasks, start with the relevant `.harness/` context or rules file instead of loading every document.
 
 ## Always-On Guardrails
 
 - Keep models pre-registered in configuration unless the user explicitly changes Phase 1 scope.
-- Preserve one Ray Serve deployment per model and one shared accelerator pool.
+- Preserve one Ray Serve deployment per locally hosted model and one shared accelerator pool. Proxy-backed models use their configured upstream and create no local model deployment.
 - Treat accelerator visibility variables as platform pool boundaries, not per-model pinning.
 - Keep OpenAI-compatible inference APIs separate from native platform/control APIs.
 - Keep admission control explicit; do not hide readiness or overload behind generic timeouts.

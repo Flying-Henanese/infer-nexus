@@ -20,7 +20,12 @@ Use this file to choose the first source files to inspect. It is a navigation ma
 
 - `src/infer_nexus/main.py`
   - Reusable FastAPI app factory and host-specific lifespan wiring.
-  - Loads settings, catalog, model store, admission, Serve builder, runtime executor, worker admission, and dispatcher into `app.state`.
+  - Loads settings, optionally connects standalone Uvicorn to Ray, and delegates dependency assembly, attachment, and shutdown to `GatewayRuntime`.
+
+- `src/infer_nexus/gateway_runtime.py`
+  - Shared dependency assembly used by Uvicorn and Serve ingress replicas.
+  - `GatewayRuntime.create()` constructs the catalog, model store, admission, load inspector, Serve builder, executor, worker guard, and dispatcher.
+  - `attach()` populates `app.state`; `is_ready()` checks configured local model Serve applications for the public ingress.
 
 - `src/infer_nexus/api/`
   - HTTP surface.
@@ -29,6 +34,7 @@ Use this file to choose the first source files to inspect. It is a navigation ma
   - `health_routes.py`: `/healthz` and `/readyz`.
   - `metrics_routes.py`: `/metrics`.
   - `deps.py`: FastAPI dependency accessors for `app.state`.
+  - `request_logging_middleware.py`: outer HTTP request lifecycle, request IDs, structured terminal events, and request metrics through response-body completion.
   - `worker_admission_middleware.py`: process-local gateway worker admission middleware.
 
 - `src/infer_nexus/catalog/`
@@ -78,7 +84,7 @@ Use this file to choose the first source files to inspect. It is a navigation ma
   - Local model artifact resolution and validation.
 
 - `src/infer_nexus/auth/`
-  - API key helper code. Authentication is not the primary current focus.
+  - API key helper code; public route authentication enforcement is not wired.
 
 - `src/infer_nexus/artifacts/`
   - Model/artifact download helpers.
@@ -103,15 +109,16 @@ Use this file to choose the first source files to inspect. It is a navigation ma
 ## Container Runtimes
 
 - `docker-compose.yml`
-  - Defines `ray-head`, `ray-worker`, and one-shot `serve-deployer`; `ray-head:8000` exposes the Serve Gateway ingress.
+  - Defines four services: one-shot `log-init`, `ray-head`, `ray-worker`, and one-shot `serve-deployer`; `ray-head:8000` exposes the Serve Gateway ingress.
+  - `log-init` prepares host log directory ownership before non-root runtime services start.
   - Compose owns container lifecycle; Ray Serve owns deployment and replica lifecycle after apps are submitted.
 
 - `Dockerfile`
   - Builds the root CUDA-oriented shared runtime image.
 
 - `ascend_deploy/docker-compose.yml`
-  - Defines the same three Compose services as CUDA: `ray-head`, `ray-worker`,
-    and one-shot `serve-deployer`.
+  - Defines the same four Compose services as CUDA: one-shot `log-init`,
+    `ray-head`, `ray-worker`, and one-shot `serve-deployer`.
   - Registers custom Ray `NPU` resources from `ASCEND_RT_VISIBLE_DEVICES`; the
     public Gateway remains a CPU-only Serve deployment behind `ray-head:8000`.
 

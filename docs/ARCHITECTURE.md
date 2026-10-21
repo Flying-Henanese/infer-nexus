@@ -34,6 +34,10 @@ This document describes both the intended architecture and the current Phase 1
 implementation. Use this status summary to avoid treating planned control-plane
 features as already active behavior.
 
+Architectural requirements in this document remain normative. For current
+implementation status, verify against source/configuration and use
+`.harness/context/` to locate the relevant implementation.
+
 Implemented:
 - OpenAI-compatible chat, embeddings, and rerank routes.
 - Local `backend: vllm` dispatch through model-specific Ray Serve handles.
@@ -46,6 +50,14 @@ Implemented:
   production HTTP/SSE entrypoint. It reuses the FastAPI routes and resolves
   per-model handles from inside the Serve data plane; standalone Uvicorn remains
   a local debugging/stub entrypoint only.
+- For the public Serve ingress, `/readyz` checks configured local model
+  application/deployment health through `GatewayRuntime.is_ready()`. It returns
+  503 when an application is missing or unhealthy. Proxy upstream health is
+  not included, and direct Uvicorn debugging has no model-application checker.
+- Model `min_replicas`/`max_replicas` and optional
+  `deployment_config.autoscaling_config` overrides are passed to Ray Serve for
+  native replica autoscaling. The project's custom inference-metric controller
+  remains scaffolding.
 - Prometheus gateway metrics endpoint and core request, stream, runtime-guard,
   worker-admission, and Serve-handle metrics.
 - Structured application logging is configured per process role. Local settings
@@ -78,12 +90,12 @@ Skeleton or partial:
   the public routes.
 
 Not implemented:
-- Dependency-aware readiness checks.
+- Proxy upstream health checks and readiness-aware per-request admission.
 - Dynamic model registration.
 - Full runtime-state enrichment in platform model APIs.
 - Proxy hardening such as upstream allowlist enforcement, request body size
   limits, and full client `Authorization` forwarding policy.
-- Automatic replica scaling or deployment reconciliation loops.
+- Custom inference-metric-driven replica scaling and deployment reconciliation loops.
 
 ## 2. Design Principles
 
@@ -138,6 +150,7 @@ graph TD
     G[scripts/run_gateway.py]
     R[scripts/run_serve_runtime.py]
     M[src/infer_nexus/main.py]
+    GR[src/infer_nexus/gateway_runtime.py]
   end
 
   subgraph API[HTTP API 层]
@@ -190,14 +203,15 @@ graph TD
   M --> OA
   M --> PA
   M --> HZ
-  M --> CL
-  M --> CR
-  M --> AC
-  M --> LI
-  M --> SA
-  M --> RD
-  M --> RE
-  M --> MS
+  M --> GR
+  GR --> CL
+  GR --> CR
+  GR --> AC
+  GR --> LI
+  GR --> SA
+  GR --> RD
+  GR --> RE
+  GR --> MS
   M --> CFG
 
   OA --> D
@@ -241,7 +255,10 @@ graph TD
 - Separates OpenAI-compatible APIs from platform-native APIs
 - Has API key helper code, but route-level authentication enforcement remains
   `待实现`
-- Applies model readiness checks and the skeleton admission hook before dispatch
+- Validates local model artifacts and calls the skeleton model-level admission
+  hook before dispatch
+- Uses `GatewayRuntime` for shared dependency assembly and Serve ingress
+  readiness checks
 - Applies gateway-local runtime guards inside `RuntimeExecutor` for configured
   model concurrency, queue, stream timeout, and circuit breaker limits
 
@@ -266,8 +283,10 @@ graph TD
   cluster and model load inspection APIs remain `待实现`
 
 #### Scaling Policy Layer
-- Uses inference-related metrics such as queue length, TTFT, and latency
-- Adjusts deployment replica counts within configured limits (`待实现`)
+- The project's `Scaler` and `ScalingPolicy` are scaffolding for future policy
+  execution using queue length, TTFT, and latency (`待实现`)
+- Native Ray Serve autoscaling is already configured through model replica
+  bounds and optional deployment autoscaling overrides
 
 #### Ray Serve Runtime
 - Owns deployment lifecycle and replica management
@@ -366,12 +385,14 @@ The application architecture should remain platform-neutral. Accelerator-specifi
 behavior belongs at the deployment configuration layer: the container image,
 Compose service settings, runtime environment variables, and `config/settings*.yaml`.
 
-The current root `dockerfile` and `docker-compose.yml` describe the default
+The current root `Dockerfile` and `docker-compose.yml` describe the default
 containerized runtime path:
-- `dockerfile` builds a shared runtime image from configurable base image args,
+- `Dockerfile` builds a shared runtime image from configurable base image args,
   with CUDA base images as the checked-in defaults.
-- `docker-compose.yml` defines `ray-head`, `ray-worker`, and one-shot
-  `serve-deployer` services. The Ray head exposes the Serve HTTP proxy on 8000.
+- `docker-compose.yml` defines four services: one-shot `log-init`, `ray-head`,
+  `ray-worker`, and one-shot `serve-deployer`. `log-init` prepares host log
+  directory ownership before non-root runtime services start. The Ray head
+  exposes the Serve HTTP proxy on 8000.
 - `config/settings.compose.yaml` is the Compose settings entrypoint.
 - `ray-worker` derives the Ray accelerator budget from `CUDA_VISIBLE_DEVICES`
   and starts Ray with the matching `--num-gpus` value.
@@ -379,6 +400,14 @@ containerized runtime path:
   CPU only and do not own accelerator scheduling.
 - The runtime image carries the Python environment, while source files,
   configuration, docs, and model storage are mounted into the containers.
+
+The checked-in Ascend alternative uses `ascend_deploy/dockerfile`,
+`ascend_deploy/docker-compose.yml`, and
+`config/settings.ascend-compose.yaml` with the same four service roles. Its
+worker registers custom Ray `NPU` resources from `ASCEND_RT_VISIBLE_DEVICES`.
+CUDA remains the default remote deployment target; select the Ascend Compose
+file explicitly for an Ascend host. The shared delivery sequence is documented
+in `.harness/workflows/remote-deploy-and-validate.md`.
 
 The same program logic should be usable with another accelerator platform by
 changing the image, Compose/service wiring, and settings files, not by adding
@@ -792,15 +821,16 @@ Current implementation note:
 
 Platform-specific runtime dependencies are intentionally packaged outside the
 application control flow. The current root container path uses a shared runtime
-image for `ray-head`, `ray-worker`, and `serve-deployer`, with service
+image for `log-init`, `ray-head`, `ray-worker`, and `serve-deployer`, with service
 roles selected by Compose commands and settings.
 
 Current root files:
-- `dockerfile` builds from configurable builder/runtime base images; the checked-in
+- `Dockerfile` builds from configurable builder/runtime base images; the checked-in
   defaults are CUDA base images and the image contains the Python environment
   under `/app/.venv`
-- `docker-compose.yml` starts `ray-head`, `ray-worker`, and one-shot
-  `serve-deployer`; `ray-head:8000` is the public Serve proxy
+- `docker-compose.yml` runs one-shot `log-init`, starts `ray-head` and
+  `ray-worker`, and submits applications through one-shot `serve-deployer`;
+  `ray-head:8000` is the public Serve proxy
 - `config/settings.compose.yaml` is passed to `serve-deployer` and injected
   into Gateway ingress replicas through Ray's runtime environment
 - `docker-compose.yml` mounts model storage and the working tree content needed
@@ -899,9 +929,12 @@ Cluster-level signals:
 - recent rejection pressure
 
 ### Admission outcomes
-- admit request
-- reject with `429 Too Many Requests` (`待实现`)
-- reject with `503 Service Unavailable` (`待实现`)
+The model-level admission policy should admit requests or reject them explicitly
+with `429 Too Many Requests` or `503 Service Unavailable`, depending on the
+reason. That policy remains a skeleton. Existing per-model runtime guard
+rejections are mapped to HTTP 429 by the OpenAI-compatible routes. Worker
+admission and the outer Serve queue reject overload with HTTP 503; the Serve
+ingress readiness probe also returns 503 for unavailable local model applications.
 
 ### Error scenarios to encode clearly
 - unknown model
@@ -917,9 +950,15 @@ This is preferable to accepting every request and failing later with long timeou
 Phase 1 scaling should be driven by inference-oriented metrics, not just low-level infrastructure metrics.
 
 Current implementation status:
-- scaling controller logic: `待实现`
-- automatic replica adjustment wiring: `待实现`
-- threshold configuration fields exist, but policy execution is not connected yet
+- `DeploymentFactory` supplies model `min_replicas`, `max_replicas`, and
+  `deployment_config.autoscaling_config` overrides to `serve.deployment`.
+  Ray Serve owns native replica autoscaling within those configured bounds.
+- The project's custom `Scaler`/`ScalingPolicy` execution and inference-metric
+  feedback loop remain `待实现`; scheduler threshold settings are not connected
+  to that loop.
+- Passing autoscaling configuration does not establish that all configured
+  replicas fit the accelerator pool. Target-host scaling and capacity
+  validation are still required.
 
 ### Primary scaling signals
 - `queue_length`
@@ -1153,7 +1192,10 @@ src/
       openai_routes.py
       platform_routes.py
       health_routes.py
+      metrics_routes.py
       deps.py
+      request_logging_middleware.py
+      worker_admission_middleware.py
     auth/
       api_keys.py
     backends/
@@ -1180,6 +1222,8 @@ src/
       executor.py
       handles.py
       serve_app.py
+      gateway_ingress.py
+      request_id_proxy_middleware.py
       types.py
     observability/
       metrics.py
@@ -1189,12 +1233,18 @@ src/
       enums.py
       errors.py
       schemas.py
+    gateway_runtime.py
     main.py
 config/
   settings.yaml
+  settings.compose.yaml
+  settings.ascend-compose.yaml
   models.yaml
 docker-compose.yml
-dockerfile
+Dockerfile
+ascend_deploy/
+  docker-compose.yml
+  dockerfile
 pyproject.toml
 tests/
 scripts/
@@ -1213,6 +1263,8 @@ scripts/
 - `backends/vllm_native/` isolates compatibility-sensitive vLLM native serving
   wrappers from the local best-effort engine paths
 - `observability/` centralizes metrics and logging concerns
+- `gateway_runtime.py` assembles shared HTTP gateway dependencies, attaches
+  application state, and checks local model Serve application readiness
 
 ## 17. Phase 1 Implementation Scope
 
@@ -1224,8 +1276,10 @@ Phase 1 should implement only the minimum platform needed to replace ad hoc pers
 - OpenAI-compatible chat, embeddings, and rerank APIs
 - native model discovery APIs
 - native load inspection APIs
-- basic admission control (`待实现`)
-- metric-driven autoscaling hooks (`待实现`)
+- basic admission control (local guards are implemented; readiness- and
+  cluster-capacity-aware per-request decisions remain `待实现`)
+- metric-driven autoscaling hooks (native Serve autoscaling configuration is
+  wired; the project's inference-metric policy execution remains `待实现`)
 - Prometheus metrics integration for gateway/runtime guard paths
 - API key authentication (`待实现`)
 

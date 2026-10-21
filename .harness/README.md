@@ -25,3 +25,4 @@ Files under `context/` describe the checked-in implementation and configuration 
 - `rules/interface-rules.md`: config, API, metrics, and error rules.
 - `rules/delivery-rules.md`: implementation sequence and acceptance criteria.
 - `checklists/verification.md`: practical verification checklist for Codex work.
+- `workflows/remote-deploy-and-validate.md`: remote CUDA deployment by default, with an explicit Ascend Compose alternative.

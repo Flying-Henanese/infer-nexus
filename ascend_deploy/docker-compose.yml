@@ -64,7 +64,13 @@ services:
       - ../scripts:/app/scripts:ro
       - ../docs:/app/docs:ro
       - ../README.md:/app/README.md:ro
-      - ../config:/app/config:ro
+      # 源目录缺失时启动直接报错，而不是自动创建空目录遮蔽仓库内配置
+      - type: bind
+        source: ../config
+        target: /app/config
+        read_only: true
+        bind:
+          create_host_path: false
       - ${MODEL_STORE_HOST_PATH:-/data1/models}:/models
       - ray-head-temp:/tmp/ray
     healthcheck:
@@ -131,7 +137,13 @@ services:
       - ../scripts:/app/scripts:ro
       - ../docs:/app/docs:ro
       - ../README.md:/app/README.md:ro
-      - ../config:/app/config:ro
+      # 源目录缺失时启动直接报错，而不是自动创建空目录遮蔽仓库内配置
+      - type: bind
+        source: ../config
+        target: /app/config
+        read_only: true
+        bind:
+          create_host_path: false
       - ${MODEL_STORE_HOST_PATH:-/data1/models}:/models
       - ray-worker-temp:/tmp/ray
       - /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro
@@ -185,7 +197,13 @@ services:
       - ../scripts:/app/scripts:ro
       - ../docs:/app/docs:ro
       - ../README.md:/app/README.md:ro
-      - ../config:/app/config:ro
+      # 源目录缺失时启动直接报错，而不是自动创建空目录遮蔽仓库内配置
+      - type: bind
+        source: ../config
+        target: /app/config
+        read_only: true
+        bind:
+          create_host_path: false
       - ${MODEL_STORE_HOST_PATH:-/data1/models}:/models
       - ray-deployer-temp:/tmp/ray
     restart: "no"

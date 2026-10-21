@@ -78,7 +78,12 @@ replica lifecycle after `serve-deployer` submits the applications.
 Uvicorn gateway service in Serve mode. Only `ray-head` and `ray-worker` remain
 running after the deployment job exits successfully. The CUDA worker registers
 GPU resources derived from `CUDA_VISIBLE_DEVICES`; the Ascend worker registers
-custom `NPU` resources derived from `ASCEND_RT_VISIBLE_DEVICES`.
+custom `NPU` resources derived from the visible `/dev/davinci` nodes. The
+repo-root drawbridge variant selects its pool with `ASCEND_VISIBLE_DEVICES`
+via the host's ascend-docker-runtime (`runtime: ascend` mounts only the pooled
+nodes plus driver paths, with device cgroup isolation);
+`ascend_deploy/docker-compose.yml` still exposes devices through its manual
+`devices:` list and driver bind mounts.
 Platform-specific accelerator details stay in image, Compose, environment, and
 settings files rather than request-path code.
 

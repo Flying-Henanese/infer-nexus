@@ -54,6 +54,8 @@ ARG PYTHON_VERSION
 ARG APP_USER
 ARG APP_UID
 ARG APP_GID
+# 运行时入口脚本按用户名降权（docker/entrypoint.sh），需要在镜像内固化
+ENV APP_USER=${APP_USER}
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -94,6 +96,11 @@ RUN groupadd --gid ${APP_GID} ${APP_USER} \
 WORKDIR /app
 
 COPY --from=builder --chown=${APP_UID}:${APP_GID} /app/.venv /app/.venv
+
+# 入口脚本：以 root 启动时校正 /tmp/ray 命名卷属主后经 setpriv 降权到 APP_USER
+COPY --chmod=0755 docker/entrypoint.sh /usr/local/bin/infer-nexus-entrypoint
+
+ENTRYPOINT ["/usr/local/bin/infer-nexus-entrypoint"]
 
 USER ${APP_USER}
 

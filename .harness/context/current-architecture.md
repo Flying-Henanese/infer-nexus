@@ -134,9 +134,10 @@ settings files rather than request-path code.
   CLI/bootstrap output at `.infer-nexus/logs/ray_bootstrap.log` and
   `.infer-nexus/logs/serve_runtime.log`. Compose uses distinct named volumes
   `ray-head-temp`, `ray-worker-temp`, and `ray-deployer-temp` at `/tmp/ray`.
-  Named volumes keep the ownership of their first population, so a one-shot
-  root service `ray-tmp-init` re-aligns all three to the image's `infer-nexus`
-  user before `ray-head` starts (otherwise `ray start` fails with
+  Named volumes keep the ownership of their first population, so services start
+  as root and the image entrypoint (`docker/entrypoint.sh`) re-aligns each
+  service's own volume to the image's `infer-nexus` user before dropping to it
+  via `setpriv` (otherwise `ray start` fails with
   `Permission denied: /tmp/ray/ray_current_cluster`).
 
 ## Known Checked-in Integration Gaps

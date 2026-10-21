@@ -149,7 +149,7 @@ export MODEL_STORE_HOST_PATH=/data/models
 
 容器默认以非 root 用户 infer-nexus 运行。模型目录至少要可读，日志目录需要可写。遇到权限错误时，调整这两个值或修改宿主机目录权限。
 
-调整 APP_UID/APP_GID 后需要重建镜像并重新 `up`。`/tmp/ray` 命名卷的属主只取决于首次填充，不会随镜像重建更新；Compose 中的 `ray-tmp-init` 一次性服务会在 ray-head 启动前以 root 把三个 `/tmp/ray` 卷的属主校正回镜像内的 infer-nexus 用户，因此调整 UID 后无需 `down -v` 清卷。
+调整 APP_UID/APP_GID 后需要重建镜像并重新 `up`。`/tmp/ray` 命名卷的属主只取决于首次填充，不会随镜像重建更新；服务在 Compose 中以 root 启动，由镜像入口脚本（`docker/entrypoint.sh`）在每次启动时把本服务的 `/tmp/ray` 卷属主校正回镜像内用户，再经 `setpriv` 降权到 infer-nexus 执行命令，因此调整 UID 后无需 `down -v` 清卷。调试 `exec` 进容器时请显式带 `--user infer-nexus`，避免以 root 写 `/tmp/ray` 再次污染卷属主。
 
 ### 4.2 可选配置
 
@@ -382,7 +382,7 @@ python scripts/smoke_chat_remote.py --base-url http://127.0.0.1:8000/v1 --model 
 | vLLM 初始化失败 | 基础镜像、CANN、torch-npu、vLLM 和 vllm-ascend 版本 |
 | Gateway 健康但推理失败 | serve-deployer 日志和模型配置 |
 | 容器权限错误 | APP_UID、APP_GID 及目录权限 |
-| ray-head 报 `Permission denied: /tmp/ray/ray_current_cluster` | `ray-head-temp` 等命名卷属主与容器内 infer-nexus 不一致；重新 `up -d` 让 `ray-tmp-init` 校正卷属主即可，不要以 root 身份 exec 进容器写 `/tmp/ray` |
+| ray-head 报 `Permission denied: /tmp/ray/ray_current_cluster` | `ray-head-temp` 等命名卷属主与容器内 infer-nexus 不一致；入口脚本会在每次启动时自动校正，若仍出现说明用的是没有入口脚本的旧镜像，需重建镜像后重新 `up -d`。调试 exec 请带 `--user infer-nexus`，不要以 root 写 `/tmp/ray` |
 
 ## 十一、首次部署验收标准
 

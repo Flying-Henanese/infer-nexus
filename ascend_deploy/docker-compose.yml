@@ -15,30 +15,13 @@ x-infer-nexus-image: &infer-nexus-image
       APP_GID: ${APP_GID:-1005}
 
 services:
-  # /tmp/ray 的命名卷只保留首次填充时的属主：镜像重建或 APP_UID/APP_GID 调整都
-  # 不会更新已有卷，root 调试容器写入的文件也会留在卷里。属主与 infer-nexus 不一致时，
-  # ray start 会在写 /tmp/ray/ray_current_cluster 时报 Permission denied。
-  # 该一次性 init 以 root 把三个卷的属主校正回镜像内的 infer-nexus 用户。
-  ray-tmp-init:
-    <<: *infer-nexus-image
-    user: "0"
-    logging: *container-log-rotation
-    restart: "no"
-    command:
-      - bash
-      - -lc
-      - chown -R infer-nexus:infer-nexus /fix/ray-head /fix/ray-worker /fix/ray-deployer
-    volumes:
-      - ray-head-temp:/fix/ray-head
-      - ray-worker-temp:/fix/ray-worker
-      - ray-deployer-temp:/fix/ray-deployer
-
+  # 服务均以 root 启动，由镜像入口脚本（docker/entrypoint.sh）先校正各自 /tmp/ray
+  # 命名卷的属主（命名卷属主只在首次填充时确定，镜像换 UID 或 root 调试会留下错误属主），
+  # 再经 setpriv 降权到 infer-nexus 执行命令；compose 注入的补充组（设备组）会保留。
+  # 调试 exec 进容器请带 --user infer-nexus，避免以 root 写 /tmp/ray 再次污染卷属主。
   ray-head:
     <<: *infer-nexus-image
-    user: infer-nexus
-    depends_on:
-      ray-tmp-init:
-        condition: service_completed_successfully
+    user: "0"
     logging: *container-log-rotation
     command:
       - bash
@@ -83,9 +66,9 @@ services:
 
   ray-worker:
     <<: *infer-nexus-image
-    user: infer-nexus
+    user: "0"
     logging: *container-log-rotation
-    # 用户添加到设备组
+    # 用户添加到设备组（入口脚本降权时经 setpriv --keep-groups 保留）
     group_add:
        - "${ASCEND_DEVICE_GID:-1003}"
     # 不使用 privileged：NPU 池边界由 ASCEND_RT_VISIBLE_DEVICES + 下方 devices 可见性共同定义，
@@ -137,7 +120,6 @@ services:
       - ../scripts:/app/scripts:ro
       - ../docs:/app/docs:ro
       - ../README.md:/app/README.md:ro
-      # 源目录缺失时启动直接报错，而不是自动创建空目录遮蔽仓库内配置
       - type: bind
         source: ../config
         target: /app/config
@@ -166,7 +148,7 @@ services:
 
   serve-deployer:
     <<: *infer-nexus-image
-    user: infer-nexus
+    user: "0"
     logging: *container-log-rotation
     environment: *ray-logging-environment
     depends_on:
@@ -197,7 +179,6 @@ services:
       - ../scripts:/app/scripts:ro
       - ../docs:/app/docs:ro
       - ../README.md:/app/README.md:ro
-      # 源目录缺失时启动直接报错，而不是自动创建空目录遮蔽仓库内配置
       - type: bind
         source: ../config
         target: /app/config
